@@ -39,7 +39,6 @@ def regularize_text(text: str) -> str:
         "—": "-",  # Em dash to hyphen
         "–": "-",  # En dash to hyphen
         "−": "-",  # Minus sign to hyphen
-        "--": "-",  # Double hyphen to single hyphen. Since long dashes may be represented as multiple hyphens, this can help clean them up.
         "O0": "0",  # Common OCR misread of 'O' as '0'
         "OO": "0",  # Common OCR misread of 'OO' as '0'
         "0O": "0",  # Common OCR misread of '0O' as '0'

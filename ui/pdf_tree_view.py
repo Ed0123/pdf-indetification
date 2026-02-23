@@ -85,6 +85,7 @@ class PDFTreeView(QWidget):
         self.tree.setIndentation(20)
         # Single-click should only change selection so the user can multi-select
         # without changing the currently displayed page. Viewing happens on double-click.
+        self.tree.itemClicked.connect(self._on_item_clicked)
         self.tree.itemDoubleClicked.connect(self._on_item_double_clicked)
         self.tree.itemSelectionChanged.connect(self._on_selection_changed)
         
@@ -199,6 +200,13 @@ class PDFTreeView(QWidget):
             return None
         
         return (file_path, page_num)
+
+
+    def _on_item_clicked(self, item: QTreeWidgetItem, column: int) -> None:
+        """Handle single-click selection without emitting page_selected."""
+        # Intentionally no-op: single click updates selection state via QTreeWidget
+        # and should not trigger page display changes.
+        return None
 
 
     def _on_item_double_clicked(self, item: QTreeWidgetItem, column: int) -> None:

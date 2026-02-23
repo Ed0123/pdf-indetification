@@ -23,6 +23,14 @@ project_root = os.path.dirname(os.path.abspath(__file__))
 if project_root not in sys.path:
     sys.path.insert(0, project_root)
 
+# Use offscreen Qt backend automatically in headless environments
+if (
+    "QT_QPA_PLATFORM" not in os.environ
+    and not os.environ.get("DISPLAY")
+    and not os.environ.get("WAYLAND_DISPLAY")
+):
+    os.environ["QT_QPA_PLATFORM"] = "offscreen"
+
 from PyQt5.QtWidgets import QApplication
 from PyQt5.QtCore import Qt
 from PyQt5.QtGui import QFont
@@ -59,7 +67,7 @@ def main():
             padding: 4px 8px;
             border-radius: 3px;
             border: 1px solid transparent;
-        }
+        }0
         QToolBar QToolButton:hover {
             background-color: #E0E0E0;
             border: 1px solid #CCC;

@@ -1,69 +1,132 @@
-# PDF Text Extraction Tool
+# PDF Text Extraction Tool — Web App
 
-A desktop application for extracting structured text data from PDF files using vector text extraction with OCR fallback, built with Python and PyQt5.
+A browser-based PDF text extraction tool that lets you import PDFs, draw extraction boxes, run OCR, and export results to Excel.
+
+Built with **React + Vite** (frontend) and **FastAPI + PyMuPDF** (backend), deployable to **Firebase Hosting** (frontend) + **Google Cloud Run** (backend).
+
+---
+
+## Architecture
+
+```
+┌──────────────────────────────┐        ┌────────────────────────────────┐
+│  Firebase Hosting             │  HTTP  │  Google Cloud Run              │
+│  React + Vite (TypeScript)   │ ──────▶│  FastAPI + PyMuPDF + Tesseract │
+│  frontend/                   │        │  backend/                      │
+└──────────────────────────────┘        └────────────────────────────────┘
+```
+
+---
+
+## Local Development
+
+### 1. Start the backend
+
+```bash
+pip install -r backend/requirements.txt
+python -m uvicorn backend.main:app --reload --port 8000
+```
+
+### 2. Start the frontend
+
+```bash
+cd frontend
+npm install
+npm run dev   # opens http://localhost:5173
+```
+
+Vite proxies `/api/*` → `http://localhost:8000` automatically during dev.
+
+---
+
+## Deploy to Firebase + Cloud Run
+
+### Prerequisites
+
+```bash
+npm install -g firebase-tools
+# Install Google Cloud SDK: https://cloud.google.com/sdk/docs/install
+```
+
+### One-command deploy
+
+```bash
+chmod +x deploy.sh
+./deploy.sh YOUR_GCP_PROJECT_ID asia-east1
+```
+
+### Manual steps
+
+```bash
+# 1. Deploy backend to Cloud Run
+gcloud run deploy pdf-backend --source . --region asia-east1 --allow-unauthenticated
+
+# 2. Build frontend with Cloud Run URL
+cd frontend
+VITE_API_URL=https://pdf-backend-xxxx-xx.a.run.app npm run build
+cd ..
+
+# 3. Set your Firebase project ID in .firebaserc, then deploy frontend
+firebase deploy --only hosting --project YOUR_PROJECT_ID
+```
+
+---
 
 ## Features
 
-- **Batch PDF import** — Scan an entire folder tree and import all PDF files at once
-- **Interactive box drawing** — Draw extraction regions on PDF pages to define what text to capture
-- **Vector + OCR extraction** — Uses PyMuPDF vector text first; automatically falls back to Tesseract OCR for scanned pages
-- **Custom data columns** — Define any number of named extraction columns (e.g. Title, Date, Reference No.)
-- **Project save/load** — Save all box positions, extracted data, and settings to a JSON file and reload later
-- **Excel export** — Export all data to a formatted `.xlsx` file with two sheets: PDF File List and PDF Page List
-- **3-column UI** — PDF tree view | Data table | PDF page viewer with zoom, pan, and box editing
-  - Page selection behaviour: single-click changes selection only (so you can Ctrl/Shift multi-select pages); **double-click** a page in the PDF Page List to open it in the viewer.
+| Feature | Description |
+|---|---|
+| Import PDFs | Upload PDF files from your browser |
+| PDF Tree View | Collapsible file/page tree with Expand All / Collapse All |
+| Extraction Boxes | Draw boxes on PDF pages to define extraction regions |
+| Data Table | View/edit extracted text; sortable, filterable, custom columns |
+| Single Page Data Table | Per-page quick editor with page/template navigation |
+| Recognize Text | PyMuPDF vector extraction + Tesseract OCR fallback |
+| Template Management | Save/apply/update extraction templates across pages |
+| Google Login & Account | Firebase-authenticated login and account profile page |
+| Admin Panel | User status/tier/group management + usage reset + group management |
+| Save / Load | Persist project state as JSON |
+| Export Excel | Download extracted data as `.xlsx` |
 
-## Requirements
-
-- Python 3.8 or later
-- Tesseract OCR (optional, required for OCR fallback on scanned PDFs)
-  - Windows: https://github.com/UB-Mannheim/tesseract/wiki
-  - macOS: `brew install tesseract`
-  - Linux: `sudo apt install tesseract-ocr`
-
-## Installation
-
-```bash
-pip install -r requirements.txt
-```
-
-## Usage
-
-```bash
-python main.py
-```
+---
 
 ## Project Structure
 
 ```
-main.py                  Application entry point
-requirements.txt         Python dependencies
-models/
-    data_models.py       Dataclasses: BoxInfo, PageData, PDFFileInfo, ProjectData
-ui/
-    main_window.py       Main window, toolbar actions, worker threads
-    pdf_tree_view.py     1st column — PDF file/page tree
-    data_table.py        2nd column — Extracted data table
-    pdf_viewer.py        3rd column — PDF page viewer with box drawing
-utils/
-    pdf_processing.py    PDF open, render, text extract, OCR helpers
-    excel_export.py      Excel workbook generation
-Test/
-    conftest.py          Shared pytest fixtures
-    test_*.py            Unit/integration test suites
-documentation/
-    specification.md     Feature specification
-    documentation.html   Full interactive HTML documentation
-    review_2026-02-18.md Code review report
+├── backend/                 FastAPI backend
+│   ├── main.py
+│   ├── requirements.txt
+│   └── routers/             pdf.py · project.py · export.py
+├── frontend/                React + Vite frontend
+│   └── src/
+│       ├── App.tsx
+│       ├── components/      Toolbar · PDFTreeView · DataTable · PDFViewer · StatusBar
+│       ├── hooks/useProject.ts
+│       ├── api/client.ts
+│       └── types/index.ts
+├── frontend-dist/           Built frontend (generated; not committed)
+├── models/                  Shared Python data models
+├── utils/                   PDF processing + Excel export utilities
+├── Test/                    pytest test suite (94 tests)
+├── Dockerfile               Cloud Run container
+├── firebase.json            Firebase Hosting config
+├── deploy.sh                One-command deploy script
+└── .firebaserc              Firebase project reference
 ```
+
+---
 
 ## Running Tests
 
 ```bash
-pytest Test/
+QT_QPA_PLATFORM=offscreen python -m pytest -q
 ```
 
-## Notes
+---
 
-- Project JSON files store **absolute file paths**. They are not portable across machines.
-- The `requirements.txt` uses `>=` constraints for flexibility. For fully reproducible builds, pin exact versions with `pip freeze > requirements-lock.txt`.
+## Environment Variables
+
+| Variable | Where | Description |
+|---|---|---|
+| `VITE_API_URL` | Frontend build | Cloud Run URL (empty = Vite proxy in dev) |
+| `PORT` | Backend | Listen port (Cloud Run sets this automatically to 8080) |
