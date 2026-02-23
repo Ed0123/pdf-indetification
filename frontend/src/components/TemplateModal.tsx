@@ -13,7 +13,7 @@ import React, { useState, useEffect, useRef } from "react";
 import type { Template, TemplateBox, PDFFileInfo } from "../types";
 import { ConfirmDialog } from "./ConfirmDialog";
 import { PageSelectorModal, type SelectedPage } from "./PageSelectorModal";
-import { renderPage } from "../api/client";
+import { renderPage, getTemplatePageImageUrl } from "../api/client";
 
 // Fixed color palette for boxes
 export const BOX_COLORS = [
@@ -77,13 +77,26 @@ export function TemplateModal({
     setMode("view");
   }, [selectedId]); // eslint-disable-line react-hooks/exhaustive-deps
 
-  // Load thumbnail when selection changes
+  // Load thumbnail when selection changes — try local PDF first, then cloud
   useEffect(() => {
-    if (!selected?.preview_file_id) { setThumbSrc(null); return; }
-    renderPage(selected.preview_file_id, selected.preview_page, 1.0)
-      .then((b64) => setThumbSrc(`data:image/png;base64,${b64}`))
-      .catch(() => setThumbSrc(null));
-  }, [selected?.preview_file_id, selected?.preview_page]);
+    if (!selected) { setThumbSrc(null); return; }
+    if (selected.preview_file_id) {
+      // Local PDF is still loaded in memory — render from it
+      renderPage(selected.preview_file_id, selected.preview_page, 1.0)
+        .then((b64) => setThumbSrc(`data:image/png;base64,${b64}`))
+        .catch(() => tryCloudImage());
+    } else {
+      tryCloudImage();
+    }
+    function tryCloudImage() {
+      getTemplatePageImageUrl(selected!.id)
+        .then((res) => {
+          if (res.url) setThumbSrc(res.url);
+          else setThumbSrc(null);
+        })
+        .catch(() => setThumbSrc(null));
+    }
+  }, [selected?.id, selected?.preview_file_id, selected?.preview_page]);
 
   // Draw boxes on canvas whenever thumbnail or boxes change
   useEffect(() => {

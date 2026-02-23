@@ -266,6 +266,7 @@ export interface CloudTemplateBox {
   y: number;
   width: number;
   height: number;
+  color: string;
 }
 
 export interface CloudTemplate {
@@ -273,8 +274,10 @@ export interface CloudTemplate {
   owner_uid: string;
   name: string;
   boxes: CloudTemplateBox[];
+  notes: string;
   permission: "personal" | "public" | "group";
   preview_image: string;
+  page_image_path: string;
   group: string;
   created_at: string;
   updated_at: string;
@@ -287,7 +290,14 @@ export async function listCloudTemplates(): Promise<CloudTemplate[]> {
 
 /** Create a new cloud template. */
 export async function createCloudTemplate(
-  data: { name: string; boxes: CloudTemplateBox[]; permission?: string; preview_image?: string; group?: string }
+  data: {
+    name: string;
+    boxes: CloudTemplateBox[];
+    notes?: string;
+    permission?: string;
+    preview_image?: string;
+    group?: string;
+  }
 ): Promise<CloudTemplate> {
   return request<CloudTemplate>("/api/templates/", {
     method: "POST",
@@ -299,7 +309,14 @@ export async function createCloudTemplate(
 /** Update an existing cloud template. */
 export async function updateCloudTemplate(
   id: string,
-  data: { name?: string; boxes?: CloudTemplateBox[]; permission?: string; preview_image?: string; group?: string }
+  data: {
+    name?: string;
+    boxes?: CloudTemplateBox[];
+    notes?: string;
+    permission?: string;
+    preview_image?: string;
+    group?: string;
+  }
 ): Promise<CloudTemplate> {
   return request<CloudTemplate>(`/api/templates/${id}`, {
     method: "PUT",
@@ -311,4 +328,28 @@ export async function updateCloudTemplate(
 /** Delete a cloud template. */
 export async function deleteCloudTemplate(id: string): Promise<void> {
   await request<{ deleted: string }>(`/api/templates/${id}`, { method: "DELETE" });
+}
+
+/** Upload a page image (base64 PNG) for a template to Cloud Storage. */
+export async function uploadTemplatePageImage(
+  templateId: string,
+  base64Png: string
+): Promise<{ path: string; template_id: string }> {
+  return request<{ path: string; template_id: string }>(
+    `/api/templates/${templateId}/page-image-b64`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ image: base64Png }),
+    }
+  );
+}
+
+/** Get a (signed) URL for the page image of a template. */
+export async function getTemplatePageImageUrl(
+  templateId: string
+): Promise<{ url: string; source: string }> {
+  return request<{ url: string; source: string }>(
+    `/api/templates/${templateId}/page-image`
+  );
 }

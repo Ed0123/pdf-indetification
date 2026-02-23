@@ -14,6 +14,7 @@ import logging
 
 _app = None
 _db = None
+_bucket = None
 _DEV_MODE = os.getenv("DEV_MODE", "").strip() in ("1", "true", "yes")
 
 logger = logging.getLogger(__name__)
@@ -103,13 +104,19 @@ def init_firebase():
     import firebase_admin
     from firebase_admin import credentials, firestore
 
+    # Determine storage bucket name for Firebase init
+    storage_bucket = os.getenv("STORAGE_BUCKET", "")
+    init_opts = {}
+    if storage_bucket:
+        init_opts["storageBucket"] = storage_bucket
+
     cred_path = os.getenv("GOOGLE_APPLICATION_CREDENTIALS")
     if cred_path and os.path.isfile(cred_path):
         cred = credentials.Certificate(cred_path)
-        _app = firebase_admin.initialize_app(cred)
+        _app = firebase_admin.initialize_app(cred, init_opts)
     else:
         # On Cloud Run the default credentials are provided automatically
-        _app = firebase_admin.initialize_app()
+        _app = firebase_admin.initialize_app(options=init_opts)
     _db = firestore.client()
 
 
@@ -119,6 +126,33 @@ def get_db():
     if _db is None:
         init_firebase()
     return _db
+
+
+def get_storage_bucket():
+    """Return the default Cloud Storage bucket.
+
+    Bucket name follows Firebase convention: ``<project-id>.firebasestorage.app``.
+    Override with env var ``STORAGE_BUCKET`` if needed.
+    """
+    global _bucket
+    if _bucket is not None:
+        return _bucket
+
+    if _DEV_MODE:
+        logger.info("DEV_MODE: Cloud Storage not available — returning None")
+        return None
+
+    if _app is None:
+        init_firebase()
+
+    from firebase_admin import storage as _fb_storage
+    bucket_name = os.getenv("STORAGE_BUCKET", "")
+    if bucket_name:
+        _bucket = _fb_storage.bucket(bucket_name)
+    else:
+        # Try default Firebase bucket
+        _bucket = _fb_storage.bucket()
+    return _bucket
 
 
 def verify_token(id_token: str) -> dict:

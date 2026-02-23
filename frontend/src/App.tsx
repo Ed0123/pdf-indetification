@@ -36,8 +36,14 @@ import {
   renameGroup,
   deleteGroup,
   recordUsage,
+  listCloudTemplates,
+  createCloudTemplate,
+  updateCloudTemplate,
+  deleteCloudTemplate,
+  uploadTemplatePageImage,
+  renderPage,
 } from "./api/client";
-import type { GroupItem, ServerFileInfo } from "./api/client";
+import type { GroupItem, ServerFileInfo, CloudTemplate } from "./api/client";
 
 // Route views
 type AppView = "login" | "account" | "admin" | "main";
@@ -122,6 +128,54 @@ export default function App() {
       .then((available) => setStatus((s) => ({ ...s, ocr_available: available })))
       .catch(() => {});
   }, []);
+
+  // --------------------------------------------------------------------------
+  // Cloud template sync — load from Firestore on login
+  // --------------------------------------------------------------------------
+
+  useEffect(() => {
+    if (IS_DEV_MODE) return;
+    if (view !== "main" || !auth.user) return;
+    loadCloudTemplates();
+  }, [view, auth.user]);
+
+  const loadCloudTemplates = async () => {
+    try {
+      const cloudList = await listCloudTemplates();
+      const localTemplates: Template[] = cloudList.map(cloudToLocal);
+      project.saveTemplates(localTemplates);
+    } catch (err) {
+      console.warn("Failed to load cloud templates:", err);
+    }
+  };
+
+  /** Convert Cloud → local Template type */
+  const cloudToLocal = (ct: CloudTemplate): Template => ({
+    id: ct.id,
+    name: ct.name,
+    boxes: (ct.boxes ?? []).map((b) => ({
+      column_name: b.column_name,
+      x: b.x,
+      y: b.y,
+      width: b.width,
+      height: b.height,
+      color: b.color || "#2980b9",
+    })),
+    notes: ct.notes ?? "",
+    preview_file_id: null,   // page image is in cloud, not local file
+    preview_page: 0,
+  });
+
+  /** Render current PDF page to base64 and upload to Cloud Storage for a template. */
+  const uploadCurrentPageImageForTemplate = async (templateId: string) => {
+    if (!state.selected_file_id) return;
+    try {
+      const b64 = await renderPage(state.selected_file_id, state.selected_page, 1.5);
+      await uploadTemplatePageImage(templateId, b64);
+    } catch (err) {
+      console.warn("Failed to upload page image for template:", err);
+    }
+  };
 
   const setMsg = (message: string, progress: number | null = null) =>
     setStatus((s) => ({ ...s, message, progress }));
@@ -336,7 +390,55 @@ export default function App() {
     setShowExportModal(true);
   };
 
-  const handleTemplateSave = (templates: Template[]) => {
+  const handleTemplateSave = async (templates: Template[]) => {
+    // Detect additions/updates/deletions vs previous state
+    const prev = state.templates;
+    const prevIds = new Set(prev.map((t) => t.id));
+    const nextIds = new Set(templates.map((t) => t.id));
+
+    // Deletions: in prev but not in next
+    for (const old of prev) {
+      if (!nextIds.has(old.id)) {
+        deleteCloudTemplate(old.id).catch(() => {});
+      }
+    }
+
+    // Additions + updates
+    for (const t of templates) {
+      if (!prevIds.has(t.id)) {
+        // New → create in cloud
+        createCloudTemplate({
+          name: t.name,
+          boxes: t.boxes,
+          notes: t.notes ?? "",
+        })
+          .then(async (created) => {
+            // Upload page image if we have a preview file loaded
+            await uploadCurrentPageImageForTemplate(created.id);
+            // Update local ID to match cloud
+            const updated = state.templates.map((lt) =>
+              lt.id === t.id ? { ...lt, id: created.id } : lt
+            );
+            project.saveTemplates(updated);
+          })
+          .catch(() => {});
+      } else {
+        // Existing → update in cloud
+        const prevT = prev.find((p) => p.id === t.id);
+        const changed =
+          prevT?.name !== t.name ||
+          JSON.stringify(prevT?.boxes) !== JSON.stringify(t.boxes) ||
+          prevT?.notes !== t.notes;
+        if (changed) {
+          updateCloudTemplate(t.id, {
+            name: t.name,
+            boxes: t.boxes,
+            notes: t.notes ?? "",
+          }).catch(() => {});
+        }
+      }
+    }
+
     project.saveTemplates(templates);
   };
 
@@ -426,7 +528,7 @@ export default function App() {
   };
 
   // SinglePageDataTable template handlers
-  const handleSingleSaveNewTemplate = (name: string) => {
+  const handleSingleSaveNewTemplate = async (name: string) => {
     const currentBoxes = project.currentPageData?.boxes ?? {};
     const boxes: TemplateBox[] = Object.values(currentBoxes).map((b, i) => ({
       column_name: b.column_name,
@@ -436,8 +538,11 @@ export default function App() {
       height: b.height,
       color: ["#e74c3c","#2980b9","#27ae60","#f39c12"][i % 4],
     }));
+
+    // Save locally first with temp ID
+    const tempId = crypto.randomUUID();
     const newTemplate: Template = {
-      id: crypto.randomUUID(),
+      id: tempId,
       name,
       boxes,
       notes: "",
@@ -445,10 +550,24 @@ export default function App() {
       preview_page: state.selected_page,
     };
     project.saveTemplates([...state.templates, newTemplate]);
-    setMsg(`Saved new template "${name}"`);
+    setMsg(`Saving template "${name}" to cloud...`);
+
+    // Sync to cloud
+    try {
+      const created = await createCloudTemplate({ name, boxes, notes: "" });
+      await uploadCurrentPageImageForTemplate(created.id);
+      // Replace temp ID with cloud ID
+      const updatedTemplates = [...state.templates, newTemplate].map((t) =>
+        t.id === tempId ? { ...t, id: created.id } : t
+      );
+      project.saveTemplates(updatedTemplates);
+      setMsg(`Saved template "${name}" ☁`);
+    } catch (err) {
+      setMsg(`Saved locally, cloud sync failed: ${err}`);
+    }
   };
 
-  const handleSingleUpdateTemplate = (name: string) => {
+  const handleSingleUpdateTemplate = async (name: string) => {
     const currentBoxes = project.currentPageData?.boxes ?? {};
     const boxes: TemplateBox[] = Object.values(currentBoxes).map((b, i) => ({
       column_name: b.column_name,
@@ -462,6 +581,7 @@ export default function App() {
       t.name === name ? { ...t, boxes } : t
     );
     project.saveTemplates(updated);
+
     // Auto-apply to all pages using this template
     state.pdf_files.forEach((f) => {
       f.pages.forEach((p) => {
@@ -474,7 +594,20 @@ export default function App() {
         }
       });
     });
-    setMsg(`Updated template "${name}" and re-applied to all using pages`);
+
+    // Sync update to cloud
+    const tpl = updated.find((t) => t.name === name);
+    if (tpl) {
+      try {
+        await updateCloudTemplate(tpl.id, { name, boxes, notes: tpl.notes ?? "" });
+        await uploadCurrentPageImageForTemplate(tpl.id);
+        setMsg(`Updated template "${name}" ☁`);
+      } catch (err) {
+        setMsg(`Updated locally, cloud sync failed: ${err}`);
+      }
+    } else {
+      setMsg(`Updated template "${name}" and re-applied to all using pages`);
+    }
   };
 
   const handleSingleApplyTemplate = (name: string) => {

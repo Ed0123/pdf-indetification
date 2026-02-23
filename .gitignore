@@ -64,6 +64,17 @@ frontend/node_modules/
 frontend-dist/
 frontend/.env.local
 frontend/.env.*.local
+frontend/.env.production
+
+
+# Backend env files
+backend/.env
+backend/.env.*
+
+# Firebase / GCP service account keys (NEVER commit)
+*-service-account*.json
+*-firebase-adminsdk*.json
+service-account.json
 
 # Ignore runtime project JSON files (may contain absolute paths)
 *.project.json

@@ -17,12 +17,14 @@ VITE_API_URL="https://${SERVICE}-$(gcloud run services describe ${SERVICE} --reg
 cd ..
 
 echo "=== 2. Deploy backend to Cloud Run ==="
+STORAGE_BUCKET="${PROJECT}.firebasestorage.app"
 gcloud run deploy "${SERVICE}" \
   --source . \
   --region "${REGION}" \
   --project "${PROJECT}" \
   --allow-unauthenticated \
-  --port 8080
+  --port 8080 \
+  --set-env-vars "STORAGE_BUCKET=${STORAGE_BUCKET}"
 
 BACKEND_URL=$(gcloud run services describe "${SERVICE}" --region="${REGION}" --project="${PROJECT}" --format="value(status.url)")
 
@@ -32,7 +34,7 @@ VITE_API_URL="${BACKEND_URL}" npm run build
 cd ..
 
 echo "=== 4. Deploy frontend to Firebase Hosting ==="
-npx firebase deploy --only hosting --project "${PROJECT}"
+npx firebase-tools deploy --only hosting --project "${PROJECT}"
 
 echo ""
 echo "✅ Done!"
