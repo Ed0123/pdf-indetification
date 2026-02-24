@@ -182,7 +182,7 @@ export function MyAccountPage({
         {/* Buy me a coffee */}
         <div style={{ marginTop: 24, padding: 14, background: "#fffde7", borderRadius: 6, border: "1px solid #fff59d", textAlign: "center" }}>
           <a
-            href="https://buymeacoffee.com/ed0123"
+            href="https://buymeacoffee.com/mcqshk"
             target="_blank"
             rel="noopener noreferrer"
             style={{ textDecoration: "none", color: "#333" }}
