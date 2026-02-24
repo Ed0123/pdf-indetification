@@ -2,22 +2,15 @@
  * User-related types for auth, membership, and usage tracking.
  */
 
-/** Membership tier — determines monthly OCR page limits. */
-export type MemberTier = "basic" | "sponsor" | "premium" | "admin";
+/** Membership tier — determines monthly OCR page limits.
+ * Now dynamic (stored in Firestore), but these are the built-in defaults. */
+export type MemberTier = string;
 
 /** Account approval status. */
 export type AccountStatus = "pending" | "active" | "suspended";
 
-/** Monthly OCR page limits per tier. */
-export const TIER_LIMITS: Record<MemberTier, number> = {
-  basic: 100,
-  sponsor: 300,
-  premium: 500,
-  admin: Infinity,
-};
-
-/** Human-readable tier labels. */
-export const TIER_LABELS: Record<MemberTier, string> = {
+/** Fallback human-readable tier labels (overridden by dynamic tiers from API). */
+export const TIER_LABELS: Record<string, string> = {
   basic: "基本",
   sponsor: "贊助",
   premium: "特許",

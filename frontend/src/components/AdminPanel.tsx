@@ -9,31 +9,38 @@
 import React, { useState, useMemo } from "react";
 import type { UserProfile, MemberTier, AccountStatus } from "../types/user";
 import { TIER_LABELS, STATUS_LABELS } from "../types/user";
-import type { GroupItem } from "../api/client";
+import type { GroupItem, TierItem } from "../api/client";
 
 interface AdminPanelProps {
   users: UserProfile[];
   groups: GroupItem[];
+  tiers: TierItem[];
   onUpdateUser: (uid: string, changes: Partial<UserProfile>) => Promise<void>;
   onResetUsage: (uid: string) => Promise<void>;
   onCreateGroup: (name: string) => Promise<void>;
   onRenameGroup: (groupId: string, name: string) => Promise<void>;
   onDeleteGroup: (groupId: string) => Promise<void>;
+  onCreateTier: (data: { name: string; label: string; quota: number }) => Promise<void>;
+  onUpdateTier: (tierId: string, data: { name?: string; label?: string; quota?: number }) => Promise<void>;
+  onDeleteTier: (tierId: string) => Promise<void>;
   onGoHome: () => void;
 }
 
 const STATUS_OPTIONS: AccountStatus[] = ["pending", "active", "suspended"];
-const TIER_OPTIONS: MemberTier[] = ["basic", "sponsor", "premium", "admin"];
 
 export function AdminPanel({
   users,
   groups,
+  tiers,
   onGoHome,
   onUpdateUser,
   onResetUsage,
   onCreateGroup,
   onRenameGroup,
   onDeleteGroup,
+  onCreateTier,
+  onUpdateTier,
+  onDeleteTier,
 }: AdminPanelProps) {
   const [filter, setFilter] = useState("");
   const [editingNotes, setEditingNotes] = useState<{ uid: string; value: string } | null>(null);
@@ -41,6 +48,21 @@ export function AdminPanel({
   const [newGroupName, setNewGroupName] = useState("");
   const [selectedGroupId, setSelectedGroupId] = useState("");
   const [renameGroupName, setRenameGroupName] = useState("");
+
+  // Tier management state
+  const [newTierName, setNewTierName] = useState("");
+  const [newTierLabel, setNewTierLabel] = useState("");
+  const [newTierQuota, setNewTierQuota] = useState("100");
+  const [selectedTierId, setSelectedTierId] = useState("");
+  const [editTierLabel, setEditTierLabel] = useState("");
+  const [editTierQuota, setEditTierQuota] = useState("");
+
+  // Build tier label lookup (dynamic tiers override static TIER_LABELS)
+  const tierLabelMap = useMemo(() => {
+    const m: Record<string, string> = { ...TIER_LABELS };
+    tiers.forEach((t) => { m[t.name] = t.label; });
+    return m;
+  }, [tiers]);
 
   const filtered = useMemo(() => {
     if (!filter.trim()) return users;
@@ -100,6 +122,35 @@ export function AdminPanel({
     await onDeleteGroup(selectedGroupId);
     setSelectedGroupId("");
     setRenameGroupName("");
+  };
+
+  const handleCreateTier = async () => {
+    const name = newTierName.trim().toLowerCase();
+    const label = newTierLabel.trim();
+    const quota = parseInt(newTierQuota, 10);
+    if (!name || !label || isNaN(quota)) return;
+    await onCreateTier({ name, label, quota });
+    setNewTierName("");
+    setNewTierLabel("");
+    setNewTierQuota("100");
+  };
+
+  const handleUpdateTier = async () => {
+    if (!selectedTierId) return;
+    const changes: { label?: string; quota?: number } = {};
+    if (editTierLabel.trim()) changes.label = editTierLabel.trim();
+    const q = parseInt(editTierQuota, 10);
+    if (!isNaN(q)) changes.quota = q;
+    if (Object.keys(changes).length === 0) return;
+    await onUpdateTier(selectedTierId, changes);
+  };
+
+  const handleDeleteTier = async () => {
+    if (!selectedTierId) return;
+    await onDeleteTier(selectedTierId);
+    setSelectedTierId("");
+    setEditTierLabel("");
+    setEditTierQuota("");
   };
 
   return (
@@ -169,6 +220,91 @@ export function AdminPanel({
           </div>
         </div>
 
+        {/* Tier / Quota management */}
+        <div style={{
+          marginBottom: 14,
+          padding: "10px 12px",
+          border: "1px solid #e6e6e6",
+          borderRadius: 6,
+          background: "#fafafa",
+        }}>
+          <div style={{ fontSize: 13, fontWeight: 600, marginBottom: 8 }}>會員類別 / 配額管理</div>
+
+          {/* Current tiers list */}
+          <div style={{ marginBottom: 8, display: "flex", gap: 6, flexWrap: "wrap" }}>
+            {tiers.map((t) => (
+              <span key={t.id} style={{
+                display: "inline-block", padding: "3px 8px", fontSize: 11,
+                background: t.name === "admin" ? "#fdebd0" : "#d5f5e3",
+                borderRadius: 4, border: "1px solid #ddd",
+              }}>
+                <strong>{t.label}</strong> ({t.name}) — {t.quota === -1 ? "無限" : `${t.quota}頁/月`}
+              </span>
+            ))}
+          </div>
+
+          {/* Create new tier */}
+          <div style={{ display: "flex", gap: 6, flexWrap: "wrap", alignItems: "center", marginBottom: 6 }}>
+            <input
+              style={{ ...inputStyle, width: 100 }}
+              placeholder="名稱 (英文)"
+              value={newTierName}
+              onChange={(e) => setNewTierName(e.target.value)}
+            />
+            <input
+              style={{ ...inputStyle, width: 100 }}
+              placeholder="顯示名稱"
+              value={newTierLabel}
+              onChange={(e) => setNewTierLabel(e.target.value)}
+            />
+            <input
+              style={{ ...inputStyle, width: 80 }}
+              placeholder="配額"
+              value={newTierQuota}
+              onChange={(e) => setNewTierQuota(e.target.value)}
+              type="number"
+              title="-1 = 無限"
+            />
+            <button style={miniBtn} onClick={handleCreateTier}>新增類別</button>
+          </div>
+
+          {/* Edit existing tier */}
+          <div style={{ display: "flex", gap: 6, flexWrap: "wrap", alignItems: "center" }}>
+            <select
+              style={{ ...selectStyle, minWidth: 140 }}
+              value={selectedTierId}
+              onChange={(e) => {
+                const id = e.target.value;
+                setSelectedTierId(id);
+                const t = tiers.find((x) => x.id === id);
+                setEditTierLabel(t?.label ?? "");
+                setEditTierQuota(t?.quota !== undefined ? String(t.quota) : "");
+              }}
+            >
+              <option value="">選擇類別</option>
+              {tiers.map((t) => (
+                <option key={t.id} value={t.id}>{t.label} ({t.name})</option>
+              ))}
+            </select>
+            <input
+              style={{ ...inputStyle, width: 100 }}
+              placeholder="顯示名稱"
+              value={editTierLabel}
+              onChange={(e) => setEditTierLabel(e.target.value)}
+            />
+            <input
+              style={{ ...inputStyle, width: 80 }}
+              placeholder="配額"
+              value={editTierQuota}
+              onChange={(e) => setEditTierQuota(e.target.value)}
+              type="number"
+              title="-1 = 無限"
+            />
+            <button style={miniBtn} onClick={handleUpdateTier} disabled={!selectedTierId}>更新</button>
+            <button style={miniBtn} onClick={handleDeleteTier} disabled={!selectedTierId}>刪除</button>
+          </div>
+        </div>
+
         {/* Table */}
         <div style={{ overflowX: "auto" }}>
           <table style={table}>
@@ -209,8 +345,8 @@ export function AdminPanel({
                         value={u.tier}
                         onChange={(e) => handleChange(u.uid, { tier: e.target.value as MemberTier })}
                       >
-                        {TIER_OPTIONS.map((t) => (
-                          <option key={t} value={t}>{TIER_LABELS[t]}</option>
+                        {tiers.map((t) => (
+                          <option key={t.id} value={t.name}>{t.label}</option>
                         ))}
                       </select>
                     </td>

@@ -51,12 +51,31 @@ class GroupRename(BaseModel):
     name: str
 
 
+class TierCreate(BaseModel):
+    name: str          # e.g. "basic", "sponsor"
+    label: str         # display name e.g. "基本", "贊助"
+    quota: int         # monthly page limit (-1 = unlimited)
+
+
+class TierUpdate(BaseModel):
+    name: Optional[str] = None
+    label: Optional[str] = None
+    quota: Optional[int] = None
+
+
 # ──────────────────── Helpers ────────────────────────────────────────────────
 
 USERS_COLLECTION = "users"
 TEMPLATES_COLLECTION = "templates"
 GROUPS_COLLECTION = "groups"
-DEFAULT_GROUPS = ["A組", "B組", "C組"]
+TIERS_COLLECTION = "tiers"
+DEFAULT_GROUPS = ["General"]
+DEFAULT_TIERS = [
+    {"name": "basic", "label": "基本", "quota": 100},
+    {"name": "sponsor", "label": "贊助", "quota": 300},
+    {"name": "premium", "label": "特許", "quota": 500},
+    {"name": "admin", "label": "管理員", "quota": -1},
+]
 
 def _user_ref(uid: str):
     return get_db().collection(USERS_COLLECTION).document(uid)
@@ -64,6 +83,33 @@ def _user_ref(uid: str):
 
 def _groups_collection():
     return get_db().collection(GROUPS_COLLECTION)
+
+
+def _tiers_collection():
+    return get_db().collection(TIERS_COLLECTION)
+
+
+def _ensure_default_tiers() -> list[dict]:
+    """Ensure tier list exists; bootstrap defaults when empty."""
+    docs = list(_tiers_collection().stream())
+    if docs:
+        return [{"id": d.id, **d.to_dict()} for d in docs]
+
+    created = []
+    for tier in DEFAULT_TIERS:
+        ref = _tiers_collection().document()
+        ref.set(tier)
+        created.append({"id": ref.id, **tier})
+    return created
+
+
+def _get_tier_quota(tier_name: str) -> int:
+    """Return monthly page quota for a tier name. -1 = unlimited."""
+    tiers = _ensure_default_tiers()
+    for t in tiers:
+        if t["name"] == tier_name:
+            return t.get("quota", 100)
+    return 100  # fallback
 
 
 def _ensure_default_groups() -> list[dict]:
@@ -231,14 +277,9 @@ def record_usage(body: UsageRecord, user: dict = Depends(require_auth)):
 
     new_count = profile["usage_pages"] + body.pages
 
-    # Tier limits
-    tier_limits = {
-        "basic": 100,
-        "sponsor": 300,
-        "premium": 500,
-        "admin": float("inf"),
-    }
-    limit = tier_limits.get(profile.get("tier", "basic"), 100)
+    # Tier limits — read from Firestore
+    quota = _get_tier_quota(profile.get("tier", "basic"))
+    limit = float("inf") if quota == -1 else quota
     over_limit = new_count > limit
 
     ref.update({
@@ -248,7 +289,7 @@ def record_usage(body: UsageRecord, user: dict = Depends(require_auth)):
 
     return {
         "usage_pages": new_count,
-        "limit": limit if limit != float("inf") else -1,
+        "limit": quota,  # -1 = unlimited
         "over_limit": over_limit,
     }
 
@@ -348,3 +389,108 @@ def delete_group(group_id: str, user: dict = Depends(require_auth)):
     if deleted_name:
         _reassign_deleted_group_in_documents(deleted_name, fallback)
     return {"deleted": group_id, "fallback_group": fallback}
+
+
+# ──────────────────── Tier management ────────────────────────────────────────
+
+@router.get("/tiers")
+def list_tiers(user: dict = Depends(require_auth)):
+    """List all tiers with quota info. Bootstraps defaults if empty."""
+    if not _is_admin(user["uid"]):
+        raise HTTPException(403, "Admin access required")
+    return _ensure_default_tiers()
+
+
+@router.post("/tiers")
+def create_tier(body: TierCreate, user: dict = Depends(require_auth)):
+    """Admin: create a new membership tier."""
+    if not _is_admin(user["uid"]):
+        raise HTTPException(403, "Admin access required")
+
+    name = body.name.strip().lower()
+    if not name:
+        raise HTTPException(400, "Tier name is required")
+
+    existing = {t["name"] for t in _ensure_default_tiers()}
+    if name in existing:
+        raise HTTPException(400, "Tier name already exists")
+
+    doc = {"name": name, "label": body.label.strip(), "quota": body.quota}
+    ref = _tiers_collection().document()
+    ref.set(doc)
+    return {"id": ref.id, **doc}
+
+
+@router.put("/tiers/{tier_id}")
+def update_tier(tier_id: str, body: TierUpdate, user: dict = Depends(require_auth)):
+    """Admin: update a tier's name, label, or quota."""
+    if not _is_admin(user["uid"]):
+        raise HTTPException(403, "Admin access required")
+
+    ref = _tiers_collection().document(tier_id)
+    snap = ref.get()
+    if not snap.exists:
+        raise HTTPException(404, "Tier not found")
+
+    old_data = snap.to_dict()
+    changes = {}
+    if body.name is not None:
+        new_name = body.name.strip().lower()
+        if new_name and new_name != old_data.get("name"):
+            existing = {t["name"] for t in _ensure_default_tiers()}
+            if new_name in existing:
+                raise HTTPException(400, "Tier name already exists")
+            changes["name"] = new_name
+            # Propagate tier name change to users
+            old_name = old_data.get("name", "")
+            if old_name:
+                for doc in get_db().collection(USERS_COLLECTION).stream():
+                    if doc.to_dict().get("tier") == old_name:
+                        get_db().collection(USERS_COLLECTION).document(doc.id).update({"tier": new_name})
+    if body.label is not None:
+        changes["label"] = body.label.strip()
+    if body.quota is not None:
+        changes["quota"] = body.quota
+
+    if not changes:
+        raise HTTPException(400, "No fields to update")
+
+    ref.update(changes)
+    updated = ref.get().to_dict()
+    updated["id"] = tier_id
+    return updated
+
+
+@router.delete("/tiers/{tier_id}")
+def delete_tier(tier_id: str, user: dict = Depends(require_auth)):
+    """Admin: delete a tier and reassign affected users to 'basic'."""
+    if not _is_admin(user["uid"]):
+        raise HTTPException(403, "Admin access required")
+
+    tiers = _ensure_default_tiers()
+    if len(tiers) <= 1:
+        raise HTTPException(400, "Cannot delete the last remaining tier")
+
+    ref = _tiers_collection().document(tier_id)
+    snap = ref.get()
+    if not snap.exists:
+        raise HTTPException(404, "Tier not found")
+
+    deleted_name = snap.to_dict().get("name", "")
+
+    # Don't allow deleting admin tier
+    if deleted_name == "admin":
+        raise HTTPException(400, "Cannot delete the admin tier")
+
+    # Fallback tier
+    fallback = next((t["name"] for t in tiers if t["id"] != tier_id and t["name"] != deleted_name), "basic")
+
+    ref.delete()
+
+    # Reassign users with deleted tier
+    if deleted_name:
+        for doc in get_db().collection(USERS_COLLECTION).stream():
+            if doc.to_dict().get("tier") == deleted_name:
+                get_db().collection(USERS_COLLECTION).document(doc.id).update({"tier": fallback})
+
+    return {"deleted": tier_id, "fallback_tier": fallback}

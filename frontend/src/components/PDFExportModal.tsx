@@ -48,11 +48,12 @@ function buildFilename(
   const page: PageData | undefined = file.pages.find((p) => p.page_number === pageNum) ?? file.pages[pageNum];
   const get = (col: string | null): string => {
     if (!col) return "";
-    // "Page Name" column (and legacy "Page") → auto page number even if extracted_data is empty
-    if (col === "Page Name" || col === "Page") return String(pageNum + 1);
+    // Check extracted data first for ALL columns including "Page Name"
     const val = page?.extracted_data[col];
-    if (!val) return "";
-    return sanitize(String(val));
+    if (val) return sanitize(String(val));
+    // "Page Name" / "Page" fallback → page number when no extracted text
+    if (col === "Page Name" || col === "Page") return String(pageNum + 1);
+    return "";
   };
   const parts = [get(config.box1Column), get(config.box2Column), sanitize(config.notes)].filter(
     (s) => s !== "" && s !== "page"

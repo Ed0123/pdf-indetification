@@ -6,12 +6,16 @@
  */
 import React, { useState, useEffect } from "react";
 import type { UserProfile, MemberTier, AccountStatus } from "../types/user";
-import { TIER_LABELS, TIER_LIMITS, STATUS_LABELS } from "../types/user";
+import { TIER_LABELS, STATUS_LABELS } from "../types/user";
 
 interface MyAccountPageProps {
   profile: UserProfile | null;
   /** True if profile has never been saved (first login). */
   isNewUser: boolean;
+  /** Dynamic usage limit from API (-1 = unlimited). */
+  usageLimit: number;
+  /** Dynamic tier labels from API (overrides TIER_LABELS fallback). */
+  tierLabels: Record<string, string>;
   onSave: (updated: Partial<UserProfile>) => Promise<void>;
   onGoHome: () => void;
   onSignOut: () => void;
@@ -21,6 +25,8 @@ interface MyAccountPageProps {
 export function MyAccountPage({
   profile,
   isNewUser,
+  usageLimit,
+  tierLabels,
   onSave,
   onGoHome,
   onSignOut,
@@ -70,9 +76,12 @@ export function MyAccountPage({
 
   // Compute usage display
   const usedPages = profile?.usage_pages ?? 0;
-  const limit = TIER_LIMITS[(profile?.tier ?? "basic") as MemberTier];
+  const limit = usageLimit === -1 ? Infinity : usageLimit;
   const limitStr = limit === Infinity ? "無限" : String(limit);
   const remaining = limit === Infinity ? "∞" : String(Math.max(0, limit - usedPages));
+
+  // Resolve tier label: prefer dynamic tierLabels, fallback to TIER_LABELS
+  const resolveTierLabel = (tier: string) => tierLabels[tier] || TIER_LABELS[tier] || tier;
 
   return (
     <div style={container}>
@@ -150,7 +159,7 @@ export function MyAccountPage({
             <h3 style={{ margin: "0 0 10px", fontSize: 14 }}>📊 會員資訊</h3>
             <div style={{ display: "grid", gridTemplateColumns: "140px 1fr", gap: "6px 10px", fontSize: 13 }}>
               <span style={label}>會員類別:</span>
-              <span>{TIER_LABELS[(profile.tier ?? "basic") as MemberTier]}</span>
+              <span>{resolveTierLabel(profile.tier ?? "basic")}</span>
 
               <span style={label}>會員狀態:</span>
               <span>{STATUS_LABELS[(profile.status ?? "pending") as AccountStatus]}</span>
@@ -170,10 +179,22 @@ export function MyAccountPage({
           </div>
         )}
 
-        {/* Buy me a coffee placeholder */}
+        {/* Buy me a coffee */}
         <div style={{ marginTop: 24, padding: 14, background: "#fffde7", borderRadius: 6, border: "1px solid #fff59d", textAlign: "center" }}>
-          <p style={{ margin: 0, fontSize: 13, color: "#888" }}>
-            ☕ <strong>Buy me a coffee</strong> — 功能即將推出
+          <a
+            href="https://buymeacoffee.com/ed0123"
+            target="_blank"
+            rel="noopener noreferrer"
+            style={{ textDecoration: "none", color: "#333" }}
+          >
+            <img
+              src="https://cdn.buymeacoffee.com/buttons/v2/default-yellow.png"
+              alt="Buy Me A Coffee"
+              style={{ height: 40 }}
+            />
+          </a>
+          <p style={{ margin: "8px 0 0", fontSize: 12, color: "#888" }}>
+            如果這個工具對你有幫助，請請我喝杯咖啡 ☕
           </p>
         </div>
 

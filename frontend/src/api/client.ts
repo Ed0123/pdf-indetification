@@ -238,6 +238,52 @@ export async function deleteGroup(groupId: string): Promise<{ deleted: string; f
 }
 
 // --------------------------------------------------------------------------
+// Tier management
+// --------------------------------------------------------------------------
+
+export interface TierItem {
+  id: string;
+  name: string;
+  label: string;
+  quota: number; // -1 = unlimited
+}
+
+/** Admin: list all tiers. */
+export async function listTiers(): Promise<TierItem[]> {
+  return request<TierItem[]>("/api/users/tiers");
+}
+
+/** Admin: create a new tier. */
+export async function createTier(
+  data: { name: string; label: string; quota: number }
+): Promise<TierItem> {
+  return request<TierItem>("/api/users/tiers", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(data),
+  });
+}
+
+/** Admin: update a tier. */
+export async function updateTier(
+  tierId: string,
+  data: { name?: string; label?: string; quota?: number }
+): Promise<TierItem> {
+  return request<TierItem>(`/api/users/tiers/${tierId}`, {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(data),
+  });
+}
+
+/** Admin: delete a tier. */
+export async function deleteTier(tierId: string): Promise<{ deleted: string; fallback_tier: string }> {
+  return request<{ deleted: string; fallback_tier: string }>(`/api/users/tiers/${tierId}`, {
+    method: "DELETE",
+  });
+}
+
+// --------------------------------------------------------------------------
 // Usage tracking
 // --------------------------------------------------------------------------
 

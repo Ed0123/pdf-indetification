@@ -35,6 +35,10 @@ import {
   createGroup,
   renameGroup,
   deleteGroup,
+  listTiers,
+  createTier,
+  updateTier,
+  deleteTier,
   recordUsage,
   listCloudTemplates,
   createCloudTemplate,
@@ -43,7 +47,7 @@ import {
   uploadTemplatePageImage,
   renderPage,
 } from "./api/client";
-import type { GroupItem, ServerFileInfo, CloudTemplate } from "./api/client";
+import type { GroupItem, TierItem, ServerFileInfo, CloudTemplate } from "./api/client";
 
 // Route views
 type AppView = "login" | "account" | "admin" | "main";
@@ -61,6 +65,7 @@ export default function App() {
   const [isNewUser, setIsNewUser] = useState(false);
   const [adminUsers, setAdminUsers] = useState<UserProfile[]>([]);
   const [adminGroups, setAdminGroups] = useState<GroupItem[]>([]);
+  const [adminTiers, setAdminTiers] = useState<TierItem[]>([]);
 
   // Usage tracking
   const [usagePages, setUsagePages] = useState(0);
@@ -205,9 +210,10 @@ export default function App() {
   };
 
   const handleOpenAdmin = async () => {
-    const [users, groups] = await Promise.all([listAllUsers(), listGroups()]);
+    const [users, groups, tiers] = await Promise.all([listAllUsers(), listGroups(), listTiers()]);
     setAdminUsers(users);
     setAdminGroups(groups);
+    setAdminTiers(tiers);
     setView("admin");
   };
 
@@ -225,9 +231,10 @@ export default function App() {
   };
 
   const refreshAdminData = async () => {
-    const [users, groups] = await Promise.all([listAllUsers(), listGroups()]);
+    const [users, groups, tiers] = await Promise.all([listAllUsers(), listGroups(), listTiers()]);
     setAdminUsers(users);
     setAdminGroups(groups);
+    setAdminTiers(tiers);
   };
 
   const handleCreateGroup = async (name: string) => {
@@ -242,6 +249,21 @@ export default function App() {
 
   const handleDeleteGroup = async (groupId: string) => {
     await deleteGroup(groupId);
+    await refreshAdminData();
+  };
+
+  const handleCreateTier = async (data: { name: string; label: string; quota: number }) => {
+    await createTier(data);
+    await refreshAdminData();
+  };
+
+  const handleUpdateTier = async (tierId: string, data: { name?: string; label?: string; quota?: number }) => {
+    await updateTier(tierId, data);
+    await refreshAdminData();
+  };
+
+  const handleDeleteTier = async (tierId: string) => {
+    await deleteTier(tierId);
     await refreshAdminData();
   };
 
@@ -391,55 +413,71 @@ export default function App() {
   };
 
   const handleTemplateSave = async (templates: Template[]) => {
-    // Detect additions/updates/deletions vs previous state
+    if (IS_DEV_MODE) {
+      project.saveTemplates(templates);
+      return;
+    }
+
     const prev = state.templates;
     const prevIds = new Set(prev.map((t) => t.id));
     const nextIds = new Set(templates.map((t) => t.id));
 
-    // Deletions: in prev but not in next
-    for (const old of prev) {
-      if (!nextIds.has(old.id)) {
-        deleteCloudTemplate(old.id).catch(() => {});
-      }
-    }
+    // ── Deletions: in prev but not in next ──
+    const deletePromises = prev
+      .filter((old) => !nextIds.has(old.id))
+      .map((old) =>
+        deleteCloudTemplate(old.id).catch((err) =>
+          console.warn("Cloud delete failed:", old.id, err)
+        )
+      );
+    await Promise.all(deletePromises);
 
-    // Additions + updates
-    for (const t of templates) {
+    // ── Additions + updates ──
+    // We'll build a final list, replacing temp IDs with cloud IDs for new templates.
+    const finalTemplates = [...templates];
+
+    for (let i = 0; i < finalTemplates.length; i++) {
+      const t = finalTemplates[i];
       if (!prevIds.has(t.id)) {
-        // New → create in cloud
-        createCloudTemplate({
-          name: t.name,
-          boxes: t.boxes,
-          notes: t.notes ?? "",
-        })
-          .then(async (created) => {
-            // Upload page image if we have a preview file loaded
-            await uploadCurrentPageImageForTemplate(created.id);
-            // Update local ID to match cloud
-            const updated = state.templates.map((lt) =>
-              lt.id === t.id ? { ...lt, id: created.id } : lt
-            );
-            project.saveTemplates(updated);
-          })
-          .catch(() => {});
+        // New → create in cloud + upload page image
+        try {
+          const created = await createCloudTemplate({
+            name: t.name,
+            boxes: t.boxes,
+            notes: t.notes ?? "",
+          });
+          // Replace temp ID with cloud ID
+          finalTemplates[i] = { ...t, id: created.id };
+          // Upload page image
+          await uploadCurrentPageImageForTemplate(created.id);
+          console.log("Cloud template created:", created.id, t.name);
+        } catch (err) {
+          console.warn("Cloud create failed for template:", t.name, err);
+          setMsg(`Cloud sync failed for "${t.name}": ${err}`);
+        }
       } else {
-        // Existing → update in cloud
+        // Existing → update in cloud if changed
         const prevT = prev.find((p) => p.id === t.id);
         const changed =
           prevT?.name !== t.name ||
           JSON.stringify(prevT?.boxes) !== JSON.stringify(t.boxes) ||
           prevT?.notes !== t.notes;
         if (changed) {
-          updateCloudTemplate(t.id, {
-            name: t.name,
-            boxes: t.boxes,
-            notes: t.notes ?? "",
-          }).catch(() => {});
+          try {
+            await updateCloudTemplate(t.id, {
+              name: t.name,
+              boxes: t.boxes,
+              notes: t.notes ?? "",
+            });
+            console.log("Cloud template updated:", t.id, t.name);
+          } catch (err) {
+            console.warn("Cloud update failed:", t.id, err);
+          }
         }
       }
     }
 
-    project.saveTemplates(templates);
+    project.saveTemplates(finalTemplates);
   };
 
   const handleTemplateApply = (template: Template, pages: SelectedPage[]) => {
@@ -668,6 +706,8 @@ export default function App() {
       <MyAccountPage
         profile={profile}
         isNewUser={isNewUser}
+        usageLimit={usageLimit}
+        tierLabels={Object.fromEntries(adminTiers.map((t) => [t.name, t.label]))}
         onSave={handleSaveProfile}
         onGoHome={() => {
           if (profile?.status === "active") setView("main");
@@ -684,11 +724,15 @@ export default function App() {
       <AdminPanel
         users={adminUsers}
         groups={adminGroups}
+        tiers={adminTiers}
         onUpdateUser={handleAdminUpdateUser}
         onResetUsage={handleAdminResetUsage}
         onCreateGroup={handleCreateGroup}
         onRenameGroup={handleRenameGroup}
         onDeleteGroup={handleDeleteGroup}
+        onCreateTier={handleCreateTier}
+        onUpdateTier={handleUpdateTier}
+        onDeleteTier={handleDeleteTier}
         onGoHome={() => setView("main")}
       />
     );
