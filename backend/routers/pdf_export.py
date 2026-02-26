@@ -12,10 +12,11 @@ import zipfile
 from typing import List
 
 import fitz  # PyMuPDF
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Depends
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
+from backend.auth_middleware import require_auth
 from .pdf import _STORE  # reuse the in-memory file store
 
 router = APIRouter()
@@ -32,7 +33,7 @@ class ExportRequest(BaseModel):
 
 
 @router.post("/export-pages")
-async def export_pages(req: ExportRequest) -> StreamingResponse:
+async def export_pages(req: ExportRequest, user: dict = Depends(require_auth)) -> StreamingResponse:
     if not req.pages:
         raise HTTPException(status_code=400, detail="No pages specified")
 

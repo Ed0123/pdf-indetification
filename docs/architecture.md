@@ -1,6 +1,6 @@
 # Architecture & Feature Documentation
 
-> Last updated after Phase 8 (OCR Bug Fixes: PSM & Rect).
+> Last updated after Phase 9 (Cloud Storage Upgrade, UI Cleanup & Template Sync).
 
 ---
 
@@ -70,7 +70,8 @@
 
 ### 2.5 Admin Panel (`/api/users/`)
 - Only `admin`-tier users can access.
-- Table with: name, email, WhatsApp, usage, tier, group, join date, last login, status, notes.
+- Table with: name, email, WhatsApp, usage, **雲端用量 (cloud storage)**, tier, group, join date, last login, status, notes.
+- Cloud storage shows `storage_used_bytes` formatted as KB/MB.
 - Filter by name/email/phone.
 - Inline editing of: status, tier, group, notes.
 
@@ -80,7 +81,7 @@
 
 ```
 ┌─────────────────────────────────────────────────────────────┐
-│  Toolbar  〔Import〕〔Save〕〔Load〕…          〔👤 My Account〕 │
+│  Toolbar  〔Import〕〔☁ 雲端儲存〕…             〔👤 My Account〕 │
 ├──────┬──────────────────────────────┬───────────────────────┤
 │      │  ▲ Data Table (collapsible)  │                       │
 │  ◀   │  ┌───┬────┬────┬───────┐    │     PDF Viewer        │
@@ -115,10 +116,11 @@
 ## 4  Template System
 
 ### 4.1 Local Templates
-- Stored in project JSON (saved/loaded with Save/Load buttons).
+- Stored in project JSON (autosaved to IndexedDB).
 - Managed via TemplateModal (toolbar → Templates).
-- Each template has: `id`, `name`, `boxes[]`, `notes`, `preview_file_id`, `preview_page`.
+- Each template has: `id`, `name`, `boxes[]`, `notes`, `preview_file_id`, `preview_page`, optional `owner_uid`, `owner_name`.
 - Apply to specific pages (multi-select via PageSelectorModal).
+- **Template apply now auto-syncs columns:** when a template is applied, any columns defined in the template but missing from the project are automatically added via `project.addColumn()`.
 
 ### 4.2 Cloud Templates (Firestore)
 - Backend routes: `GET/POST/PUT/DELETE /api/templates/`.
@@ -129,6 +131,12 @@
   - `public` — all users can see.
   - `group` — all users in the same group can see.
 - Admins can see and edit all templates.
+
+### 4.3 Template Manager UI
+- Columns: **ID**, **Name**, **Columns**, **Notes**, **Owner**.
+- Owner shows "我" for own templates, "他人" for others.
+- **Filter input** at top — filters by name, column names, notes, owner, and ID.
+- `currentUserUid` prop passed from App for ownership display.
 
 ---
 
@@ -209,6 +217,53 @@ Text extraction follows a two-stage fallback approach per region:
 | PUT    | `/api/templates/{id}`      | Owner/Admin | Update template|
 | DELETE | `/api/templates/{id}`      | Owner/Admin | Delete template|
 
+### Cloud Projects
+| Method | Path                                              | Auth  | Description                         |
+|--------|---------------------------------------------------|-------|-------------------------------------|
+| GET    | `/api/projects/cloud/`                            | User  | List user's cloud projects          |
+| POST   | `/api/projects/cloud/`                            | User  | Create cloud project metadata       |
+| PUT    | `/api/projects/cloud/{id}`                        | Owner | Update project name/permanent flag  |
+| DELETE | `/api/projects/cloud/{id}`                        | Owner | Delete project + storage blobs      |
+| POST   | `/api/projects/cloud/{id}/upload-full`            | Owner | Upload JSON + all PDFs to Storage   |
+| GET    | `/api/projects/cloud/{id}/load-full`              | Owner | Download JSON + restore PDFs to _STORE |
+
+---
+
+## 6.5  Cloud Project Storage
+
+### Storage Architecture
+- **Firebase Cloud Storage** bucket: `pdf-text-extraction-488009.firebasestorage.app`
+- Path pattern: `cloud_projects/{uid}/{project_id}/project.json` + `cloud_projects/{uid}/{project_id}/{file_id}.pdf`
+- Backend `_STORE` dict in `pdf.py` holds in-memory mapping of `file_id → temp disk path`
+- `cloud_projects.py` imports `_STORE` from `pdf.py` for upload-full/load-full operations
+
+### Save Flow (upload-full)
+1. Frontend sends project JSON via `POST /api/projects/cloud/{id}/upload-full`
+2. Backend reads each PDF file from `_STORE` by `file_id`
+3. Backend uploads `project.json` + each `{file_id}.pdf` to Cloud Storage
+4. Metadata updated in Firestore with `pdf_paths[]`, `size_bytes`, `expires_at`
+5. Storage quota enforced per user tier
+
+### Load Flow (load-full)
+1. Frontend calls `GET /api/projects/cloud/{id}/load-full`
+2. Backend downloads `project.json` from Cloud Storage
+3. Backend downloads each PDF from Cloud Storage → temp dir → registers in `_STORE` with new `file_id`
+4. Backend remaps all `file_id` references in the project JSON
+5. Returns remapped JSON (+ `_warnings` list for any missing PDFs)
+6. Non-permanent projects get TTL extended on load
+
+### Toolbar Changes (Phase 9)
+- **Removed:** Save (💾) and Load (📁) buttons
+- **Default persistence:** IndexedDB autosave (local, automatic)
+- **Cloud button:** "☁ 雲端儲存" — opens CloudProjectsPanel for full JSON+PDF cloud management
+
+### TTL & Permanent Storage
+- New projects default to `permanent: false` with `expires_at: now + 14 days`
+- Each update/load resets the 14-day TTL
+- Users can toggle permanent via lock/unlock button in CloudProjectsPanel
+- Permanent projects have `expires_at: ""` (no expiry)
+- CloudProjectsPanel shows expiry status: "♾ 永久保存", "⚠ X 天後刪除", etc.
+
 ---
 
 ## 7  File Structure
@@ -220,12 +275,13 @@ backend/
   auth_middleware.py          # require_auth dependency (Bearer token validation)
   requirements.txt           # Python dependencies
   routers/
-    pdf.py                   # PDF upload, render, extract
+    pdf.py                   # PDF upload, render, extract (_STORE dict)
     project.py               # Project save/load
     export.py                # Excel export
     pdf_export.py            # PDF page export (ZIP)
     users.py                 # User profile, admin, usage tracking
     templates.py             # Cloud template CRUD
+    cloud_projects.py        # Cloud project CRUD, upload-full, load-full, TTL
 
 frontend/
   src/
@@ -237,17 +293,20 @@ frontend/
     hooks/
       useAuth.ts             # Firebase auth state + signIn/signOut/getToken
       useProject.ts          # useReducer state management (PDF files, columns, etc.)
+    storage/
+      indexedDB.ts           # IndexedDB autosave (local persistence)
     components/
       LoginPage.tsx          # Google sign-in page
       MyAccountPage.tsx      # Profile editing, usage stats, membership info
-      AdminPanel.tsx         # User management table (admin only)
-      Toolbar.tsx            # Top toolbar buttons
+      AdminPanel.tsx         # User management table + cloud storage column (admin only)
+      Toolbar.tsx            # Top toolbar (Import, Cloud, Templates, etc.)
       PDFTreeView.tsx        # Left panel — PDF file/page tree
       DataTable.tsx          # Multi-file extraction data table
       SinglePageDataTable.tsx# Per-page data view, page/template dropdowns
       PDFViewer.tsx          # PDF page renderer with box drawing
       StatusBar.tsx          # Bottom status bar with usage info
-      TemplateModal.tsx      # Template manager dialog
+      TemplateModal.tsx      # Template manager (ID/Name/Columns/Notes/Owner + filter)
+      CloudProjectsPanel.tsx # Cloud project panel (JSON+PDF upload/load, TTL, permanent)
       PDFExportModal.tsx     # PDF page export (naming, ZIP download)
       PageSelectorModal.tsx  # Multi-page selector dialog
       ConfirmDialog.tsx      # Generic confirmation dialog
@@ -289,8 +348,8 @@ gcloud run deploy pdf-backend \
 ## 9  Testing
 
 ```bash
-# Backend unit tests (94 total: 65 non-UI + 29 UI)
-QT_QPA_PLATFORM=offscreen python -m pytest Test/ -x
+# Backend unit tests (68 non-UI)
+python -m pytest Test/ -v --ignore=Test/test_ui_components.py
 
 # Frontend type check
 cd frontend && npx tsc --noEmit
@@ -298,3 +357,16 @@ cd frontend && npx tsc --noEmit
 # Frontend production build
 cd frontend && npm run build
 ```
+
+---
+
+## 10  Changelog
+
+### Phase 9 — Cloud Storage Upgrade, UI Cleanup & Template Sync
+1. **Toolbar:** Removed Save/Load buttons; renamed Cloud button to "☁ 雲端儲存"
+2. **Local persistence:** IndexedDB autosave remains as default (no changes needed)
+3. **Cloud upgrade (JSON + PDF):** New `upload-full` and `load-full` backend endpoints; PDFs now uploaded alongside project JSON to Firebase Cloud Storage; load restores PDFs to server `_STORE` with remapped file_ids
+4. **Admin panel — cloud storage column:** Added "雲端用量" column showing each user's `storage_used_bytes` formatted as KB/MB
+5. **Template Manager UI:** Columns changed to ID / Name / Columns / Notes / Owner; added filter input (searches name, columns, notes, owner, ID); `currentUserUid` prop for ownership display
+6. **Template apply — column sync:** Both `handleTemplateApply` (multi-page) and `handleSingleApplyTemplate` (single-page) now auto-add missing columns from the template via `project.addColumn()` before applying boxes
+7. **Cloud project TTL & permanent:** Projects default to 14-day TTL from last update; load extends TTL; permanent toggle (lock/unlock) in CloudProjectsPanel; expiry displayed with color-coded status

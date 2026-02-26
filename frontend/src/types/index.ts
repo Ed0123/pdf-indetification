@@ -48,6 +48,8 @@ export interface Template {
   notes: string;
   preview_file_id: string | null;   // PDF file used for thumbnail preview
   preview_page: number;             // Page index for thumbnail
+  owner_uid?: string;               // Owner's user ID (from cloud templates)
+  owner_name?: string;              // Display name: "我" for self, uid prefix for others
 }
 
 /** Full application state (serialised to JSON for Save/Load). */

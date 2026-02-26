@@ -7,12 +7,17 @@ import tempfile
 import shutil
 from typing import Dict, List
 
-from fastapi import APIRouter, UploadFile, File, HTTPException, Query
+from fastapi import APIRouter, UploadFile, File, HTTPException, Query, Depends
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 
+from backend.auth_middleware import require_auth
+
 # In-memory store: file_id -> absolute path on disk
 _STORE: Dict[str, str] = {}
+
+# Maximum upload size per file: 200 MB
+MAX_FILE_SIZE = 200 * 1024 * 1024
 
 
 def _get_path(file_id: str) -> str:
@@ -43,7 +48,7 @@ class FileInfo(BaseModel):
 
 
 @router.post("/upload", response_model=List[FileInfo], summary="Upload PDF files")
-async def upload_pdfs(files: List[UploadFile] = File(...)):
+async def upload_pdfs(files: List[UploadFile] = File(...), user: dict = Depends(require_auth)):
     """
     Accept one or more PDF files.
     Stores them in a server-side temp directory and returns metadata.
@@ -61,6 +66,11 @@ async def upload_pdfs(files: List[UploadFile] = File(...)):
         dest = os.path.join(tmp_dir, f"{file_id}.pdf")
 
         content = await upload.read()
+        if len(content) > MAX_FILE_SIZE:
+            raise HTTPException(
+                status_code=413,
+                detail=f"File '{upload.filename}' exceeds maximum size of {MAX_FILE_SIZE // (1024*1024)} MB"
+            )
         with open(dest, "wb") as f:
             f.write(content)
 
@@ -96,6 +106,7 @@ def render_page(
     file_id: str,
     page_num: int,
     zoom: float = Query(default=1.5, ge=0.1, le=5.0),
+    user: dict = Depends(require_auth),
 ):
     """Return the requested page rendered as a base64-encoded PNG."""
     from utils.pdf_processing import render_pdf_page
@@ -122,7 +133,7 @@ class ExtractRequest(BaseModel):
 
 
 @router.post("/{file_id}/page/{page_num}/extract", summary="Extract text from a region")
-def extract_text(file_id: str, page_num: int, req: ExtractRequest):
+def extract_text(file_id: str, page_num: int, req: ExtractRequest, user: dict = Depends(require_auth)):
     """Extract text from the given relative bounding box on a page."""
     from utils.pdf_processing import extract_text_from_relative_region
 
@@ -141,7 +152,7 @@ def extract_text(file_id: str, page_num: int, req: ExtractRequest):
 # ---------------------------------------------------------------------------
 
 @router.get("/{file_id}/page/{page_num}/dimensions", summary="Get page dimensions")
-def page_dimensions(file_id: str, page_num: int):
+def page_dimensions(file_id: str, page_num: int, user: dict = Depends(require_auth)):
     """Return the PDF page size in points."""
     from utils.pdf_processing import get_page_dimensions
 

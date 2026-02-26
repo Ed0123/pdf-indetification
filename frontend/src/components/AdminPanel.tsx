@@ -8,7 +8,7 @@
  */
 import React, { useState, useMemo } from "react";
 import type { UserProfile, MemberTier, AccountStatus } from "../types/user";
-import { TIER_LABELS, STATUS_LABELS } from "../types/user";
+import { TIER_LABELS, STATUS_LABELS, TIER_FEATURES } from "../types/user";
 import type { GroupItem, TierItem } from "../api/client";
 
 interface AdminPanelProps {
@@ -20,8 +20,8 @@ interface AdminPanelProps {
   onCreateGroup: (name: string) => Promise<void>;
   onRenameGroup: (groupId: string, name: string) => Promise<void>;
   onDeleteGroup: (groupId: string) => Promise<void>;
-  onCreateTier: (data: { name: string; label: string; quota: number }) => Promise<void>;
-  onUpdateTier: (tierId: string, data: { name?: string; label?: string; quota?: number }) => Promise<void>;
+  onCreateTier: (data: { name: string; label: string; quota: number; storage_quota_mb?: number; features?: Record<string, boolean> }) => Promise<void>;
+  onUpdateTier: (tierId: string, data: { name?: string; label?: string; quota?: number; storage_quota_mb?: number; features?: Record<string, boolean> }) => Promise<void>;
   onDeleteTier: (tierId: string) => Promise<void>;
   onGoHome: () => void;
 }
@@ -303,6 +303,64 @@ export function AdminPanel({
             <button style={miniBtn} onClick={handleUpdateTier} disabled={!selectedTierId}>更新</button>
             <button style={miniBtn} onClick={handleDeleteTier} disabled={!selectedTierId}>刪除</button>
           </div>
+
+          {/* Feature matrix */}
+          {tiers.length > 0 && (
+            <div style={{ marginTop: 12 }}>
+              <div style={{ fontSize: 12, fontWeight: 600, marginBottom: 6 }}>功能矩陣</div>
+              <div style={{ overflowX: "auto" }}>
+                <table style={{ borderCollapse: "collapse", fontSize: 12, width: "100%" }}>
+                  <thead>
+                    <tr>
+                      <th style={{ ...thFeature, textAlign: "left" }}>功能</th>
+                      {tiers.map((t) => (
+                        <th key={t.id} style={thFeature}>{t.label}</th>
+                      ))}
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {TIER_FEATURES.map((feat) => (
+                      <tr key={feat.key}>
+                        <td style={tdFeature}>{feat.label}</td>
+                        {tiers.map((t) => {
+                          const enabled = t.features?.[feat.key] ?? false;
+                          return (
+                            <td key={t.id} style={{ ...tdFeature, textAlign: "center" }}>
+                              <input
+                                type="checkbox"
+                                checked={enabled}
+                                onChange={() => {
+                                  const newFeatures = { ...(t.features || {}), [feat.key]: !enabled };
+                                  onUpdateTier(t.id, { features: newFeatures });
+                                }}
+                              />
+                            </td>
+                          );
+                        })}
+                      </tr>
+                    ))}
+                    <tr>
+                      <td style={tdFeature}>雲端儲存 (MB)</td>
+                      {tiers.map((t) => (
+                        <td key={t.id} style={{ ...tdFeature, textAlign: "center" }}>
+                          <input
+                            type="number"
+                            style={{ width: 50, fontSize: 11, border: "1px solid #ccc", borderRadius: 2, textAlign: "center" }}
+                            value={t.storage_quota_mb ?? 0}
+                            onChange={(e) => {
+                              const val = parseInt(e.target.value, 10);
+                              if (!isNaN(val)) onUpdateTier(t.id, { storage_quota_mb: val });
+                            }}
+                            title="-1 = 無限, 0 = 無"
+                          />
+                        </td>
+                      ))}
+                    </tr>
+                  </tbody>
+                </table>
+              </div>
+            </div>
+          )}
         </div>
 
         {/* Table */}
@@ -310,7 +368,7 @@ export function AdminPanel({
           <table style={table}>
             <thead>
               <tr>
-                {["#", "姓名", "電郵", "WhatsApp", "用量", "類別", "群組", "加入日期", "最後登入", "狀態", "備註"].map((h) => (
+                {["#", "姓名", "電郵", "WhatsApp", "用量", "雲端用量", "類別", "群組", "加入日期", "最後登入", "狀態", "備註"].map((h) => (
                   <th key={h} style={th}>{h}</th>
                 ))}
               </tr>
@@ -336,6 +394,15 @@ export function AdminPanel({
                           重置
                         </button>
                       </div>
+                    </td>
+
+                    {/* Cloud storage used */}
+                    <td style={{ ...td, textAlign: "center", fontSize: 11, whiteSpace: "nowrap" }}>
+                      {u.storage_used_bytes
+                        ? u.storage_used_bytes < 1024 * 1024
+                          ? `${(u.storage_used_bytes / 1024).toFixed(1)} KB`
+                          : `${(u.storage_used_bytes / (1024 * 1024)).toFixed(1)} MB`
+                        : "0"}
                     </td>
 
                     {/* Tier dropdown */}
@@ -416,7 +483,7 @@ export function AdminPanel({
               })}
               {filtered.length === 0 && (
                 <tr>
-                  <td colSpan={11} style={{ ...td, textAlign: "center", color: "#aaa" }}>
+                  <td colSpan={12} style={{ ...td, textAlign: "center", color: "#aaa" }}>
                     沒有符合條件的用戶
                   </td>
                 </tr>
@@ -462,4 +529,10 @@ const linkBtn: React.CSSProperties = {
 const miniBtn: React.CSSProperties = {
   padding: "2px 8px", border: "1px solid #ccc", borderRadius: 3,
   background: "#f9f9f9", cursor: "pointer", fontSize: 12,
+};
+const thFeature: React.CSSProperties = {
+  padding: "4px 8px", borderBottom: "1px solid #ddd", textAlign: "center", fontSize: 11, whiteSpace: "nowrap",
+};
+const tdFeature: React.CSSProperties = {
+  padding: "3px 8px", borderBottom: "1px solid #eee", fontSize: 11,
 };

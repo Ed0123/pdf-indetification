@@ -2,14 +2,13 @@ import React from "react";
 
 interface ToolbarProps {
   onImport: () => void;
-  onSave: () => void;
-  onLoad: () => void;
   onClearData: () => void;
   onDeleteFiles: () => void;
   onExportExcel: () => void;
   onRecognizeText: () => void;
   onManageTemplates: () => void;
   onExportPdf: () => void;
+  onCloudProjects?: () => void;
   disabled: boolean;
 }
 
@@ -53,14 +52,13 @@ function Btn({
 
 export function Toolbar({
   onImport,
-  onSave,
-  onLoad,
   onClearData,
   onDeleteFiles,
   onExportExcel,
   onRecognizeText,
   onManageTemplates,
   onExportPdf,
+  onCloudProjects,
   disabled,
 }: ToolbarProps) {
   return (
@@ -76,9 +74,9 @@ export function Toolbar({
       }}
     >
       <Btn label="📂 Import PDF" onClick={onImport} title="Upload PDF files from your device" />
-      <div style={{ width: 1, height: 24, background: "#ddd", margin: "0 2px" }} />
-      <Btn label="💾 Save" onClick={onSave} disabled={disabled} title="Save project as JSON" />
-      <Btn label="📁 Load" onClick={onLoad} title="Load a saved project JSON" />
+      {onCloudProjects && (
+        <Btn label="☁ 雲端儲存" onClick={onCloudProjects} title="切換到雲端儲存 / 管理雲端專案" />
+      )}
       <div style={{ width: 1, height: 24, background: "#ddd", margin: "0 2px" }} />
       <Btn label="🗑 Clear Data" onClick={onClearData} disabled={disabled} title="Clear extracted data for selected pages" />
       <Btn label="✖ Delete Files" onClick={onDeleteFiles} disabled={disabled} title="Remove selected PDF files from project" />

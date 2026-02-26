@@ -11,20 +11,22 @@ import { SinglePageDataTable } from "./components/SinglePageDataTable";
 import { LoginPage } from "./components/LoginPage";
 import { MyAccountPage } from "./components/MyAccountPage";
 import { AdminPanel } from "./components/AdminPanel";
+import { CloudProjectsPanel } from "./components/CloudProjectsPanel";
 import type { SelectedPage } from "./components/PageSelectorModal";
 import { useProject } from "./hooks/useProject";
 import { useAuth } from "./hooks/useAuth";
+import { saveDraft, loadDraft, clearDraft } from "./storage/localDraft";
+import type { DraftPayload } from "./storage/localDraft";
 import type { PDFFileInfo, PageData, StatusInfo, Template, TemplateBox } from "./types";
 import type { UserProfile } from "./types/user";
 import type { ExportPageEntry } from "./components/PDFExportModal";
 import {
   uploadPDFs,
-  saveProject,
-  loadProject,
   exportExcel,
   exportPdfPages,
   extractText,
   getOcrStatus,
+  installTokenProvider,
   setAuthToken,
   getMyProfile,
   updateMyProfile,
@@ -71,68 +73,144 @@ export default function App() {
   const [usagePages, setUsagePages] = useState(0);
   const [usageLimit, setUsageLimit] = useState<number>(-1);
 
+  // Global error toast
+  const [toastMsg, setToastMsg] = useState<string | null>(null);
+  const toastTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  const showError = useCallback((msg: string) => {
+    setToastMsg(msg);
+    if (toastTimer.current) clearTimeout(toastTimer.current);
+    toastTimer.current = setTimeout(() => setToastMsg(null), 6000);
+  }, []);
+
+  // Profile loading gate
+  const [profileLoading, setProfileLoading] = useState(false);
+
   const [selectedColumn, setSelectedColumn] = useState<string | null>(null);
   const [status, setStatus] = useState<StatusInfo>({ message: "Ready", progress: null, ocr_available: false });
   const [showTemplateModal, setShowTemplateModal] = useState(false);
   const [showExportModal, setShowExportModal] = useState(false);
   const [showRecognizeSelector, setShowRecognizeSelector] = useState(false);
+  const [showCloudProjects, setShowCloudProjects] = useState(false);
 
   // Collapsible panels
   const [treeCollapsed, setTreeCollapsed] = useState(false);
   const [dataTableCollapsed, setDataTableCollapsed] = useState(false);
 
   const fileInputRef = useRef<HTMLInputElement>(null);
-  const loadInputRef = useRef<HTMLInputElement>(null);
 
   // --------------------------------------------------------------------------
-  // Auth flow
+  // Auth flow — consolidated into a single effect to avoid race conditions
   // --------------------------------------------------------------------------
 
-  // Keep auth token in sync with API client
+  // Install token providers into API client (once)
   useEffect(() => {
-    if (IS_DEV_MODE) return;          // skip in dev mode
-    if (auth.user) {
-      auth.getToken().then((t) => setAuthToken(t));
-    } else {
-      setAuthToken(null);
-    }
-  }, [auth.user]);
+    if (IS_DEV_MODE) return;
+    installTokenProvider(auth.getToken, auth.getTokenFresh);
+  }, [auth.getToken, auth.getTokenFresh]);
 
-  // After auth state resolves, fetch profile
+  // After auth state resolves, fetch profile (single consolidated effect)
   useEffect(() => {
-    if (IS_DEV_MODE) return;          // skip in dev mode
+    if (IS_DEV_MODE) return;
     if (auth.loading) return;
     if (!auth.user) {
       setView("login");
       setProfile(null);
+      setProfileLoading(false);
       return;
     }
-    // Fetch profile
-    auth.getToken().then((token) => {
-      if (!token) return;
-      setAuthToken(token);
-      getMyProfile()
-        .then((p) => {
-          setProfile(p);
-          setUsagePages(p.usage_pages ?? 0);
-          const firstTime = !p.salutation && !p.whatsapp;
-          setIsNewUser(firstTime);
-          if (firstTime || p.status !== "active") {
-            setView("account");
-          } else {
-            setView("main");
-          }
-        })
-        .catch(() => setView("account"));
-    });
+
+    // Profile fetch — guaranteed token is fresh via installTokenProvider
+    setProfileLoading(true);
+    getMyProfile()
+      .then((p) => {
+        setProfile(p);
+        setUsagePages(p.usage_pages ?? 0);
+        const firstTime = !p.salutation && !p.whatsapp;
+        setIsNewUser(firstTime);
+        if (firstTime || p.status !== "active") {
+          setView("account");
+        } else {
+          setView("main");
+        }
+        // Fetch usage limit (quota check with 0 pages)
+        recordUsage(0)
+          .then((r) => { setUsagePages(r.usage_pages); setUsageLimit(r.limit); })
+          .catch(() => {});
+      })
+      .catch((err) => {
+        showError(`載入個人資料失敗：${err.message || err}`);
+        setView("account");
+      })
+      .finally(() => setProfileLoading(false));
   }, [auth.user, auth.loading]);
 
   // Check OCR on mount
   useEffect(() => {
     getOcrStatus()
       .then((available) => setStatus((s) => ({ ...s, ocr_available: available })))
-      .catch(() => {});
+      .catch((err) => {
+        console.warn("OCR status check failed:", err);
+        setStatus((s) => ({ ...s, ocr_available: false }));
+      });
   }, []);
+
+  // --------------------------------------------------------------------------
+  // IndexedDB autosave — debounced, saves every 5 seconds of inactivity
+  // --------------------------------------------------------------------------
+
+  const autosaveTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  useEffect(() => {
+    const uid = auth.user?.uid;
+    if (!uid || state.pdf_files.length === 0) return;
+
+    if (autosaveTimer.current) clearTimeout(autosaveTimer.current);
+    autosaveTimer.current = setTimeout(() => {
+      const payload: DraftPayload = {
+        pdf_files: state.pdf_files.map((f) => ({
+          ...f,
+          pages: f.pages.map((p) => ({
+            ...p,
+            boxes: Object.values(p.boxes),
+          })),
+        })),
+        columns: state.columns,
+        templates: state.templates,
+        last_selected_file: state.selected_file_id ?? "",
+        last_selected_page: state.selected_page,
+      };
+      saveDraft(uid, payload).catch(() => {});
+    }, 5000);
+
+    return () => {
+      if (autosaveTimer.current) clearTimeout(autosaveTimer.current);
+    };
+  }, [state.pdf_files, state.columns, state.templates, state.selected_file_id, state.selected_page, auth.user]);
+
+  // Offer to restore draft on login
+  const draftRestoreAttempted = useRef(false);
+  useEffect(() => {
+    if (draftRestoreAttempted.current) return;
+    const uid = auth.user?.uid;
+    if (!uid || view !== "main") return;
+    draftRestoreAttempted.current = true;
+
+    loadDraft(uid).then((draft) => {
+      if (!draft || !draft.payload.pdf_files?.length) return;
+      const minutesAgo = Math.round((Date.now() - draft.savedAt.getTime()) / 60000);
+      const label = minutesAgo < 1 ? "不到一分鐘前" : `${minutesAgo} 分鐘前`;
+      const ok = window.confirm(
+        `發現自動保存的草稿（${label}，${draft.payload.pdf_files.length} 個檔案）。\n\n要恢復嗎？（注意：PDF 檔案需要重新上傳）`
+      );
+      if (ok) {
+        project.restoreFromDraft(draft.payload);
+        setMsg("已恢復自動保存的草稿（PDF 需重新上傳）");
+      } else {
+        clearDraft(uid).catch(() => {});
+      }
+    }).catch(() => {});
+  }, [view, auth.user]);
 
   // --------------------------------------------------------------------------
   // Cloud template sync — load from Firestore on login
@@ -167,8 +245,10 @@ export default function App() {
       color: b.color || "#2980b9",
     })),
     notes: ct.notes ?? "",
-    preview_file_id: null,   // page image is in cloud, not local file
+    preview_file_id: null,
     preview_page: 0,
+    owner_uid: ct.owner_uid,
+    owner_name: ct.owner_uid === auth.user?.uid ? "我" : "他人",
   });
 
   /** Render current PDF page to base64 and upload to Cloud Storage for a template. */
@@ -190,44 +270,70 @@ export default function App() {
   // --------------------------------------------------------------------------
 
   const handleGoogleSignIn = async () => {
-    await auth.signInWithGoogle();
+    try {
+      await auth.signInWithGoogle();
+    } catch (err: any) {
+      // User closed the popup or other error
+      if (err?.code !== "auth/popup-closed-by-user") {
+        showError(`登入失敗：${err.message || err}`);
+      }
+    }
   };
 
   const handleSignOut = async () => {
+    if (state.pdf_files.length > 0) {
+      const ok = window.confirm("您有未儲存的工作，確定要登出嗎？");
+      if (!ok) return;
+    }
     await auth.signOut();
     setProfile(null);
     setView("login");
   };
 
   const handleSaveProfile = async (updates: Partial<UserProfile>) => {
-    const updated = await updateMyProfile(updates as any);
-    setProfile(updated);
-    setIsNewUser(false);
-    // If status is now active, allow going to main
-    if (updated.status === "active") {
-      setView("main");
+    try {
+      const updated = await updateMyProfile(updates as any);
+      setProfile(updated);
+      setIsNewUser(false);
+      // If status is now active, allow going to main
+      if (updated.status === "active") {
+        setView("main");
+      }
+    } catch (err: any) {
+      showError(`儲存個人資料失敗：${err.message || err}`);
     }
   };
 
   const handleOpenAdmin = async () => {
-    const [users, groups, tiers] = await Promise.all([listAllUsers(), listGroups(), listTiers()]);
-    setAdminUsers(users);
-    setAdminGroups(groups);
-    setAdminTiers(tiers);
-    setView("admin");
+    try {
+      const [users, groups, tiers] = await Promise.all([listAllUsers(), listGroups(), listTiers()]);
+      setAdminUsers(users);
+      setAdminGroups(groups);
+      setAdminTiers(tiers);
+      setView("admin");
+    } catch (err: any) {
+      showError(`載入管理員面板失敗：${err.message || err}`);
+    }
   };
 
   const handleAdminUpdateUser = async (uid: string, changes: Partial<UserProfile>) => {
-    await adminUpdateUser(uid, changes as any);
-    // Refresh list
-    const users = await listAllUsers();
-    setAdminUsers(users);
+    try {
+      await adminUpdateUser(uid, changes as any);
+      const users = await listAllUsers();
+      setAdminUsers(users);
+    } catch (err: any) {
+      showError(`更新用戶失敗：${err.message || err}`);
+    }
   };
 
   const handleAdminResetUsage = async (uid: string) => {
-    await adminResetUsage(uid);
-    const users = await listAllUsers();
-    setAdminUsers(users);
+    try {
+      await adminResetUsage(uid);
+      const users = await listAllUsers();
+      setAdminUsers(users);
+    } catch (err: any) {
+      showError(`重置用量失敗：${err.message || err}`);
+    }
   };
 
   const refreshAdminData = async () => {
@@ -238,33 +344,57 @@ export default function App() {
   };
 
   const handleCreateGroup = async (name: string) => {
-    await createGroup(name);
-    await refreshAdminData();
+    try {
+      await createGroup(name);
+      await refreshAdminData();
+    } catch (err: any) {
+      showError(`建立群組失敗：${err.message || err}`);
+    }
   };
 
   const handleRenameGroup = async (groupId: string, name: string) => {
-    await renameGroup(groupId, name);
-    await refreshAdminData();
+    try {
+      await renameGroup(groupId, name);
+      await refreshAdminData();
+    } catch (err: any) {
+      showError(`重命名群組失敗：${err.message || err}`);
+    }
   };
 
   const handleDeleteGroup = async (groupId: string) => {
-    await deleteGroup(groupId);
-    await refreshAdminData();
+    try {
+      await deleteGroup(groupId);
+      await refreshAdminData();
+    } catch (err: any) {
+      showError(`刪除群組失敗：${err.message || err}`);
+    }
   };
 
   const handleCreateTier = async (data: { name: string; label: string; quota: number }) => {
-    await createTier(data);
-    await refreshAdminData();
+    try {
+      await createTier(data);
+      await refreshAdminData();
+    } catch (err: any) {
+      showError(`建立類別失敗：${err.message || err}`);
+    }
   };
 
   const handleUpdateTier = async (tierId: string, data: { name?: string; label?: string; quota?: number }) => {
-    await updateTier(tierId, data);
-    await refreshAdminData();
+    try {
+      await updateTier(tierId, data);
+      await refreshAdminData();
+    } catch (err: any) {
+      showError(`更新類別失敗：${err.message || err}`);
+    }
   };
 
   const handleDeleteTier = async (tierId: string) => {
-    await deleteTier(tierId);
-    await refreshAdminData();
+    try {
+      await deleteTier(tierId);
+      await refreshAdminData();
+    } catch (err: any) {
+      showError(`刪除類別失敗：${err.message || err}`);
+    }
   };
 
   // --------------------------------------------------------------------------
@@ -316,69 +446,6 @@ export default function App() {
       setMsg(`Imported ${fileInfos.length} file(s)`, null);
     } catch (err) {
       setMsg(`Import error: ${err}`, null);
-    }
-    e.target.value = "";
-  };
-
-  const handleSave = async () => {
-    setMsg("Saving...", 50);
-    try {
-      await saveProject(buildProjectPayload());
-      setMsg("Saved successfully");
-    } catch (err) {
-      setMsg(`Save error: ${err}`);
-    }
-  };
-
-  const handleLoad = () => loadInputRef.current?.click();
-
-  const onLoadFile = async (e: React.ChangeEvent<HTMLInputElement>) => {
-    const file = e.target.files?.[0];
-    if (!file) return;
-    setMsg("Loading project...", 30);
-    try {
-      const data = await loadProject(file) as ReturnType<typeof buildProjectPayload>;
-      const migrateColumnName = (name: string) => (name === "Page" ? "Page Name" : name);
-
-      const migratedColumns = (data.columns ?? []).map((c: any) => ({
-        ...c,
-        name: migrateColumnName(c.name),
-      }));
-
-      const files: PDFFileInfo[] = (data.pdf_files ?? []).map((f: any) => ({
-        ...f,
-        pages: (f.pages ?? []).map((p: any) => ({
-          ...p,
-          extracted_data: Object.fromEntries(
-            Object.entries(p.extracted_data ?? {}).map(([k, v]) => [migrateColumnName(k), v])
-          ),
-          boxes: Object.fromEntries(
-            (Array.isArray(p.boxes) ? p.boxes : Object.values(p.boxes ?? {})).map((b: any) => {
-              const migratedName = migrateColumnName(b.column_name);
-              return [migratedName, { ...b, column_name: migratedName }];
-            })
-          ),
-        })),
-      }));
-
-      const migratedTemplates = (data.templates ?? []).map((t: any) => ({
-        ...t,
-        boxes: (t.boxes ?? []).map((b: any) => ({
-          ...b,
-          column_name: migrateColumnName(b.column_name),
-        })),
-      }));
-
-      project.loadProject({
-        pdf_files: files,
-        columns: migratedColumns,
-        templates: migratedTemplates,
-        selected_file_id: data.last_selected_file || null,
-        selected_page: data.last_selected_page ?? 0,
-      });
-      setMsg("Project loaded");
-    } catch (err) {
-      setMsg(`Load error: ${err}`);
     }
     e.target.value = "";
   };
@@ -481,6 +548,15 @@ export default function App() {
   };
 
   const handleTemplateApply = (template: Template, pages: SelectedPage[]) => {
+    // Task 6: Ensure all template columns exist in the project
+    const existingCols = new Set(state.columns.map((c) => c.name));
+    template.boxes.forEach((b: TemplateBox) => {
+      if (!existingCols.has(b.column_name)) {
+        project.addColumn(b.column_name);
+        existingCols.add(b.column_name);
+      }
+    });
+
     const targets = pages.map((p) => ({ file_id: p.file_id, page: p.page_number }));
     targets.forEach(({ file_id, page }) => {
       template.boxes.forEach((b: TemplateBox) => {
@@ -513,6 +589,7 @@ export default function App() {
     if (!pages.length) return;
 
     let done = 0;
+    let failures = 0;
     const total = pages.reduce((sum, sp) => {
       const file = state.pdf_files.find((f) => f.file_id === sp.file_id);
       const page = file?.pages.find((p) => p.page_number === sp.page_number);
@@ -525,10 +602,17 @@ export default function App() {
     try {
       const usageCheck = await recordUsage(0); // check without adding
       if (usageCheck.over_limit) {
-        setMsg("⚠ Monthly OCR page limit reached. Upgrade your plan.");
+        showError("⚠ 本月 OCR 頁數已達上限，請升級方案。");
         return;
       }
-    } catch { /* proceed if usage service unavailable */ }
+    } catch (err: any) {
+      // If 401 or auth error, stop; otherwise proceed
+      if (err?.message?.includes("401") || err?.message?.includes("登入")) {
+        showError(err.message);
+        return;
+      }
+      console.warn("Usage check unavailable, proceeding:", err);
+    }
 
     setMsg(`Recognizing text (0/${total})...`, 0);
 
@@ -540,7 +624,15 @@ export default function App() {
         try {
           const text = await extractText(sp.file_id, sp.page_number, box, status.ocr_available);
           project.setCell(sp.file_id, sp.page_number, box.column_name, text);
-        } catch { /* ignore individual failure */ }
+        } catch (err: any) {
+          failures++;
+          // If auth expired mid-batch, abort remaining
+          if (err?.message?.includes("401") || err?.message?.includes("登入")) {
+            showError("認證已過期，請重新登入後再試。");
+            return;
+          }
+          console.warn(`OCR failed for ${sp.file_id} p${sp.page_number} box ${box.column_name}:`, err);
+        }
         done++;
         setMsg(`Recognizing text (${done}/${total})...`, Math.round((done / total) * 100));
       }
@@ -552,9 +644,12 @@ export default function App() {
       const result = await recordUsage(ocrPages);
       setUsagePages(result.usage_pages);
       setUsageLimit(result.limit);
-    } catch { /* non-fatal */ }
+    } catch (err: any) {
+      console.warn("Usage recording failed:", err);
+    }
 
-    setMsg("Text recognition complete", null);
+    const suffix = failures > 0 ? `（${failures} 個框辨識失敗）` : "";
+    setMsg(`Text recognition complete${suffix}`, null);
   };
 
   // Single-page recognize (from SinglePageDataTable)
@@ -651,6 +746,14 @@ export default function App() {
   const handleSingleApplyTemplate = (name: string) => {
     const t = state.templates.find((tpl) => tpl.name === name);
     if (!t || !state.selected_file_id) return;
+    // Task 6: Ensure all template columns exist
+    const existingCols = new Set(state.columns.map((c) => c.name));
+    t.boxes.forEach((b) => {
+      if (!existingCols.has(b.column_name)) {
+        project.addColumn(b.column_name);
+        existingCols.add(b.column_name);
+      }
+    });
     t.boxes.forEach((b) => {
       project.setBox(state.selected_file_id!, state.selected_page, {
         column_name: b.column_name, x: b.x, y: b.y, width: b.width, height: b.height,
@@ -691,8 +794,8 @@ export default function App() {
     return <LoginPage onGoogleSignIn={handleGoogleSignIn} />;
   }
 
-  // Loading auth state (skip in dev mode)
-  if (!IS_DEV_MODE && auth.loading) {
+  // Loading auth state or profile (skip in dev mode)
+  if (!IS_DEV_MODE && (auth.loading || profileLoading)) {
     return (
       <div style={{ display: "flex", alignItems: "center", justifyContent: "center", height: "100vh", background: "#f0f2f5" }}>
         <p>Loading...</p>
@@ -700,9 +803,30 @@ export default function App() {
     );
   }
 
+  // Toast wrapper for early-return views
+  const wrapWithToast = (el: React.ReactNode) => (
+    <>
+      {el}
+      {toastMsg && (
+        <div
+          onClick={() => { setToastMsg(null); if (toastTimer.current) clearTimeout(toastTimer.current); }}
+          style={{
+            position: "fixed", bottom: 32, left: "50%", transform: "translateX(-50%)",
+            background: "#d32f2f", color: "#fff", padding: "10px 24px",
+            borderRadius: 8, boxShadow: "0 4px 12px rgba(0,0,0,0.3)",
+            fontSize: 14, zIndex: 99999, cursor: "pointer", maxWidth: "80vw",
+            wordBreak: "break-word",
+          }}
+        >
+          {toastMsg}
+        </div>
+      )}
+    </>
+  );
+
   // My Account page
   if (view === "account") {
-    return (
+    return wrapWithToast(
       <MyAccountPage
         profile={profile}
         isNewUser={isNewUser}
@@ -720,7 +844,7 @@ export default function App() {
 
   // Admin panel
   if (view === "admin") {
-    return (
+    return wrapWithToast(
       <AdminPanel
         users={adminUsers}
         groups={adminGroups}
@@ -748,21 +872,19 @@ export default function App() {
     <div style={{ display: "flex", flexDirection: "column", height: "100vh", overflow: "hidden" }}>
       {/* Hidden inputs */}
       <input ref={fileInputRef} type="file" accept=".pdf" multiple style={{ display: "none" }} onChange={onFilesSelected} />
-      <input ref={loadInputRef} type="file" accept=".json" style={{ display: "none" }} onChange={onLoadFile} />
 
       {/* Top toolbar */}
       <div style={{ display: "flex", alignItems: "center" }}>
         <div style={{ flex: 1 }}>
           <Toolbar
             onImport={handleImport}
-            onSave={handleSave}
-            onLoad={handleLoad}
             onClearData={handleClearData}
             onDeleteFiles={handleDeleteFiles}
             onExportExcel={handleExportExcel}
             onRecognizeText={handleRecognizeText}
             onManageTemplates={handleManageTemplates}
             onExportPdf={handleExportPdf}
+            onCloudProjects={() => setShowCloudProjects(true)}
             disabled={state.pdf_files.length === 0}
           />
         </div>
@@ -791,6 +913,7 @@ export default function App() {
           currentBoxes={Object.values(currentBoxes).map((b, i) => ({ ...b, color: ["#e74c3c","#2980b9","#27ae60","#f39c12"][i % 4] }))}
           currentFileId={state.selected_file_id}
           currentPage={state.selected_page}
+          currentUserUid={auth.user?.uid}
           onSave={handleTemplateSave}
           onApply={handleTemplateApply}
           onClose={() => setShowTemplateModal(false)}
@@ -815,6 +938,20 @@ export default function App() {
           confirmLabel="Recognize Text"
           onConfirm={handleRecognizeConfirm}
           onCancel={() => setShowRecognizeSelector(false)}
+        />
+      )}
+
+      {/* Cloud Projects Panel */}
+      {showCloudProjects && (
+        <CloudProjectsPanel
+          projectPayload={buildProjectPayload}
+          onLoad={(data) => {
+            project.loadProject(data);
+            setMsg("已載入雲端專案");
+          }}
+          onClose={() => setShowCloudProjects(false)}
+          onError={showError}
+          onMsg={(m) => setMsg(m)}
         />
       )}
 
@@ -938,6 +1075,22 @@ export default function App() {
         usagePages={usagePages}
         usageLimit={usageLimit}
       />
+
+      {/* Error toast overlay */}
+      {toastMsg && (
+        <div
+          onClick={() => { setToastMsg(null); if (toastTimer.current) clearTimeout(toastTimer.current); }}
+          style={{
+            position: "fixed", bottom: 32, left: "50%", transform: "translateX(-50%)",
+            background: "#d32f2f", color: "#fff", padding: "10px 24px",
+            borderRadius: 8, boxShadow: "0 4px 12px rgba(0,0,0,0.3)",
+            fontSize: 14, zIndex: 99999, cursor: "pointer", maxWidth: "80vw",
+            wordBreak: "break-word",
+          }}
+        >
+          {toastMsg}
+        </div>
+      )}
     </div>
   );
 }

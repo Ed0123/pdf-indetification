@@ -38,11 +38,24 @@ export interface UserProfile {
   usage_month: string;
   /** OCR pages consumed this month */
   usage_pages: number;
+  /** Cloud storage used (bytes) */
+  storage_used_bytes?: number;
   created_at: string;       // ISO
   last_login: string;       // ISO
   notes: string;            // admin-editable
   photo_url: string;        // from Google
 }
+
+/** Feature flags that can be toggled per tier */
+export const TIER_FEATURES = [
+  { key: "ocr", label: "OCR 文字辨識" },
+  { key: "cloud_save", label: "雲端儲存專案" },
+  { key: "export_excel", label: "匯出 Excel" },
+  { key: "export_pdf", label: "匯出 PDF 頁面" },
+  { key: "templates", label: "範本管理" },
+] as const;
+
+export type TierFeatureKey = typeof TIER_FEATURES[number]["key"];
 
 /** Minimal profile for the admin table. */
 export type UserRow = Pick<

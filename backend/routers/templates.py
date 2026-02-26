@@ -74,8 +74,8 @@ def _user_group(uid: str) -> str:
     ref = get_db().collection(USERS_COLLECTION).document(uid)
     snap = ref.get()
     if snap.exists:
-        return snap.to_dict().get("group", "A組")
-    return "A組"
+        return snap.to_dict().get("group", "General")
+    return "General"
 
 
 def _is_admin(uid: str) -> bool:

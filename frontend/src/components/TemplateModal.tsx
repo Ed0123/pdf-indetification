@@ -32,6 +32,7 @@ interface TemplateModalProps {
   currentBoxes: TemplateBox[];
   currentFileId: string | null;
   currentPage: number;
+  currentUserUid?: string;
   onSave: (templates: Template[]) => void;
   onApply: (template: Template, pages: SelectedPage[]) => void;
   onClose: () => void;
@@ -45,6 +46,7 @@ export function TemplateModal({
   currentBoxes,
   currentFileId,
   currentPage,
+  currentUserUid,
   onSave,
   onApply,
   onClose,
@@ -56,6 +58,7 @@ export function TemplateModal({
   const [mode, setMode] = useState<EditorMode>("view");
   const [showConfirmDelete, setShowConfirmDelete] = useState(false);
   const [showPageSelector, setShowPageSelector] = useState(false);
+  const [filterText, setFilterText] = useState("");
 
   // Editable fields for detail panel
   const [editName, setEditName] = useState("");
@@ -67,6 +70,20 @@ export function TemplateModal({
   const [thumbSrc, setThumbSrc] = useState<string | null>(null);
 
   const selected = templates.find((t) => t.id === selectedId) ?? null;
+
+  // Filter templates by search text
+  const filteredTemplates = filterText.trim()
+    ? templates.filter((t) => {
+        const q = filterText.toLowerCase();
+        return (
+          t.name.toLowerCase().includes(q) ||
+          t.boxes.some((b) => b.column_name.toLowerCase().includes(q)) ||
+          (t.notes ?? "").toLowerCase().includes(q) ||
+          (t.owner_name ?? "").toLowerCase().includes(q) ||
+          t.id.toLowerCase().includes(q)
+        );
+      })
+    : templates;
 
   // Populate edit fields when selection changes
   useEffect(() => {
@@ -195,21 +212,32 @@ export function TemplateModal({
           <div style={{ display: "flex", flex: 1, overflow: "hidden" }}>
             {/* ── Left: template list ── */}
             <div style={leftPanel}>
+              {/* Filter */}
+              <div style={{ padding: "6px 8px", borderBottom: "1px solid #eee" }}>
+                <input
+                  style={{ ...inputStyle, width: "100%", boxSizing: "border-box" }}
+                  placeholder="🔍 搜尋模板名稱 / 欄位 / 備註"
+                  value={filterText}
+                  onChange={(e) => setFilterText(e.target.value)}
+                />
+              </div>
               <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 12 }}>
                 <thead>
                   <tr style={{ background: "#f0f0f0" }}>
-                    {["ID", "Name", "Columns", "Notes"].map((h) => (
+                    {["ID", "Name", "Columns", "Notes", "Owner"].map((h) => (
                       <th key={h} style={thStyle}>{h}</th>
                     ))}
                   </tr>
                 </thead>
                 <tbody>
-                  {templates.length === 0 && (
-                    <tr><td colSpan={4} style={{ textAlign: "center", padding: 16, color: "#999" }}>
-                      No templates yet. Draw boxes on a page and click "+ New from current boxes".
+                  {filteredTemplates.length === 0 && (
+                    <tr><td colSpan={5} style={{ textAlign: "center", padding: 16, color: "#999" }}>
+                      {templates.length === 0
+                        ? 'No templates yet. Draw boxes on a page and click "+ New from current boxes".'
+                        : "No templates match the filter."}
                     </td></tr>
                   )}
-                  {templates.map((t) => (
+                  {filteredTemplates.map((t) => (
                     <tr
                       key={t.id}
                       style={{
@@ -222,6 +250,7 @@ export function TemplateModal({
                       <td style={tdStyle}>{t.name}</td>
                       <td style={tdStyle}>{t.boxes.map((b) => b.column_name).join(", ")}</td>
                       <td style={{ ...tdStyle, maxWidth: 120, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{t.notes}</td>
+                      <td style={{ ...tdStyle, fontSize: 11, color: "#888" }}>{t.owner_name ?? "—"}</td>
                     </tr>
                   ))}
                 </tbody>

@@ -226,6 +226,41 @@ export function useProject() {
     []
   );
 
+  /**
+   * Restore from an IndexedDB draft payload.
+   * Draft stores boxes as arrays; we convert them to { column_name: box } maps.
+   * PDF binary data is NOT stored — file_ids will be stale until user re-uploads.
+   */
+  const restoreFromDraft = useCallback((draft: {
+    pdf_files: any[];
+    columns: any[];
+    templates: any[];
+    last_selected_file: string;
+    last_selected_page: number;
+  }) => {
+    const restored: ProjectState = {
+      pdf_files: (draft.pdf_files ?? []).map((f: any) => ({
+        file_id: f.file_id ?? "",
+        file_name: f.file_name ?? "",
+        num_pages: f.num_pages ?? 0,
+        file_size: f.file_size ?? 0,
+        pages: (f.pages ?? []).map((p: any) => ({
+          page_number: p.page_number ?? 0,
+          extracted_data: p.extracted_data ?? {},
+          boxes: Array.isArray(p.boxes)
+            ? Object.fromEntries(p.boxes.map((b: any) => [b.column_name, b]))
+            : (p.boxes ?? {}),
+          applied_template: p.applied_template,
+        })),
+      })),
+      columns: draft.columns ?? INITIAL.columns,
+      templates: draft.templates ?? [],
+      selected_file_id: draft.last_selected_file || null,
+      selected_page: draft.last_selected_page ?? 0,
+    };
+    dispatch({ type: "LOAD_PROJECT", state: restored });
+  }, []);
+
   /** Current file object */
   const currentFile = state.pdf_files.find((f) => f.file_id === state.selected_file_id) ?? null;
   /** Current page object */
@@ -249,5 +284,6 @@ export function useProject() {
     loadProject,
     saveTemplates,
     setAppliedTemplate,
+    restoreFromDraft,
   };
 }

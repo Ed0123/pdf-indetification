@@ -1,31 +1,154 @@
 /// <reference types="vite/client" />
 /**
  * API client – thin fetch wrappers around the FastAPI backend.
- * In production, set VITE_API_URL to your Cloud Run URL.
- * During local dev, Vite proxies /api → localhost:8000.
+ *
+ * Design:
+ *  - Every request calls _getToken() for a fresh Firebase ID token.
+ *  - On 401, automatically force-refreshes and retries once.
+ *  - AbortController timeout (default 30s, OCR 120s).
+ *  - File-size validation before upload (max 1000 MB).
+ *  - All errors surface as thrown Error objects — never silently swallowed.
  */
 
 const BASE = (import.meta.env.VITE_API_URL as string | undefined) ?? "";
 
-/** Stored auth token — set via setAuthToken() after Firebase sign-in. */
-let _authToken: string | null = null;
-export function setAuthToken(token: string | null) {
-  _authToken = token;
+// Max upload size: 1000 MB
+const MAX_UPLOAD_SIZE_BYTES = 1000 * 1024 * 1024;
+
+// Default request timeout (ms)
+const DEFAULT_TIMEOUT_MS = 30_000;
+const LONG_TIMEOUT_MS = 120_000; // for OCR / export operations
+
+// ───────────── Token provider (set by App on auth change) ─────────────────
+
+type TokenProvider = () => Promise<string | null>;
+type TokenFreshProvider = () => Promise<string | null>;
+
+let _getToken: TokenProvider = async () => null;
+let _getTokenFresh: TokenFreshProvider = async () => null;
+
+/**
+ * Install token providers. Called once from App.tsx with useAuth()'s
+ * getToken / getTokenFresh callbacks.
+ */
+export function installTokenProvider(
+  getToken: TokenProvider,
+  getTokenFresh: TokenFreshProvider,
+) {
+  _getToken = getToken;
+  _getTokenFresh = getTokenFresh;
 }
 
-async function request<T>(path: string, init?: RequestInit): Promise<T> {
-  const headers: Record<string, string> = {
-    ...(init?.headers as Record<string, string> | undefined),
+/** @deprecated — kept for backward compat; prefer installTokenProvider. */
+export function setAuthToken(_token: string | null) {
+  // no-op — token is now fetched fresh per request
+}
+
+// ───────────── Core request helper ────────────────────────────────────────
+
+async function request<T>(
+  path: string,
+  init?: RequestInit,
+  timeoutMs = DEFAULT_TIMEOUT_MS,
+): Promise<T> {
+  const token = await _getToken();
+
+  const doFetch = async (authToken: string | null): Promise<Response> => {
+    const headers: Record<string, string> = {
+      ...(init?.headers as Record<string, string> | undefined),
+    };
+    if (authToken) {
+      headers["Authorization"] = `Bearer ${authToken}`;
+    }
+
+    const controller = new AbortController();
+    const timer = timeoutMs > 0
+      ? setTimeout(() => controller.abort(), timeoutMs)
+      : undefined;
+
+    try {
+      return await fetch(`${BASE}${path}`, {
+        ...init,
+        headers,
+        signal: controller.signal,
+      });
+    } finally {
+      if (timer) clearTimeout(timer);
+    }
   };
-  if (_authToken) {
-    headers["Authorization"] = `Bearer ${_authToken}`;
+
+  let res = await doFetch(token);
+
+  // 401 → force-refresh token and retry once
+  if (res.status === 401) {
+    const freshToken = await _getTokenFresh();
+    if (freshToken) {
+      res = await doFetch(freshToken);
+    }
+    if (res.status === 401) {
+      throw new Error("登入已過期，請重新登入。");
+    }
   }
-  const res = await fetch(`${BASE}${path}`, { ...init, headers });
+
   if (!res.ok) {
     const text = await res.text().catch(() => res.statusText);
     throw new Error(`API error ${res.status}: ${text}`);
   }
   return res.json() as Promise<T>;
+}
+
+/**
+ * request variant for blob downloads (project save, excel export, pdf export).
+ * Includes auth headers + 401 retry.
+ */
+async function requestBlob(
+  path: string,
+  init?: RequestInit,
+  timeoutMs = LONG_TIMEOUT_MS,
+): Promise<Blob> {
+  const token = await _getToken();
+
+  const doFetch = async (authToken: string | null): Promise<Response> => {
+    const headers: Record<string, string> = {
+      ...(init?.headers as Record<string, string> | undefined),
+    };
+    if (authToken) {
+      headers["Authorization"] = `Bearer ${authToken}`;
+    }
+
+    const controller = new AbortController();
+    const timer = timeoutMs > 0
+      ? setTimeout(() => controller.abort(), timeoutMs)
+      : undefined;
+
+    try {
+      return await fetch(`${BASE}${path}`, {
+        ...init,
+        headers,
+        signal: controller.signal,
+      });
+    } finally {
+      if (timer) clearTimeout(timer);
+    }
+  };
+
+  let res = await doFetch(token);
+
+  if (res.status === 401) {
+    const freshToken = await _getTokenFresh();
+    if (freshToken) {
+      res = await doFetch(freshToken);
+    }
+    if (res.status === 401) {
+      throw new Error("登入已過期，請重新登入。");
+    }
+  }
+
+  if (!res.ok) {
+    const text = await res.text().catch(() => res.statusText);
+    throw new Error(`API error ${res.status}: ${text}`);
+  }
+  return res.blob();
 }
 
 // --------------------------------------------------------------------------
@@ -40,11 +163,20 @@ export interface ServerFileInfo {
   pages: { page_number: number }[];
 }
 
-/** Upload one or more PDF files; returns server metadata array. */
+/** Upload one or more PDF files; returns server metadata array.
+ *  Validates file size ≤ 1000 MB before uploading. */
 export async function uploadPDFs(files: File[]): Promise<ServerFileInfo[]> {
+  // Client-side size validation
+  for (const f of files) {
+    if (f.size > MAX_UPLOAD_SIZE_BYTES) {
+      throw new Error(
+        `檔案 "${f.name}" 太大（${(f.size / 1024 / 1024).toFixed(0)} MB）。上限為 1000 MB。`
+      );
+    }
+  }
   const form = new FormData();
   files.forEach((f) => form.append("files", f));
-  return request<ServerFileInfo[]>("/api/pdf/upload", { method: "POST", body: form });
+  return request<ServerFileInfo[]>("/api/pdf/upload", { method: "POST", body: form }, LONG_TIMEOUT_MS);
 }
 
 /** Fetch a page rendered as base64 PNG. */
@@ -72,7 +204,8 @@ export async function extractText(
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ ...box, use_ocr: useOcr }),
-    }
+    },
+    LONG_TIMEOUT_MS,
   );
   return data.text;
 }
@@ -92,13 +225,11 @@ export async function getOcrStatus(): Promise<boolean> {
 
 /** Download the current project as a .json file. */
 export async function saveProject(payload: object): Promise<void> {
-  const res = await fetch(`${BASE}/api/project/save`, {
+  const blob = await requestBlob("/api/project/save", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(payload),
   });
-  if (!res.ok) throw new Error("Save failed");
-  const blob = await res.blob();
   triggerDownload(blob, "project.json");
 }
 
@@ -117,25 +248,21 @@ export async function loadProject(file: File): Promise<object> {
 export async function exportPdfPages(
   pages: { file_id: string; page_number: number; filename: string }[]
 ): Promise<void> {
-  const res = await fetch(`${BASE}/api/pdf/export-pages`, {
+  const blob = await requestBlob("/api/pdf/export-pages", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ pages }),
   });
-  if (!res.ok) throw new Error(`Export failed: ${res.statusText}`);
-  const blob = await res.blob();
   triggerDownload(blob, "exported_pages.zip");
 }
 
 /** Export project data to Excel and trigger a file download. */
 export async function exportExcel(payload: object): Promise<void> {
-  const res = await fetch(`${BASE}/api/export/excel`, {
+  const blob = await requestBlob("/api/export/excel", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(payload),
   });
-  if (!res.ok) throw new Error("Export failed");
-  const blob = await res.blob();
   triggerDownload(blob, "export.xlsx");
 }
 
@@ -246,6 +373,8 @@ export interface TierItem {
   name: string;
   label: string;
   quota: number; // -1 = unlimited
+  storage_quota_mb: number; // cloud storage MB, 0 = none, -1 = unlimited
+  features: Record<string, boolean>; // feature flags
 }
 
 /** Admin: list all tiers. */
@@ -255,19 +384,19 @@ export async function listTiers(): Promise<TierItem[]> {
 
 /** Admin: create a new tier. */
 export async function createTier(
-  data: { name: string; label: string; quota: number }
+  data: { name: string; label: string; quota: number; storage_quota_mb?: number; features?: Record<string, boolean> }
 ): Promise<TierItem> {
   return request<TierItem>("/api/users/tiers", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(data),
+    body: JSON.stringify({ storage_quota_mb: 0, features: {}, ...data }),
   });
 }
 
 /** Admin: update a tier. */
 export async function updateTier(
   tierId: string,
-  data: { name?: string; label?: string; quota?: number }
+  data: { name?: string; label?: string; quota?: number; storage_quota_mb?: number; features?: Record<string, boolean> }
 ): Promise<TierItem> {
   return request<TierItem>(`/api/users/tiers/${tierId}`, {
     method: "PUT",
@@ -398,4 +527,125 @@ export async function getTemplatePageImageUrl(
   return request<{ url: string; source: string }>(
     `/api/templates/${templateId}/page-image`
   );
+}
+
+// --------------------------------------------------------------------------
+// Cloud Project Management
+// --------------------------------------------------------------------------
+
+export interface CloudProjectItem {
+  id: string;
+  name: string;
+  owner_uid: string;
+  size_bytes: number;
+  pdf_count: number;
+  page_count: number;
+  permanent: boolean;
+  expires_at: string;
+  created_at: string;
+  updated_at: string;
+}
+
+/** List current user's cloud projects. */
+export async function listCloudProjects(): Promise<CloudProjectItem[]> {
+  return request<CloudProjectItem[]>("/api/projects/cloud/");
+}
+
+/** Create a new cloud project. */
+export async function createCloudProject(name: string): Promise<CloudProjectItem> {
+  return request<CloudProjectItem>("/api/projects/cloud/", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ name }),
+  });
+}
+
+/** Upload project JSON to an existing cloud project. */
+export async function uploadCloudProjectJson(
+  projectId: string,
+  jsonBlob: Blob
+): Promise<CloudProjectItem> {
+  const token = await _getToken();
+  const form = new FormData();
+  form.append("file", jsonBlob, "project.json");
+  const res = await fetch(`${BASE}/api/projects/cloud/${projectId}/upload-json`, {
+    method: "POST",
+    headers: { Authorization: `Bearer ${token}` },
+    body: form,
+  });
+  if (!res.ok) {
+    const text = await res.text().catch(() => "");
+    throw new Error(`Upload failed (${res.status}): ${text}`);
+  }
+  return res.json();
+}
+
+/**
+ * Upload project JSON + all PDFs to cloud storage.
+ * The backend reads PDFs from its in-memory _STORE and uploads them alongside the JSON.
+ */
+export async function uploadCloudProjectFull(
+  projectId: string,
+  payload: any,
+): Promise<CloudProjectItem> {
+  return request<CloudProjectItem>(
+    `/api/projects/cloud/${projectId}/upload-full`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+    },
+    LONG_TIMEOUT_MS,
+  );
+}
+
+/**
+ * Load a cloud project including restoring all PDFs into the backend _STORE.
+ * Returns the project JSON with file_ids remapped to new working IDs.
+ */
+export async function loadCloudProjectFull(
+  projectId: string,
+): Promise<any> {
+  return request<any>(`/api/projects/cloud/${projectId}/load-full`, undefined, LONG_TIMEOUT_MS);
+}
+
+/** Load a cloud project's JSON data. */
+export async function loadCloudProjectJson(projectId: string): Promise<any> {
+  return request<any>(`/api/projects/cloud/${projectId}/load`);
+}
+
+/** Rename a cloud project. */
+export async function renameCloudProject(
+  projectId: string,
+  name: string,
+  permanent?: boolean,
+): Promise<CloudProjectItem> {
+  const body: Record<string, any> = { name };
+  if (permanent !== undefined) body.permanent = permanent;
+  return request<CloudProjectItem>(`/api/projects/cloud/${projectId}`, {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+}
+
+/** Toggle permanent flag on a cloud project. */
+export async function toggleCloudProjectPermanent(
+  projectId: string,
+  permanent: boolean,
+): Promise<CloudProjectItem> {
+  return request<CloudProjectItem>(`/api/projects/cloud/${projectId}`, {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ permanent }),
+  });
+}
+
+/** Delete a cloud project. */
+export async function deleteCloudProject(
+  projectId: string
+): Promise<{ deleted: string }> {
+  return request<{ deleted: string }>(`/api/projects/cloud/${projectId}`, {
+    method: "DELETE",
+  });
 }

@@ -38,6 +38,8 @@ class AdminUserUpdate(BaseModel):
     group: Optional[str] = None
     notes: Optional[str] = None
 
+VALID_STATUSES = {"pending", "active", "suspended"}
+
 
 class UsageRecord(BaseModel):
     pages: int  # number of pages OCR'd in this request
@@ -55,12 +57,16 @@ class TierCreate(BaseModel):
     name: str          # e.g. "basic", "sponsor"
     label: str         # display name e.g. "基本", "贊助"
     quota: int         # monthly page limit (-1 = unlimited)
+    storage_quota_mb: int = 0   # cloud storage MB (0 = none, -1 = unlimited)
+    features: dict = {}        # feature flags e.g. {"ocr": true, "export_excel": true}
 
 
 class TierUpdate(BaseModel):
     name: Optional[str] = None
     label: Optional[str] = None
     quota: Optional[int] = None
+    storage_quota_mb: Optional[int] = None
+    features: Optional[dict] = None
 
 
 # ──────────────────── Helpers ────────────────────────────────────────────────
@@ -71,10 +77,14 @@ GROUPS_COLLECTION = "groups"
 TIERS_COLLECTION = "tiers"
 DEFAULT_GROUPS = ["General"]
 DEFAULT_TIERS = [
-    {"name": "basic", "label": "基本", "quota": 100},
-    {"name": "sponsor", "label": "贊助", "quota": 300},
-    {"name": "premium", "label": "特許", "quota": 500},
-    {"name": "admin", "label": "管理員", "quota": -1},
+    {"name": "basic", "label": "基本", "quota": 100, "storage_quota_mb": 0,
+     "features": {"ocr": True, "export_excel": True, "export_pdf": True, "templates": True, "cloud_save": False}},
+    {"name": "sponsor", "label": "贊助", "quota": 300, "storage_quota_mb": 100,
+     "features": {"ocr": True, "export_excel": True, "export_pdf": True, "templates": True, "cloud_save": True}},
+    {"name": "premium", "label": "特許", "quota": 500, "storage_quota_mb": 300,
+     "features": {"ocr": True, "export_excel": True, "export_pdf": True, "templates": True, "cloud_save": True}},
+    {"name": "admin", "label": "管理員", "quota": -1, "storage_quota_mb": -1,
+     "features": {"ocr": True, "export_excel": True, "export_pdf": True, "templates": True, "cloud_save": True}},
 ]
 
 def _user_ref(uid: str):
@@ -89,18 +99,36 @@ def _tiers_collection():
     return get_db().collection(TIERS_COLLECTION)
 
 
-def _ensure_default_tiers() -> list[dict]:
-    """Ensure tier list exists; bootstrap defaults when empty."""
+_tier_cache: list[dict] | None = None
+_tier_cache_ts: float = 0
+
+
+def _ensure_default_tiers(force_refresh: bool = False) -> list[dict]:
+    """Ensure tier list exists; bootstrap defaults when empty. Cached for 60s."""
+    import time
+    global _tier_cache, _tier_cache_ts
+    now = time.time()
+    if not force_refresh and _tier_cache and (now - _tier_cache_ts < 60):
+        return _tier_cache
+
     docs = list(_tiers_collection().stream())
     if docs:
-        return [{"id": d.id, **d.to_dict()} for d in docs]
+        result = [{"id": d.id, **d.to_dict()} for d in docs]
+    else:
+        result = []
+        for tier in DEFAULT_TIERS:
+            ref = _tiers_collection().document()
+            ref.set(tier)
+            result.append({"id": ref.id, **tier})
+    _tier_cache = result
+    _tier_cache_ts = now
+    return result
 
-    created = []
-    for tier in DEFAULT_TIERS:
-        ref = _tiers_collection().document()
-        ref.set(tier)
-        created.append({"id": ref.id, **tier})
-    return created
+
+def _invalidate_tier_cache():
+    global _tier_cache, _tier_cache_ts
+    _tier_cache = None
+    _tier_cache_ts = 0
 
 
 def _get_tier_quota(tier_name: str) -> int:
@@ -252,6 +280,17 @@ def admin_update_user(uid: str, body: AdminUserUpdate, user: dict = Depends(requ
     if not changes:
         raise HTTPException(400, "No fields to update")
 
+    # Validate status enum
+    if "status" in changes and changes["status"] not in VALID_STATUSES:
+        raise HTTPException(400, f"Invalid status: {changes['status']}. Must be one of: {', '.join(VALID_STATUSES)}")
+
+    # Prevent admin from demoting themselves
+    if uid == user["uid"]:
+        if "tier" in changes and changes["tier"] != "admin":
+            raise HTTPException(400, "Cannot demote your own admin tier")
+        if "status" in changes and changes["status"] != "active":
+            raise HTTPException(400, "Cannot change your own status to non-active")
+
     ref.update(changes)
     return ref.get().to_dict()
 
@@ -261,7 +300,11 @@ def record_usage(body: UsageRecord, user: dict = Depends(require_auth)):
     """Record OCR page usage for the current user.
 
     Returns the updated counts and whether the user has hit the limit.
+    Rejects negative page counts and prevents recording over-limit usage.
     """
+    if body.pages < 0:
+        raise HTTPException(400, "Page count cannot be negative")
+
     ref = _user_ref(user["uid"])
     snap = ref.get()
     if not snap.exists:
@@ -275,12 +318,28 @@ def record_usage(body: UsageRecord, user: dict = Depends(require_auth)):
         profile["usage_month"] = current_month
         profile["usage_pages"] = 0
 
-    new_count = profile["usage_pages"] + body.pages
-
     # Tier limits — read from Firestore
     quota = _get_tier_quota(profile.get("tier", "basic"))
     limit = float("inf") if quota == -1 else quota
+    current_usage = profile["usage_pages"]
+
+    # Allow pages=0 as a quota check without recording
+    if body.pages == 0:
+        return {
+            "usage_pages": current_usage,
+            "limit": quota,
+            "over_limit": current_usage >= limit,
+        }
+
+    # Pre-check: would this push over limit?
+    new_count = current_usage + body.pages
     over_limit = new_count > limit
+    if over_limit:
+        return {
+            "usage_pages": current_usage,
+            "limit": quota,
+            "over_limit": True,
+        }
 
     ref.update({
         "usage_month": current_month,
@@ -289,8 +348,8 @@ def record_usage(body: UsageRecord, user: dict = Depends(require_auth)):
 
     return {
         "usage_pages": new_count,
-        "limit": quota,  # -1 = unlimited
-        "over_limit": over_limit,
+        "limit": quota,
+        "over_limit": False,
     }
 
 
@@ -415,9 +474,16 @@ def create_tier(body: TierCreate, user: dict = Depends(require_auth)):
     if name in existing:
         raise HTTPException(400, "Tier name already exists")
 
-    doc = {"name": name, "label": body.label.strip(), "quota": body.quota}
+    doc = {
+        "name": name,
+        "label": body.label.strip(),
+        "quota": body.quota,
+        "storage_quota_mb": body.storage_quota_mb,
+        "features": body.features,
+    }
     ref = _tiers_collection().document()
     ref.set(doc)
+    _invalidate_tier_cache()
     return {"id": ref.id, **doc}
 
 
@@ -451,11 +517,16 @@ def update_tier(tier_id: str, body: TierUpdate, user: dict = Depends(require_aut
         changes["label"] = body.label.strip()
     if body.quota is not None:
         changes["quota"] = body.quota
+    if body.storage_quota_mb is not None:
+        changes["storage_quota_mb"] = body.storage_quota_mb
+    if body.features is not None:
+        changes["features"] = body.features
 
     if not changes:
         raise HTTPException(400, "No fields to update")
 
     ref.update(changes)
+    _invalidate_tier_cache()
     updated = ref.get().to_dict()
     updated["id"] = tier_id
     return updated
@@ -486,6 +557,7 @@ def delete_tier(tier_id: str, user: dict = Depends(require_auth)):
     fallback = next((t["name"] for t in tiers if t["id"] != tier_id and t["name"] != deleted_name), "basic")
 
     ref.delete()
+    _invalidate_tier_cache()
 
     # Reassign users with deleted tier
     if deleted_name:
