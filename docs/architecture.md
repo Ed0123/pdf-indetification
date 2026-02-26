@@ -1,6 +1,6 @@
 # Architecture & Feature Documentation
 
-> Last updated after Phase 7 (Auth / User Management / Cloud Templates).
+> Last updated after Phase 8 (OCR Bug Fixes: PSM & Rect).
 
 ---
 
@@ -138,6 +138,30 @@
 - Monthly counters reset automatically.
 - StatusBar displays: `OCR: {used}/{limit}`.
 - Over-limit users are warned before OCR starts.
+
+---
+
+## 5.1  Text / OCR Extraction Pipeline
+
+Text extraction follows a two-stage fallback approach per region:
+
+1. **Vector text** — `page.get_text("text", clip=rect)` extracts embedded text.
+   If found, returned immediately (fast, accurate).
+2. **OCR fallback** (`_ocr_region`) — only when vector text is empty.
+
+### `_ocr_region` implementation details
+| Step | Description |
+|------|-------------|
+| Clamp | `rect` is clamped to page boundaries; empty rects return `""` |
+| Render | `page.get_pixmap(matrix=3×, clip=clamped_rect)` — **only** the region at 300 DPI |
+| Primary OCR | `pytesseract.image_to_string(image, config="--psm 6")` — **PSM 6** (single block) |
+| Fallback OCR | PyMuPDF `get_textpage_ocr()` on a **cropped-image mini-doc**, not the full page |
+
+### Previous bugs (fixed Phase 8)
+| Bug | Root cause | Fix |
+|-----|-----------|-----|
+| Tesseract PSM 3 | `image_to_string()` called without config → default PSM 3 (full-page segmentation) | Explicitly pass `--psm 6` (single uniform block) |
+| Full-page OCR coordinates | `get_textpage_ocr(full=False)` was called on the **original page** (no clip param available), then text filtered by `clip=rect` — OCR processed the entire page | Render only the clipped region as a pixmap, open it as a standalone mini-document, then run `get_textpage_ocr` on that |
 
 ---
 

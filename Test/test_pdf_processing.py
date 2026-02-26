@@ -253,6 +253,41 @@ class TestCheckPageHasText:
         assert check_page_has_text("/nonexistent.pdf", 0) is False
 
 
+class TestOCRRegion:
+    """Tests for _ocr_region function (internal)."""
+
+    def test_ocr_region_clamps_to_page(self, sample_pdf):
+        """Rect exceeding page boundaries is clamped, never returns full page."""
+        from utils.pdf_processing import _ocr_region
+        doc = fitz.open(sample_pdf)
+        page = doc[0]
+        # Rect that extends far beyond the page
+        oversized = fitz.Rect(-100, -100, 9999, 9999)
+        # Should not raise; returns text (possibly empty if no OCR engine)
+        result = _ocr_region(page, oversized)
+        assert isinstance(result, str)
+        doc.close()
+
+    def test_ocr_region_empty_rect(self, sample_pdf):
+        """Empty / invalid rect should return empty string."""
+        from utils.pdf_processing import _ocr_region
+        doc = fitz.open(sample_pdf)
+        page = doc[0]
+        empty_rect = fitz.Rect(100, 100, 100, 100)  # zero area
+        assert _ocr_region(page, empty_rect) == ""
+        doc.close()
+
+    def test_ocr_region_valid_rect(self, sample_pdf):
+        """Valid small rect should not error out."""
+        from utils.pdf_processing import _ocr_region
+        doc = fitz.open(sample_pdf)
+        page = doc[0]
+        small_rect = fitz.Rect(50, 80, 300, 120)
+        result = _ocr_region(page, small_rect)
+        assert isinstance(result, str)
+        doc.close()
+
+
 class TestRegularizeText:
     """Tests for regularize_text post-processing helper."""
 

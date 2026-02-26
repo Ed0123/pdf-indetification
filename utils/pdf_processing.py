@@ -264,6 +264,8 @@ def _ocr_region(page, rect: fitz.Rect) -> str:
     Perform OCR on a specific region of a PDF page.
     
     Renders the region at high resolution and uses pytesseract for OCR.
+    Uses PSM 6 (single uniform block of text) which is appropriate for
+    a cropped region, rather than PSM 3 (full page segmentation).
     
     Args:
         page: A fitz.Page object.
@@ -272,19 +274,33 @@ def _ocr_region(page, rect: fitz.Rect) -> str:
     Returns:
         OCR extracted text, or empty string on failure.
     """
+    # Clamp rect to page boundaries to avoid empty / oversized pixmaps
+    page_rect = page.rect
+    clipped_rect = fitz.Rect(
+        max(rect.x0, page_rect.x0),
+        max(rect.y0, page_rect.y0),
+        min(rect.x1, page_rect.x1),
+        min(rect.y1, page_rect.y1),
+    )
+    if clipped_rect.is_empty or clipped_rect.is_infinite:
+        return ""
+
     try:
         import pytesseract  # type: ignore
         
-        # Render the region at high resolution for better OCR
+        # Render only the clipped region at high resolution for better OCR
         zoom = 3.0  # 300 DPI equivalent
         mat = fitz.Matrix(zoom, zoom)
-        clip = rect
-        pix = page.get_pixmap(matrix=mat, clip=clip)
+        pix = page.get_pixmap(matrix=mat, clip=clipped_rect)
         
         img_data = pix.tobytes("png")
         image = Image.open(io.BytesIO(img_data))
         
-        text = pytesseract.image_to_string(image).strip()
+        # PSM 6 = Assume a single uniform block of text.
+        # Default PSM 3 (full-page segmentation) is wrong for a small cropped region.
+        text = pytesseract.image_to_string(
+            image, config="--psm 6"
+        ).strip()
         return text
     except Exception:
         # pytesseract missing or error (e.g. Tesseract executable not found)
@@ -292,8 +308,17 @@ def _ocr_region(page, rect: fitz.Rect) -> str:
         try:
             # PyMuPDF >= 1.19.0 supports built-in OCR via Tesseract
             if hasattr(page, "get_textpage_ocr"):
-                tp = page.get_textpage_ocr(flags=0, full=False)
-                text = page.get_text("text", clip=rect, textpage=tp).strip()
+                # Render only the clipped region, then OCR the cropped pixmap
+                # instead of OCR-ing the entire page with get_textpage_ocr().
+                zoom = 3.0
+                mat = fitz.Matrix(zoom, zoom)
+                pix = page.get_pixmap(matrix=mat, clip=clipped_rect)
+                # Create a tiny single-page document from the cropped image
+                img_doc = fitz.open("png", pix.tobytes("png"))
+                img_page = img_doc[0]
+                tp = img_page.get_textpage_ocr(flags=0, full=True)
+                text = img_page.get_text("text", textpage=tp).strip()
+                img_doc.close()
                 return text
         except Exception:
             pass

@@ -84,3 +84,4 @@ service-account.json
 Test/__pycache__/
 
 # End of .gitignore
+node_modules/
