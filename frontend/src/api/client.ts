@@ -269,11 +269,13 @@ export interface TextAnnotation {
   align?: "left" | "center" | "right";
 }
 
-/** Export PDF pages with text annotations as a ZIP. */
+/** Export PDF pages with text annotations as merged PDF or ZIP. */
 export async function exportAnnotatedPdf(
   pages: { file_id: string; page_number: number; filename: string }[],
   annotations: TextAnnotation[] = [],
-  includeAnnotations: boolean = true
+  includeAnnotations: boolean = true,
+  outputFilename: string = "annotated.pdf",
+  merge: boolean = true
 ): Promise<void> {
   const blob = await requestBlob("/api/pdf/export-annotated", {
     method: "POST",
@@ -281,10 +283,16 @@ export async function exportAnnotatedPdf(
     body: JSON.stringify({ 
       pages, 
       annotations,
-      include_annotations: includeAnnotations 
+      include_annotations: includeAnnotations,
+      merge,
+      output_filename: outputFilename
     }),
   });
-  triggerDownload(blob, includeAnnotations ? "annotated_pages.zip" : "exported_pages.zip");
+  // Download filename based on merge setting
+  const downloadName = merge 
+    ? outputFilename 
+    : (includeAnnotations ? "annotated_pages.zip" : "exported_pages.zip");
+  triggerDownload(blob, downloadName);
 }
 
 /** Export project data to Excel and trigger a file download. */
@@ -782,6 +790,8 @@ export interface BQTemplateAPI {
   boxes: BQTemplateBoxAPI[];
   permission: string;
   group: string;
+  preview_file_id?: string | null;
+  preview_page?: number;
   created_at: string;
   updated_at: string;
 }
@@ -796,12 +806,21 @@ export async function createBQTemplate(
   name: string,
   boxes: BQTemplateBoxAPI[],
   permission: string = "personal",
-  group?: string
+  group?: string,
+  previewFileId?: string | null,
+  previewPage?: number
 ): Promise<BQTemplateAPI> {
   return request<BQTemplateAPI>("/api/bq/templates/", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ name, boxes, permission, group }),
+    body: JSON.stringify({ 
+      name, 
+      boxes, 
+      permission, 
+      group,
+      preview_file_id: previewFileId,
+      preview_page: previewPage ?? 0,
+    }),
   });
 }
 
@@ -813,6 +832,8 @@ export async function updateBQTemplate(
     boxes?: BQTemplateBoxAPI[];
     permission?: string;
     group?: string;
+    preview_file_id?: string | null;
+    preview_page?: number;
   }
 ): Promise<BQTemplateAPI> {
   return request<BQTemplateAPI>(`/api/bq/templates/${templateId}`, {

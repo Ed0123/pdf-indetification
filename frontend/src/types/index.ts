@@ -5,6 +5,7 @@ export interface BoxInfo {
   y: number;
   width: number;
   height: number;
+  color?: string;  // Optional display color
 }
 
 /** Per-page state: extracted text and drawn boxes, keyed by column name. */
@@ -105,6 +106,17 @@ export interface BQRow {
   };
 }
 
+/** User-added text annotation on PDF */
+export interface TextAnnotation {
+  id: string;                         // Unique annotation ID
+  text: string;                       // Text content
+  x: number;                          // X position (absolute PDF coordinates)
+  y: number;                          // Y position (absolute PDF coordinates)
+  font_size?: number;                 // Font size (default 10)
+  color?: string;                     // Hex color (default #000000)
+  created_at?: string;                // ISO date string
+}
+
 /** BQ page data - stores boxes and extracted rows for a single page */
 export interface BQPageData {
   file_id: string;
@@ -120,6 +132,8 @@ export interface BQPageData {
     x1: number;
     y1: number;
   };
+  // User-added text annotations
+  annotations?: TextAnnotation[];      // Text annotations on this page
 }
 
 /** BQ Template - saved box configuration for BQ extraction */

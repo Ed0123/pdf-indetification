@@ -343,6 +343,16 @@ export function BQExportPanel({
       page_width: pt.pageWidth?.toString() ?? "",
       page_height: pt.pageHeight?.toString() ?? "",
     }));
+
+    // Build annotations from all pages
+    const allAnnotations = Object.entries(bqPageData).flatMap(([pageKey, pageData]) => 
+      (pageData.annotations || []).map(ann => ({
+        page_key: pageKey,
+        file_id: pageData.file_id,
+        page_number: pageData.page_number,
+        ...ann,
+      }))
+    );
     
     // Build full export structure with project info 
     const fullExport = {
@@ -354,7 +364,8 @@ export function BQExportPanel({
         column_ranges: columnRanges,
         pages: pageInfos
       },
-      data: exportData
+      data: exportData,
+      annotations: allAnnotations,
     };
     
     const blob = new Blob([JSON.stringify(fullExport, null, 2)], { type: "application/json" });
@@ -384,8 +395,8 @@ export function BQExportPanel({
       const pid = projectId.trim() || `BQ_${new Date().toISOString().slice(0, 10)}`;
       const exportData = buildExportData(pid);
       
-      // Convert to Excel-friendly format
-      const headers = ["ID", "Project", "Type", "Bill", "Page", "Item", "Revision", "Ref", "Description", "Qty", "Unit", "Rate", "Total", "Data_X1", "Data_X2", "Data_Y1", "Data_Y2", "Page_Width", "Page_Height"];
+      // Convert to Excel-friendly format (no coordinate columns for CSV)
+      const headers = ["ID", "Project", "Type", "Bill", "Page", "Item", "Revision", "Ref", "Description", "Qty", "Unit", "Rate", "Total"];
       const rows = exportData.map(d => [
         d.id,
         d.project_id,
@@ -400,12 +411,6 @@ export function BQExportPanel({
         d.unit ?? "",
         d.rate ?? "",
         d.total ?? "",
-        d.data_X1 ?? "",
-        d.data_X2 ?? "",
-        d.data_Y1 ?? "",
-        d.data_Y2 ?? "",
-        d.page_width ?? "",
-        d.page_height ?? "",
       ]);
 
       // Create CSV with proper escaping for Excel
@@ -438,6 +443,75 @@ export function BQExportPanel({
       setExportError(err.message || "Export failed");
     } finally {
       setExporting(false);
+    }
+  };
+
+  // Handle Page Totals CSV export
+  const handleExportPageTotals = async () => {
+    if (Object.keys(pageTotals).length === 0) {
+      setExportError("No page data to export");
+      return;
+    }
+
+    try {
+      const pid = projectId.trim() || `BQ_${new Date().toISOString().slice(0, 10)}`;
+      
+      // Build page totals rows sorted by page number
+      const sortedPages = Object.values(pageTotals).sort((a, b) => {
+        if (a.fileId !== b.fileId) return a.fileId.localeCompare(b.fileId);
+        return a.pageNumber - b.pageNumber;
+      });
+      
+      const headers = ["Project", "Bill", "Page", "Page_Label", "Item_Count", "Page_Total"];
+      const rows = sortedPages.map(pt => {
+        // Extract bill from pageKey if available
+        const [fileId] = pt.pageKey.split("-page-");
+        return [
+          pid,
+          fileId,
+          pt.pageNumber,
+          pt.pageLabel,
+          pt.itemCount,
+          pt.total.toFixed(2),
+        ];
+      });
+      
+      // Add grand total row
+      rows.push([
+        pid,
+        "TOTAL",
+        "",
+        "",
+        rows.reduce((sum, r) => sum + Number(r[4]), 0),
+        grandTotal.toFixed(2),
+      ]);
+
+      // Create CSV
+      const escapeCell = (val: any) => {
+        const str = String(val ?? "");
+        if (str.includes("\n") || str.includes(",") || str.includes('"')) {
+          return `"${str.replace(/"/g, '""')}"`;
+        }
+        return str;
+      };
+
+      const csvContent = [
+        headers.map(escapeCell).join(","),
+        ...rows.map(row => row.map(escapeCell).join(","))
+      ].join("\r\n");
+
+      const blob = new Blob(["\uFEFF" + csvContent], { type: "text/csv;charset=utf-8" });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = `${pid}_page_totals.csv`;
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+      URL.revokeObjectURL(url);
+      setShowExportModal(false);
+    } catch (err: any) {
+      setExportError(err.message || "Export failed");
     }
   };
 
@@ -556,9 +630,30 @@ export function BQExportPanel({
             });
           }
         }
+        
+        // Add user-drawn text annotations from all pages
+        for (const [pageKey, pageData] of Object.entries(bqPageData)) {
+          if (pageData.annotations && pageData.annotations.length > 0) {
+            for (const ann of pageData.annotations) {
+              annotations.push({
+                file_id: pageData.file_id,
+                page_number: pageData.page_number,
+                text: ann.text,
+                x: ann.x,
+                y: ann.y,
+                font_size: ann.font_size ?? 10,
+                color: ann.color ?? "#000000",
+              });
+            }
+          }
+        }
       }
 
-      await exportAnnotatedPdf(pages, annotations, includeAnnotations);
+      // Generate output filename using the project ID
+      const outputFilename = includeAnnotations ? `${pid}_annotated.pdf` : `${pid}.pdf`;
+      
+      // Merge all pages into single PDF
+      await exportAnnotatedPdf(pages, annotations, includeAnnotations, outputFilename, true);
       setShowExportModal(false);
     } catch (err: any) {
       setExportError(err.message || "PDF export failed");
@@ -701,6 +796,13 @@ export function BQExportPanel({
                 disabled={exporting}
               >
                 {exporting ? "⏳..." : "📊 Excel (CSV)"}
+              </button>
+              <button
+                style={{ ...modalBtn, background: "#16a085" }}
+                onClick={handleExportPageTotals}
+                disabled={exporting}
+              >
+                {exporting ? "⏳..." : "📋 Page Totals"}
               </button>
               <button
                 style={{ ...modalBtn, background: "#e74c3c" }}

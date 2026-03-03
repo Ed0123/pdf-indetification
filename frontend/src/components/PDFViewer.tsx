@@ -1,5 +1,5 @@
 import React, { useRef, useEffect, useCallback, useState } from "react";
-import type { BoxInfo } from "../types";
+import type { BoxInfo, TextAnnotation } from "../types";
 import { renderPage } from "../api/client";
 
 interface PDFViewerProps {
@@ -12,13 +12,33 @@ interface PDFViewerProps {
   highlightBox?: { x0: number; y0: number; x1: number; y1: number } | null;
   /** PDF page dimensions needed to convert absolute coords to relative */
   pdfPageSize?: { width: number; height: number } | null;
+  /** Text annotations to display on the PDF */
+  annotations?: TextAnnotation[];
+  /** Callback when user adds a new annotation */
+  onAddAnnotation?: (annotation: TextAnnotation) => void;
+  /** Callback when user deletes an annotation */
+  onDeleteAnnotation?: (annotationId: string) => void;
+  /** Whether annotation mode is enabled */
+  annotationMode?: boolean;
 }
 
 const MIN_ZOOM = 0.2;
 const MAX_ZOOM = 4.0;
 const ZOOM_STEP = 0.05;
 
-export function PDFViewer({ fileId, pageNum, boxes, selectedColumn, onDrawBox, highlightBox, pdfPageSize }: PDFViewerProps) {
+export function PDFViewer({ 
+  fileId, 
+  pageNum, 
+  boxes, 
+  selectedColumn, 
+  onDrawBox, 
+  highlightBox, 
+  pdfPageSize,
+  annotations = [],
+  onAddAnnotation,
+  onDeleteAnnotation,
+  annotationMode = false 
+}: PDFViewerProps) {
   const containerRef = useRef<HTMLDivElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const imgRef = useRef<HTMLImageElement>(null);
@@ -30,6 +50,11 @@ export function PDFViewer({ fileId, pageNum, boxes, selectedColumn, onDrawBox, h
   const [pan, setPan] = useState({ x: 0, y: 0 });
   const [drawing, setDrawing] = useState<{ startX: number; startY: number; curX: number; curY: number } | null>(null);
   const [imgNatural, setImgNatural] = useState({ w: 0, h: 0 });
+  
+  // Annotation input state
+  const [annotationInput, setAnnotationInput] = useState<{ x: number; y: number; absX: number; absY: number } | null>(null);
+  const [annotationText, setAnnotationText] = useState("");
+  const annotationInputRef = useRef<HTMLInputElement>(null);
 
   // Fetch page image whenever file/page changes
   useEffect(() => {
@@ -70,7 +95,8 @@ export function PDFViewer({ fileId, pageNum, boxes, selectedColumn, onDrawBox, h
     // Draw all boxes
     Object.values(boxes).forEach((box) => {
       const isSelected = box.column_name === selectedColumn;
-      drawBox(box, isSelected ? "#e74c3c" : "#2980b9", isSelected ? 2.5 : 1.5);
+      const boxColor = box.color || "#2980b9";
+      drawBox(box, isSelected ? "#e74c3c" : boxColor, isSelected ? 2.5 : 1.5);
     });
 
     // Draw in-progress box
@@ -103,7 +129,35 @@ export function PDFViewer({ fileId, pageNum, boxes, selectedColumn, onDrawBox, h
       ctx.fillStyle = "rgba(243, 156, 18, 0.15)";
       ctx.fillRect(rx * displayW, ry * displayH, rw * displayW, rh * displayH);
     }
-  }, [boxes, selectedColumn, zoom, imgNatural, drawing, highlightBox, pdfPageSize]);
+
+    // Draw text annotations
+    if (annotations.length > 0 && pdfPageSize && pdfPageSize.width > 0 && pdfPageSize.height > 0) {
+      for (const ann of annotations) {
+        // Convert absolute PDF coordinates to display coordinates
+        // The image render scale is 2.0, so we need to account for that
+        const renderScale = 2.0;
+        const absToDisplayX = (absX: number) => (absX / pdfPageSize.width) * imgNatural.w * zoom / renderScale;
+        const absToDisplayY = (absY: number) => (absY / pdfPageSize.height) * imgNatural.h * zoom / renderScale;
+        
+        const x = absToDisplayX(ann.x);
+        const y = absToDisplayY(ann.y);
+        const fontSize = (ann.font_size ?? 10) * zoom;
+        
+        // Draw text
+        ctx.fillStyle = ann.color ?? "#000000";
+        ctx.font = `${fontSize}px sans-serif`;
+        ctx.fillText(ann.text, x, y);
+        
+        // Draw small indicator if annotation mode is on
+        if (annotationMode) {
+          ctx.fillStyle = "rgba(255, 0, 0, 0.5)";
+          ctx.beginPath();
+          ctx.arc(x - 4, y - fontSize/3, 3, 0, Math.PI * 2);
+          ctx.fill();
+        }
+      }
+    }
+  }, [boxes, selectedColumn, zoom, imgNatural, drawing, highlightBox, pdfPageSize, annotations, annotationMode]);
 
   // Ctrl+Wheel zoom
   const handleWheel = useCallback((e: React.WheelEvent) => {
@@ -122,13 +176,55 @@ export function PDFViewer({ fileId, pageNum, boxes, selectedColumn, onDrawBox, h
       return;
     }
 
+    // Left-button in annotation mode: add annotation
+    if (e.button === 0 && annotationMode && canvasRef.current && pdfPageSize && onAddAnnotation) {
+      const rect = canvasRef.current.getBoundingClientRect();
+      const displayX = e.clientX - rect.left;
+      const displayY = e.clientY - rect.top;
+      
+      // Convert display coordinates to absolute PDF coordinates
+      // Account for zoom and render scale (2.0)
+      const renderScale = 2.0;
+      const absX = (displayX / (imgNatural.w * zoom)) * pdfPageSize.width * renderScale;
+      const absY = (displayY / (imgNatural.h * zoom)) * pdfPageSize.height * renderScale;
+      
+      // Show input at clicked position
+      setAnnotationInput({ x: displayX, y: displayY, absX, absY });
+      setAnnotationText("");
+      setTimeout(() => annotationInputRef.current?.focus(), 50);
+      return;
+    }
+
     // Left-button: box drawing on canvas
     if (e.button !== 0 || !selectedColumn || !canvasRef.current) return;
     const rect = canvasRef.current.getBoundingClientRect();
     const x = e.clientX - rect.left;
     const y = e.clientY - rect.top;
     setDrawing({ startX: x, startY: y, curX: x, curY: y });
-  }, [pan, selectedColumn]);
+  }, [pan, selectedColumn, annotationMode, pdfPageSize, onAddAnnotation, imgNatural, zoom]);
+
+  // Save annotation when pressing Enter
+  const handleSaveAnnotation = useCallback(() => {
+    if (!annotationInput || !annotationText.trim() || !onAddAnnotation) {
+      setAnnotationInput(null);
+      setAnnotationText("");
+      return;
+    }
+    
+    const newAnnotation: TextAnnotation = {
+      id: `ann-${Date.now()}`,
+      text: annotationText.trim(),
+      x: annotationInput.absX,
+      y: annotationInput.absY,
+      font_size: 10,
+      color: "#000000",
+      created_at: new Date().toISOString(),
+    };
+    
+    onAddAnnotation(newAnnotation);
+    setAnnotationInput(null);
+    setAnnotationText("");
+  }, [annotationInput, annotationText, onAddAnnotation]);
 
   const handleMouseMove = useCallback((e: React.MouseEvent<HTMLDivElement>) => {
     // Pan
@@ -198,14 +294,18 @@ export function PDFViewer({ fileId, pageNum, boxes, selectedColumn, onDrawBox, h
         <button style={iconBtn} onClick={() => setZoom((z) => Math.min(MAX_ZOOM, parseFloat((z + 0.1).toFixed(2))))} title="Zoom in">+</button>
         <button style={iconBtn} onClick={() => { setZoom(1.0); setPan({ x: 0, y: 0 }); }} title="Reset">↺</button>
         <span style={{ marginLeft: "auto", opacity: 0.7 }}>
-          {selectedColumn ? `Drawing box for: "${selectedColumn}"` : "Click a table cell to select a column"}
+          {annotationMode 
+            ? `✏️ Click to add text annotation (${annotations.length} on page)` 
+            : selectedColumn 
+              ? `Drawing box for: "${selectedColumn}"` 
+              : "Click a table cell to select a column"}
         </span>
       </div>
 
       {/* Page viewport */}
       <div
         ref={containerRef}
-        style={{ flex: 1, overflow: "hidden", position: "relative", cursor: selectedColumn ? "crosshair" : "default" }}
+        style={{ flex: 1, overflow: "hidden", position: "relative", cursor: annotationMode ? "text" : selectedColumn ? "crosshair" : "default" }}
         onWheel={handleWheel}
         onMouseDown={handleMouseDown}
         onMouseMove={handleMouseMove}
@@ -255,6 +355,42 @@ export function PDFViewer({ fileId, pageNum, boxes, selectedColumn, onDrawBox, h
                 height: displayH,
               }}
             />
+            {/* Annotation text input */}
+            {annotationInput && (
+              <div
+                style={{
+                  position: "absolute",
+                  left: annotationInput.x,
+                  top: annotationInput.y,
+                  zIndex: 100,
+                }}
+              >
+                <input
+                  ref={annotationInputRef}
+                  type="text"
+                  value={annotationText}
+                  onChange={(e) => setAnnotationText(e.target.value)}
+                  onKeyDown={(e) => {
+                    if (e.key === "Enter") {
+                      handleSaveAnnotation();
+                    } else if (e.key === "Escape") {
+                      setAnnotationInput(null);
+                      setAnnotationText("");
+                    }
+                  }}
+                  onBlur={handleSaveAnnotation}
+                  placeholder="Type text..."
+                  style={{
+                    padding: "2px 4px",
+                    border: "1px solid #333",
+                    borderRadius: 2,
+                    fontSize: 12,
+                    minWidth: 100,
+                    background: "rgba(255,255,255,0.95)",
+                  }}
+                />
+              </div>
+            )}
           </div>
         )}
       </div>

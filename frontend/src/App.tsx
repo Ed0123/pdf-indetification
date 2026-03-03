@@ -122,6 +122,10 @@ export default function App() {
   const [highlightBox, setHighlightBox] = useState<{ x0: number; y0: number; x1: number; y1: number } | null>(null);
   // PDF page dimensions for coordinate conversion
   const [pdfPageSize, setPdfPageSize] = useState<{ width: number; height: number } | null>(null);
+  // Annotation mode for PDF viewer
+  const [annotationMode, setAnnotationMode] = useState(false);
+  // Show/hide annotations toggle
+  const [showAnnotations, setShowAnnotations] = useState(true);
 
   const fileInputRef = useRef<HTMLInputElement>(null);
 
@@ -282,8 +286,8 @@ export default function App() {
       color: b.color || "#2980b9",
     })),
     notes: "",
-    preview_file_id: null,
-    preview_page: 0,
+    preview_file_id: ct.preview_file_id ?? null,
+    preview_page: ct.preview_page ?? 0,
     owner_uid: ct.owner_uid,
     permission: ct.permission,
     group: ct.group,
@@ -877,6 +881,115 @@ export default function App() {
     }));
   }, []);
 
+  // Handle adding annotation to current page
+  const handleAddAnnotation = useCallback((annotation: import("./types").TextAnnotation) => {
+    const pageKey = `${state.selected_file_id}-page-${state.selected_page}`;
+    setBqPageData((prev) => {
+      const existing = prev[pageKey] || { 
+        file_id: state.selected_file_id ?? "",
+        page_number: state.selected_page,
+        boxes: {},
+        rows: [],
+        annotations: [],
+      };
+      return {
+        ...prev,
+        [pageKey]: {
+          ...existing,
+          annotations: [...(existing.annotations || []), annotation],
+        },
+      };
+    });
+  }, [state.selected_file_id, state.selected_page]);
+
+  // Handle deleting annotation from current page
+  const handleDeleteAnnotation = useCallback((annotationId: string) => {
+    const pageKey = `${state.selected_file_id}-page-${state.selected_page}`;
+    setBqPageData((prev) => {
+      const existing = prev[pageKey];
+      if (!existing) return prev;
+      return {
+        ...prev,
+        [pageKey]: {
+          ...existing,
+          annotations: (existing.annotations || []).filter(a => a.id !== annotationId),
+        },
+      };
+    });
+  }, [state.selected_file_id, state.selected_page]);
+
+  // Get current page annotations (user-drawn + auto-generated from edits)
+  const currentAnnotations = useMemo(() => {
+    if (!showAnnotations) return [];
+    
+    const pageKey = `${state.selected_file_id}-page-${state.selected_page}`;
+    const pageData = bqPageData[pageKey];
+    if (!pageData) return [];
+    
+    // Manual annotations from user drawing
+    const manualAnnotations = pageData.annotations ?? [];
+    
+    // Auto-generated annotations from user-edited BQ values
+    const autoAnnotations: import("./types").TextAnnotation[] = [];
+    
+    for (const row of pageData.rows) {
+      if (row.type !== "item" || !row.user_edited) continue;
+      
+      const pageWidth = row.page_width ?? 1;
+      const pageHeight = row.page_height ?? 1;
+      
+      // Get column boxes for positioning
+      const rateBox = pageData.boxes["Rate"];
+      const qtyBox = pageData.boxes["Qty"];
+      const totalBox = pageData.boxes["Total"];
+      
+      // Quantity annotation
+      if (row.user_edited.quantity && row.quantity !== null && qtyBox) {
+        const x = qtyBox.x * pageWidth + 5;
+        const y = (row.bbox_y0 ?? 0) + 12;
+        autoAnnotations.push({
+          id: `auto-qty-${row.id}`,
+          text: row.quantity.toString(),
+          x,
+          y,
+          font_size: 9,
+          color: "#0000FF",  // Blue for viewer
+        });
+      }
+      
+      // Rate annotation
+      if (row.user_edited.rate && row.rate !== null && rateBox) {
+        const x = rateBox.x * pageWidth + 5;
+        const y = (row.bbox_y0 ?? 0) + 12;
+        autoAnnotations.push({
+          id: `auto-rate-${row.id}`,
+          text: row.rate.toFixed(2),
+          x,
+          y,
+          font_size: 9,
+          color: "#0000FF",
+        });
+      }
+      
+      // Total annotation
+      if ((row.user_edited.total || (row.user_edited.rate && row.user_edited.quantity)) && 
+          row.total !== null && totalBox) {
+        const x = totalBox.x * pageWidth + 5;
+        const y = (row.bbox_y0 ?? 0) + 12;
+        autoAnnotations.push({
+          id: `auto-total-${row.id}`,
+          text: row.total.toFixed(2),
+          x,
+          y,
+          font_size: 9,
+          color: "#0000FF",
+        });
+      }
+    }
+    
+    return [...manualAnnotations, ...autoAnnotations];
+  }, [state.selected_file_id, state.selected_page, bqPageData, showAnnotations]);
+
   // Save BQ template to cloud
   const handleSaveBQTemplate = useCallback(async (name: string, boxes: BoxInfo[]) => {
     try {
@@ -888,7 +1001,15 @@ export default function App() {
         height: b.height,
         color: ["#e74c3c", "#3498db", "#2ecc71", "#9b59b6", "#f39c12", "#1abc9c"][i % 6],
       }));
-      const created = await createBQTemplate(name, apiBoxes);
+      // Include current file/page for preview
+      const created = await createBQTemplate(
+        name, 
+        apiBoxes, 
+        "personal", 
+        undefined, 
+        state.selected_file_id, 
+        state.selected_page
+      );
       const localTemplate = bqCloudToLocal(created);
       setBqTemplates((prev) => [...prev, localTemplate]);
       setMsg(`Saved BQ template "${name}" to cloud`);
@@ -896,7 +1017,7 @@ export default function App() {
       console.error("Failed to save BQ template:", err);
       setMsg(`Failed to save BQ template: ${err.message}`);
     }
-  }, []);
+  }, [state.selected_file_id, state.selected_page]);
 
   // Apply BQ template
   const handleApplyBQTemplate = useCallback((templateId: string) => {
@@ -911,11 +1032,52 @@ export default function App() {
         y: b.y,
         width: b.width,
         height: b.height,
+        color: b.color,  // Preserve template color
       };
     });
     handleBQBoxesChange(boxes);
     setMsg(`Applied BQ template "${template.name}"`);
   }, [bqTemplates, state.selected_file_id, handleBQBoxesChange]);
+
+  // Update existing BQ template with new boxes
+  const handleUpdateBQTemplate = useCallback(async (templateId: string, boxes: BoxInfo[]) => {
+    const template = bqTemplates.find((t) => t.id === templateId);
+    if (!template) return;
+    
+    try {
+      const boxesAPI = boxes.map(b => ({
+        column_name: b.column_name,
+        x: b.x,
+        y: b.y,
+        width: b.width,
+        height: b.height,
+        color: "#2980b9",
+      }));
+      
+      await updateBQTemplate(templateId, { boxes: boxesAPI });
+      
+      // Update local state with TemplateBox[] format
+      const templateBoxes = boxes.map(b => ({
+        column_name: b.column_name,
+        x: b.x,
+        y: b.y,
+        width: b.width,
+        height: b.height,
+        color: "#2980b9",
+      }));
+      
+      setBqTemplates(prev => prev.map(t => 
+        t.id === templateId 
+          ? { ...t, boxes: templateBoxes } 
+          : t
+      ));
+      
+      setMsg(`Updated BQ template "${template.name}"`);
+    } catch (err) {
+      console.error("Failed to update BQ template:", err);
+      setMsg(`Error updating template: ${err}`);
+    }
+  }, [bqTemplates]);
 
   // Save/update all BQ templates (used by TemplateManagerPanel)
   const handleSaveBQTemplates = useCallback(async (templates: BQTemplate[]) => {
@@ -1015,12 +1177,30 @@ export default function App() {
   }, [project]);
 
   // Handle box drawing in BQ mode - route to BQ boxes instead of regular boxes
+  // BQ column/zone colors
+  const BQ_BOX_COLORS: Record<string, string> = {
+    Item: "#e74c3c",
+    Description: "#3498db",
+    Qty: "#2ecc71",
+    Unit: "#9b59b6",
+    Rate: "#f39c12",
+    Total: "#1abc9c",
+    DataRange: "#34495e",
+    Collection: "#7f8c8d",
+    PageNo: "#95a5a6",
+    Revision: "#e67e22",
+    BillName: "#16a085",
+  };
+  
   const handleDrawBoxBQ = useCallback(
     (box: BoxInfo) => {
       if (!state.selected_file_id) return;
       handleBQBoxesChange({
         ...currentBQBoxes,
-        [box.column_name]: box,
+        [box.column_name]: {
+          ...box,
+          color: BQ_BOX_COLORS[box.column_name] || "#2980b9",
+        },
       });
     },
     [state.selected_file_id, currentBQBoxes, handleBQBoxesChange]
@@ -1132,6 +1312,42 @@ export default function App() {
         </div>
         {/* User info / My Account button */}
         <div style={{ display: "flex", alignItems: "center", gap: 8, padding: "0 12px", flexShrink: 0 }}>
+          {/* Show/Hide Annotations toggle (only for BQ modules) */}
+          {(activeModule === "bq_ocr" || activeModule === "bq_export") && (
+            <button
+              onClick={() => setShowAnnotations((prev) => !prev)}
+              style={{
+                background: showAnnotations ? "#27ae60" : "none",
+                border: "1px solid #ccc",
+                borderRadius: 4,
+                padding: "3px 10px",
+                cursor: "pointer",
+                fontSize: 12,
+                color: showAnnotations ? "#fff" : "#333",
+              }}
+              title="Toggle visibility of user-entered text on PDF"
+            >
+              {showAnnotations ? "👁 Show Edits" : "👁‍🗨 Hide Edits"}
+            </button>
+          )}
+          {/* Annotation mode toggle (only for BQ modules) */}
+          {(activeModule === "bq_ocr" || activeModule === "bq_export") && (
+            <button
+              onClick={() => setAnnotationMode((prev) => !prev)}
+              style={{
+                background: annotationMode ? "#3498db" : "none",
+                border: "1px solid #ccc",
+                borderRadius: 4,
+                padding: "3px 10px",
+                cursor: "pointer",
+                fontSize: 12,
+                color: annotationMode ? "#fff" : "#333",
+              }}
+              title="Toggle annotation mode - click on PDF to add text"
+            >
+              ✏️ {annotationMode ? "Annotation ON" : "Add Text"}
+            </button>
+          )}
           {profile?.photo_url && (
             <img src={profile.photo_url} alt="" style={{ width: 24, height: 24, borderRadius: 12 }} />
           )}
@@ -1355,6 +1571,7 @@ export default function App() {
               onBQDataChange={handleBQDataChange}
               onSaveBQTemplate={handleSaveBQTemplate}
               onApplyBQTemplate={handleApplyBQTemplate}
+              onUpdateBQTemplate={handleUpdateBQTemplate}
             />
           )}
 
@@ -1444,10 +1661,14 @@ export default function App() {
             fileId={state.selected_file_id}
             pageNum={state.selected_page}
             boxes={activeModule === "bq_ocr" ? currentBQBoxes : currentBoxes}
-            selectedColumn={selectedColumn}
+            selectedColumn={annotationMode ? null : selectedColumn}
             onDrawBox={activeModule === "bq_ocr" ? handleDrawBoxBQ : handleDrawBox}
             highlightBox={highlightBox}
             pdfPageSize={pdfPageSize}
+            annotations={currentAnnotations}
+            onAddAnnotation={handleAddAnnotation}
+            onDeleteAnnotation={handleDeleteAnnotation}
+            annotationMode={annotationMode}
           />
         </div>
       </div>

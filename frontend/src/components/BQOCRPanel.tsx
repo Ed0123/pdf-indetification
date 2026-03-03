@@ -49,6 +49,7 @@ interface BQOCRPanelProps {
   onBQDataChange: (pageKey: string, data: BQPageData) => void;
   onSaveBQTemplate: (name: string, boxes: BoxInfo[]) => void;
   onApplyBQTemplate: (templateId: string) => void;
+  onUpdateBQTemplate?: (templateId: string, boxes: BoxInfo[]) => void;
 }
 
 export function BQOCRPanel({
@@ -66,6 +67,7 @@ export function BQOCRPanel({
   onBQDataChange,
   onSaveBQTemplate,
   onApplyBQTemplate,
+  onUpdateBQTemplate,
 }: BQOCRPanelProps) {
   // Engine list
   const [engines, setEngines] = useState<BQEngineInfo[]>([]);
@@ -81,6 +83,8 @@ export function BQOCRPanel({
   const [selectedTemplateId, setSelectedTemplateId] = useState<string>("");
   const [newTplName, setNewTplName] = useState("");
   const [showNewTplInput, setShowNewTplInput] = useState(false);
+  const [templateBoxesSnapshot, setTemplateBoxesSnapshot] = useState<string>("");  // JSON snapshot of applied template boxes
+  const [autoApplyTemplate, setAutoApplyTemplate] = useState<boolean>(true); // Auto-apply selected template on page change
 
   // Page selector for batch extract
   const [showBatchSelector, setShowBatchSelector] = useState(false);
@@ -116,6 +120,22 @@ export function BQOCRPanel({
       });
     return () => { mounted = false; };
   }, []);
+
+  // Auto-apply template when page changes
+  const prevPageRef = React.useRef<string | null>(null);
+  useEffect(() => {
+    const currentPageKey = selectedFileId ? `${selectedFileId}-${selectedPage}` : null;
+    // Only apply if page actually changed and we have a template selected
+    if (autoApplyTemplate && selectedTemplateId && currentPageKey && currentPageKey !== prevPageRef.current) {
+      // Check if the page already has boxes drawn
+      const hasExistingBoxes = Object.keys(currentBoxes).length > 0;
+      if (!hasExistingBoxes) {
+        // Auto-apply the template to empty pages
+        onApplyBQTemplate(selectedTemplateId);
+      }
+    }
+    prevPageRef.current = currentPageKey;
+  }, [selectedFileId, selectedPage, autoApplyTemplate, selectedTemplateId, currentBoxes, onApplyBQTemplate]);
 
   // All pages flattened for navigation
   const allPages = useMemo(() => {
@@ -431,6 +451,29 @@ export function BQOCRPanel({
     setSelectedTemplateId(templateId);
     if (templateId) {
       onApplyBQTemplate(templateId);
+      // Save snapshot of applied boxes for tracking modifications
+      const template = bqTemplates.find(t => t.id === templateId);
+      if (template && template.boxes) {
+        setTemplateBoxesSnapshot(JSON.stringify(template.boxes));
+      }
+    } else {
+      setTemplateBoxesSnapshot("");
+    }
+  };
+
+  // Check if boxes have been modified since template was applied
+  const boxesModified = useMemo(() => {
+    if (!selectedTemplateId || !templateBoxesSnapshot) return false;
+    const currentBoxesStr = JSON.stringify(Object.values(currentBoxes));
+    return currentBoxesStr !== templateBoxesSnapshot;
+  }, [selectedTemplateId, templateBoxesSnapshot, currentBoxes]);
+
+  // Handle update template
+  const handleUpdateTemplate = () => {
+    if (selectedTemplateId && onUpdateBQTemplate) {
+      onUpdateBQTemplate(selectedTemplateId, Object.values(currentBoxes));
+      // Update snapshot to current boxes
+      setTemplateBoxesSnapshot(JSON.stringify(Object.values(currentBoxes)));
     }
   };
 
@@ -577,6 +620,14 @@ export function BQOCRPanel({
                 <option key={t.id} value={t.id}>{t.name}</option>
               ))}
             </select>
+            <label style={{ display: "flex", alignItems: "center", gap: 4, fontSize: 12, cursor: "pointer" }}>
+              <input
+                type="checkbox"
+                checked={autoApplyTemplate}
+                onChange={(e) => setAutoApplyTemplate(e.target.checked)}
+              />
+              Auto-apply on page change
+            </label>
             {showNewTplInput ? (
               <>
                 <input
@@ -591,14 +642,30 @@ export function BQOCRPanel({
                 <button style={cancelBtn} onClick={() => { setShowNewTplInput(false); setNewTplName(""); }}>Cancel</button>
               </>
             ) : (
-              <button
-                style={newTplBtn}
-                onClick={() => setShowNewTplInput(true)}
-                disabled={boxCount === 0}
-                title={boxCount === 0 ? "Draw boxes first" : "Save current boxes as template"}
-              >
-                + Save as Template
-              </button>
+              <>
+                <button
+                  style={newTplBtn}
+                  onClick={() => setShowNewTplInput(true)}
+                  disabled={boxCount === 0}
+                  title={boxCount === 0 ? "Draw boxes first" : "Save current boxes as template"}
+                >
+                  + Save as Template
+                </button>
+                {selectedTemplateId && onUpdateBQTemplate && (
+                  <button
+                    style={{
+                      ...saveBtn,
+                      opacity: boxesModified ? 1 : 0.5,
+                      cursor: boxesModified ? "pointer" : "not-allowed",
+                    }}
+                    onClick={handleUpdateTemplate}
+                    disabled={!boxesModified}
+                    title={boxesModified ? "Update template with current boxes" : "No changes to save"}
+                  >
+                    Update Template
+                  </button>
+                )}
+              </>
             )}
           </div>
         </div>

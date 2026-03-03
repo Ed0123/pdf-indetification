@@ -6,8 +6,8 @@ POST /api/pdf/export-pages
   Returns: application/zip  (individual named PDFs inside)
 
 POST /api/pdf/export-annotated
-  Body: { pages: [...], annotations: [...] }
-  Returns: application/zip  (PDFs with text overlays)
+  Body: { pages: [...], annotations: [...], merge: true/false }
+  Returns: Single merged PDF or ZIP  (PDFs with text overlays)
 """
 from __future__ import annotations
 
@@ -44,7 +44,7 @@ class TextAnnotation(BaseModel):
     x: float                  # X position (absolute PDF coordinates)
     y: float                  # Y position (absolute PDF coordinates)
     font_size: float = 10     # Font size in points
-    color: str = "#000000"    # Hex color
+    color: str = "#000000"    # Hex color (used for viewer display)
     bold: bool = False        # Bold text
     align: str = "left"       # left, center, right
 
@@ -54,6 +54,8 @@ class AnnotatedExportRequest(BaseModel):
     pages: List[PageEntry]
     annotations: List[TextAnnotation] = []
     include_annotations: bool = True  # Whether to include the text overlays
+    merge: bool = True                # Merge all pages into single PDF
+    output_filename: str = "annotated.pdf"  # Output filename for merged PDF
 
 
 def hex_to_rgb(hex_color: str) -> tuple:
@@ -113,12 +115,11 @@ async def export_annotated(req: AnnotatedExportRequest, user: dict = Depends(req
     Export PDF pages with text annotations overlaid.
     
     Annotations are drawn on the PDF at specified coordinates.
-    Can be used to add user-entered values (rate, qty, total) to the PDF.
+    Text is always rendered in BLACK for printing/professional use.
+    Can merge all pages into a single PDF or export as separate files in ZIP.
     """
     if not req.pages:
         raise HTTPException(status_code=400, detail="No pages specified")
-
-    zip_buffer = io.BytesIO()
 
     # Group annotations by file_id and page_number for efficient access
     annotations_map: dict[str, list[TextAnnotation]] = {}
@@ -128,10 +129,14 @@ async def export_annotated(req: AnnotatedExportRequest, user: dict = Depends(req
             annotations_map[key] = []
         annotations_map[key].append(ann)
 
-    with zipfile.ZipFile(zip_buffer, mode="w", compression=zipfile.ZIP_DEFLATED) as zf:
+    if req.merge:
+        # Merge all pages into a single PDF
+        merged_doc = fitz.open()
+        
         for entry in req.pages:
             path = _STORE.get(entry.file_id)
             if not path:
+                merged_doc.close()
                 raise HTTPException(
                     status_code=404,
                     detail=f"file_id '{entry.file_id}' not found; re-upload the PDF",
@@ -140,14 +145,14 @@ async def export_annotated(req: AnnotatedExportRequest, user: dict = Depends(req
             src = fitz.open(path)
             if entry.page_number < 0 or entry.page_number >= src.page_count:
                 src.close()
+                merged_doc.close()
                 raise HTTPException(
                     status_code=400,
                     detail=f"page_number {entry.page_number} out of range for '{entry.filename}'",
                 )
 
-            # Create a new document with just this page
-            single = fitz.open()
-            single.insert_pdf(src, from_page=entry.page_number, to_page=entry.page_number)
+            # Insert page into merged document
+            merged_doc.insert_pdf(src, from_page=entry.page_number, to_page=entry.page_number)
             
             # Add text annotations if requested
             if req.include_annotations:
@@ -155,22 +160,18 @@ async def export_annotated(req: AnnotatedExportRequest, user: dict = Depends(req
                 page_annotations = annotations_map.get(key, [])
                 
                 if page_annotations:
-                    page = single[0]  # We only have one page in the single doc
+                    # Get the last inserted page
+                    page = merged_doc[-1]
                     
                     for ann in page_annotations:
-                        # Convert hex color to RGB
-                        color = hex_to_rgb(ann.color)
+                        # Always use BLACK for PDF export (ignore annotation color)
+                        color = (0, 0, 0)  # Black
                         
-                        # Create text insertion point
-                        # Note: PyMuPDF uses top-left origin, y increases downward
                         point = fitz.Point(ann.x, ann.y)
-                        
-                        # Select font
-                        fontname = "helv"  # Helvetica
+                        fontname = "helv"
                         if ann.bold:
-                            fontname = "hebo"  # Helvetica-Bold
+                            fontname = "hebo"
                         
-                        # Insert text
                         page.insert_text(
                             point,
                             ann.text,
@@ -179,17 +180,76 @@ async def export_annotated(req: AnnotatedExportRequest, user: dict = Depends(req
                             color=color,
                         )
             
-            pdf_bytes = single.tobytes()
-            single.close()
             src.close()
+        
+        pdf_buffer = io.BytesIO(merged_doc.tobytes())
+        merged_doc.close()
+        
+        output_filename = req.output_filename
+        if not output_filename.lower().endswith(".pdf"):
+            output_filename += ".pdf"
+        
+        return StreamingResponse(
+            pdf_buffer,
+            media_type="application/pdf",
+            headers={"Content-Disposition": f'attachment; filename="{output_filename}"'},
+        )
+    else:
+        # Export as separate files in ZIP (original behavior)
+        zip_buffer = io.BytesIO()
+        
+        with zipfile.ZipFile(zip_buffer, mode="w", compression=zipfile.ZIP_DEFLATED) as zf:
+            for entry in req.pages:
+                path = _STORE.get(entry.file_id)
+                if not path:
+                    raise HTTPException(
+                        status_code=404,
+                        detail=f"file_id '{entry.file_id}' not found; re-upload the PDF",
+                    )
 
-            # Ensure the filename ends with .pdf
-            fname = entry.filename if entry.filename.lower().endswith(".pdf") else entry.filename + ".pdf"
-            zf.writestr(fname, pdf_bytes)
+                src = fitz.open(path)
+                if entry.page_number < 0 or entry.page_number >= src.page_count:
+                    src.close()
+                    raise HTTPException(
+                        status_code=400,
+                        detail=f"page_number {entry.page_number} out of range for '{entry.filename}'",
+                    )
 
-    zip_buffer.seek(0)
-    return StreamingResponse(
-        zip_buffer,
-        media_type="application/zip",
-        headers={"Content-Disposition": 'attachment; filename="annotated_pages.zip"'},
-    )
+                single = fitz.open()
+                single.insert_pdf(src, from_page=entry.page_number, to_page=entry.page_number)
+                
+                if req.include_annotations:
+                    key = f"{entry.file_id}-{entry.page_number}"
+                    page_annotations = annotations_map.get(key, [])
+                    
+                    if page_annotations:
+                        page = single[0]
+                        
+                        for ann in page_annotations:
+                            color = (0, 0, 0)  # Black
+                            point = fitz.Point(ann.x, ann.y)
+                            fontname = "helv"
+                            if ann.bold:
+                                fontname = "hebo"
+                            
+                            page.insert_text(
+                                point,
+                                ann.text,
+                                fontsize=ann.font_size,
+                                fontname=fontname,
+                                color=color,
+                            )
+                
+                pdf_bytes = single.tobytes()
+                single.close()
+                src.close()
+
+                fname = entry.filename if entry.filename.lower().endswith(".pdf") else entry.filename + ".pdf"
+                zf.writestr(fname, pdf_bytes)
+
+        zip_buffer.seek(0)
+        return StreamingResponse(
+            zip_buffer,
+            media_type="application/zip",
+            headers={"Content-Disposition": 'attachment; filename="annotated_pages.zip"'},
+        )

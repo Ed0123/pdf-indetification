@@ -613,10 +613,44 @@ def _parse_bq_rows(
                         y_end = dr_y1 + 100  # To page end
                     
                     # Collect description lines in this range that haven't been assigned yet
-                    item_desc_lines = [
+                    candidate_lines = [
                         l for l in desc_lines 
                         if y_start <= l['y_center'] <= y_end and id(l) not in assigned_lines
                     ]
+                    
+                    # Sort candidate lines by Y
+                    candidate_lines.sort(key=lambda l: l['y_center'])
+                    
+                    # Only take the FIRST continuous paragraph
+                    # Stop at:
+                    # 1. Large Y gap (paragraph break)
+                    # 2. Significant X position change combined with ANY Y gap (indicates new block/column)
+                    item_desc_lines = []
+                    for i, line in enumerate(candidate_lines):
+                        if i == 0:
+                            item_desc_lines.append(line)
+                        else:
+                            prev_line = candidate_lines[i-1]
+                            y_gap = line['y_top'] - prev_line['y_bottom']
+                            
+                            # Calculate X position difference (using left edges)
+                            x_diff = abs(line['x0'] - prev_line['x0'])
+                            
+                            # Paragraph break conditions:
+                            # 1. Large Y gap alone
+                            if y_gap > para_threshold:
+                                break
+                            
+                            # 2. Significant X difference (>20% of line width or >30 pixels) 
+                            #    combined with any Y gap (>5 pixels)
+                            avg_line_width = (prev_line['x1'] - prev_line['x0'] + line['x1'] - line['x0']) / 2
+                            x_threshold = max(30, avg_line_width * 0.2)  # At least 30px or 20% of line width
+                            
+                            if x_diff > x_threshold and y_gap > 5:
+                                # Significant X shift with Y gap - likely a new block
+                                break
+                            
+                            item_desc_lines.append(line)
                     
                     # Mark these lines as assigned
                     for l in item_desc_lines:
@@ -875,6 +909,10 @@ async def extract_bq(
             # Keep parse_debug from first page
             if not parse_debug and page_debug:
                 parse_debug = page_debug
+            
+            # Add warning if no words extracted (possible DataRange issue)
+            if page_debug and page_debug.get("words_extracted", 0) == 0:
+                warnings.append(f"Page {page_num + 1}: No text extracted from DataRange. Check that the DataRange box is positioned correctly over the text area.")
             
             # Renumber IDs to be globally unique
             start_id = len(all_rows) + 1

@@ -46,6 +46,8 @@ class BQTemplateCreate(BaseModel):
     boxes: List[BQTemplateBox]
     permission: str = "personal"
     group: Optional[str] = None
+    preview_file_id: Optional[str] = None
+    preview_page: int = 0
 
 
 class BQTemplateUpdate(BaseModel):
@@ -53,6 +55,8 @@ class BQTemplateUpdate(BaseModel):
     boxes: Optional[List[BQTemplateBox]] = None
     permission: Optional[str] = None
     group: Optional[str] = None
+    preview_file_id: Optional[str] = None
+    preview_page: Optional[int] = None
 
 
 class BQTemplateResponse(BaseModel):
@@ -62,6 +66,8 @@ class BQTemplateResponse(BaseModel):
     boxes: List[BQTemplateBox]
     permission: str
     group: str
+    preview_file_id: Optional[str] = None
+    preview_page: int = 0
     created_at: str
     updated_at: str
 
@@ -120,6 +126,8 @@ def create_bq_template(body: BQTemplateCreate, user: dict = Depends(require_auth
         "boxes": [b.model_dump() for b in body.boxes],
         "permission": body.permission,
         "group": body.group or _user_group(uid),
+        "preview_file_id": body.preview_file_id,
+        "preview_page": body.preview_page,
         "created_at": now,
         "updated_at": now,
     }
@@ -151,6 +159,10 @@ def update_bq_template(template_id: str, body: BQTemplateUpdate, user: dict = De
         changes["permission"] = body.permission
     if body.group is not None:
         changes["group"] = body.group
+    if body.preview_file_id is not None:
+        changes["preview_file_id"] = body.preview_file_id
+    if body.preview_page is not None:
+        changes["preview_page"] = body.preview_page
     changes["updated_at"] = datetime.now(timezone.utc).isoformat()
 
     ref.update(changes)
