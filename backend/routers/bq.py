@@ -156,16 +156,17 @@ def _parse_bq_rows(
     pdf_path: str
 ) -> list[BQRowResponse]:
     """
-    Parse BQ data from extracted text using column-based extraction.
+    Parse BQ data using text block analysis.
     
-    BQ Table Structure (horizontal integration):
-    - Each physical row in the PDF = one output row
-    - Columns: Ref (Item), Description, Qty, Unit, Rate, Total
-    - If row has Item ref AND Qty/Unit → "item"
-    - Otherwise → "notes"
+    Logic:
+    1. Use Column Headers X ranges to slice DataRange text into columns
+    2. For Description column: analyze Y distances between lines
+       - Close lines (within threshold) = same text block (merge)
+       - Far lines = separate text blocks (notes)
+    3. For Item, Qty, Unit, Rate, Total: find Y coordinate of each value
+    4. Match them to the nearest Description text block by Y coordinate
     
-    The key is HORIZONTAL integration: all columns on the same Y coordinate
-    should be merged into a single output row.
+    This approach handles multi-line descriptions correctly.
     """
     import fitz
     
@@ -205,7 +206,7 @@ def _parse_bq_rows(
             page_width = page.width
             page_height = page.height
             
-            # Get DataRange bounding box
+            # Get DataRange bounding box (absolute coordinates)
             dr_bbox = (
                 data_range_box.x * page_width,
                 data_range_box.y * page_height,
@@ -213,12 +214,13 @@ def _parse_bq_rows(
                 (data_range_box.y + data_range_box.height) * page_height
             )
             
-            # Calculate column bounding boxes (absolute X coordinates)
-            col_bboxes = {}
+            # Calculate column X ranges (absolute coordinates)
+            col_x_ranges = {}
             for col_name, box in column_boxes.items():
-                col_x0 = box.x * page_width
-                col_x1 = (box.x + box.width) * page_width
-                col_bboxes[col_name] = (col_x0, col_x1)
+                col_x_ranges[col_name] = (
+                    box.x * page_width,
+                    (box.x + box.width) * page_width
+                )
             
             # Extract words from DataRange
             cropped = page.within_bbox(dr_bbox)
@@ -227,92 +229,209 @@ def _parse_bq_rows(
             if not words:
                 return rows
             
-            # Step 1: Group words by Y coordinate into physical rows
-            # Use smaller tolerance to avoid merging different lines
-            y_tolerance = 4
-            physical_rows: list[tuple[float, list]] = []
+            # Step 1: Assign each word to a column based on X position
+            col_words: dict[str, list] = {col: [] for col in col_x_ranges}
+            col_words["_unassigned"] = []
             
             for w in words:
-                y_mid = (w['top'] + w['bottom']) / 2
-                found = False
-                for i, (row_y, row_words) in enumerate(physical_rows):
-                    if abs(row_y - y_mid) <= y_tolerance:
-                        row_words.append(w)
-                        # Update row_y to average
-                        physical_rows[i] = ((row_y * len(row_words) + y_mid) / (len(row_words) + 1), row_words)
-                        found = True
+                word_x_mid = (w['x0'] + w['x1']) / 2
+                word_y_mid = (w['top'] + w['bottom']) / 2
+                text = w['text'].strip()
+                if not text:
+                    continue
+                
+                assigned = False
+                for col_name, (cx0, cx1) in col_x_ranges.items():
+                    if cx0 <= word_x_mid <= cx1:
+                        col_words[col_name].append({
+                            'text': text,
+                            'y': word_y_mid,
+                            'y_top': w['top'],
+                            'y_bottom': w['bottom'],
+                            'x0': w['x0'],
+                            'x1': w['x1']
+                        })
+                        assigned = True
                         break
-                if not found:
-                    physical_rows.append((y_mid, [w]))
+                
+                if not assigned:
+                    col_words["_unassigned"].append({
+                        'text': text,
+                        'y': word_y_mid,
+                        'y_top': w['top'],
+                        'y_bottom': w['bottom']
+                    })
             
-            # Sort by Y position (top to bottom)
-            physical_rows.sort(key=lambda x: x[0])
+            # If Description column is empty, use unassigned words
+            if not col_words.get("Description") and col_words.get("_unassigned"):
+                col_words["Description"] = col_words["_unassigned"]
             
-            # Step 2: For each physical row, assign words to columns (HORIZONTAL integration)
+            # Step 2: Analyze Description column - group by Y distance into text blocks
+            desc_words = sorted(col_words.get("Description", []), key=lambda w: w['y'])
+            
+            # Calculate line spacing threshold
+            # Analyze distances between consecutive words
+            if len(desc_words) >= 2:
+                y_distances = []
+                for i in range(1, len(desc_words)):
+                    dist = desc_words[i]['y'] - desc_words[i-1]['y']
+                    if dist > 0:  # Only positive distances (next line is below)
+                        y_distances.append(dist)
+                
+                if y_distances:
+                    # Use median distance as typical line spacing
+                    sorted_dists = sorted(y_distances)
+                    median_dist = sorted_dists[len(sorted_dists) // 2]
+                    # Threshold: 1.8x median is considered same block
+                    block_threshold = median_dist * 1.8
+                else:
+                    block_threshold = 15  # Default
+            else:
+                block_threshold = 15
+            
+            # Group Description words into text blocks
+            desc_blocks: list[dict] = []  # [{texts: [], y_start, y_end}]
+            
+            for word in desc_words:
+                if not desc_blocks:
+                    desc_blocks.append({
+                        'texts': [word['text']],
+                        'y_start': word['y_top'],
+                        'y_end': word['y_bottom'],
+                        'y_center': word['y']
+                    })
+                else:
+                    last_block = desc_blocks[-1]
+                    dist = word['y_top'] - last_block['y_end']
+                    
+                    if dist <= block_threshold:
+                        # Same block - merge
+                        last_block['texts'].append(word['text'])
+                        last_block['y_end'] = word['y_bottom']
+                        # Update center as average
+                        last_block['y_center'] = (last_block['y_start'] + word['y_bottom']) / 2
+                    else:
+                        # New block
+                        desc_blocks.append({
+                            'texts': [word['text']],
+                            'y_start': word['y_top'],
+                            'y_end': word['y_bottom'],
+                            'y_center': word['y']
+                        })
+            
+            # Finalize block descriptions
+            for block in desc_blocks:
+                block['description'] = ' '.join(block['texts'])
+            
+            # Step 3: Extract Item, Qty, Unit, Rate, Total values with Y positions
+            def extract_col_values(col_name: str) -> list[dict]:
+                """Extract values from a column with their Y positions"""
+                words = sorted(col_words.get(col_name, []), key=lambda w: w['y'])
+                # Group words on same Y into single values
+                values = []
+                y_tolerance = 5
+                
+                for word in words:
+                    if not values:
+                        values.append({'text': word['text'], 'y': word['y']})
+                    else:
+                        last = values[-1]
+                        if abs(word['y'] - last['y']) <= y_tolerance:
+                            # Same line, append
+                            last['text'] += ' ' + word['text']
+                        else:
+                            values.append({'text': word['text'], 'y': word['y']})
+                
+                return values
+            
+            item_values = extract_col_values("Item")
+            qty_values = extract_col_values("Qty")
+            unit_values = extract_col_values("Unit")
+            rate_values = extract_col_values("Rate")
+            total_values = extract_col_values("Total")
+            
+            # Step 4: Match Item/Qty/Unit/Rate/Total to nearest Description block
+            def find_nearest_block(y: float, blocks: list[dict]) -> int:
+                """Find index of block with Y range closest to y"""
+                if not blocks:
+                    return -1
+                
+                best_idx = 0
+                best_dist = float('inf')
+                
+                for i, block in enumerate(blocks):
+                    # Check if y is within block range
+                    if block['y_start'] <= y <= block['y_end']:
+                        return i
+                    # Or find closest
+                    dist = min(abs(y - block['y_start']), abs(y - block['y_end']))
+                    if dist < best_dist:
+                        best_dist = dist
+                        best_idx = i
+                
+                return best_idx
+            
             def parse_number(s: str) -> float | None:
-                """Parse a number string, handling commas"""
+                """Parse number, handling commas"""
                 s = s.replace(",", "").strip()
-                if not s:
-                    return None
                 try:
                     return float(s)
                 except ValueError:
                     return None
             
-            for y_pos, row_words in physical_rows:
-                # Sort words by X position (left to right)
-                row_words.sort(key=lambda w: w['x0'])
+            # Create output rows
+            # First, match items to blocks
+            block_data: list[dict] = [{'block': b, 'item': '', 'qty': None, 'unit': '', 'rate': None, 'total': None} 
+                                       for b in desc_blocks]
+            
+            # Match Item values
+            for val in item_values:
+                idx = find_nearest_block(val['y'], desc_blocks)
+                if idx >= 0:
+                    block_data[idx]['item'] = val['text']
+            
+            # Match Qty values
+            for val in qty_values:
+                idx = find_nearest_block(val['y'], desc_blocks)
+                if idx >= 0:
+                    block_data[idx]['qty'] = parse_number(val['text'])
+            
+            # Match Unit values
+            for val in unit_values:
+                idx = find_nearest_block(val['y'], desc_blocks)
+                if idx >= 0:
+                    block_data[idx]['unit'] = val['text']
+            
+            # Match Rate values
+            for val in rate_values:
+                idx = find_nearest_block(val['y'], desc_blocks)
+                if idx >= 0:
+                    block_data[idx]['rate'] = parse_number(val['text'])
+            
+            # Match Total values
+            for val in total_values:
+                idx = find_nearest_block(val['y'], desc_blocks)
+                if idx >= 0:
+                    block_data[idx]['total'] = parse_number(val['text'])
+            
+            # Step 5: Create output rows
+            for bd in block_data:
+                block = bd['block']
+                item_no = bd['item']
+                quantity = bd['qty']
+                unit = bd['unit']
+                rate = bd['rate']
+                total = bd['total']
+                description = block['description']
                 
-                # Assign each word to a column based on X position
-                col_texts = {col: [] for col in col_bboxes}
-                unassigned = []
-                
-                for w in row_words:
-                    word_x0 = w['x0']
-                    word_x1 = w['x1']
-                    word_x_mid = (word_x0 + word_x1) / 2
-                    text = w['text'].strip()
-                    if not text:
-                        continue
-                    
-                    assigned = False
-                    for col_name, (cx0, cx1) in col_bboxes.items():
-                        # Check if word overlaps with column
-                        if cx0 <= word_x_mid <= cx1:
-                            col_texts[col_name].append(text)
-                            assigned = True
-                            break
-                    
-                    if not assigned:
-                        unassigned.append(text)
-                
-                # Build column values
-                item_no = " ".join(col_texts.get("Item", []))
-                description = " ".join(col_texts.get("Description", []))
-                qty_str = " ".join(col_texts.get("Qty", []))
-                unit = " ".join(col_texts.get("Unit", []))
-                rate_str = " ".join(col_texts.get("Rate", []))
-                total_str = " ".join(col_texts.get("Total", []))
-                
-                # If Description is empty but we have unassigned text, use it
-                if not description and unassigned:
-                    description = " ".join(unassigned)
-                
-                # Parse numeric values
-                quantity = parse_number(qty_str)
-                rate = parse_number(rate_str)
-                total = parse_number(total_str)
-                
-                # Skip completely empty rows
-                if not item_no and not description and quantity is None and not unit:
+                # Skip empty
+                if not description and not item_no:
                     continue
                 
-                # Classification:
-                # - "item" if has Item ref AND (Qty OR Unit has value)
-                # - "notes" otherwise
-                has_item_ref = bool(item_no.strip())
+                # Classification: item if has Item ref AND (Qty OR Unit)
+                has_item = bool(item_no.strip())
                 has_qty_unit = quantity is not None or bool(unit.strip())
-                row_type = "item" if (has_item_ref and has_qty_unit) else "notes"
+                row_type = "item" if (has_item and has_qty_unit) else "notes"
                 
                 rows.append(BQRowResponse(
                     id=row_id,

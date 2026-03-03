@@ -54,8 +54,12 @@ import {
   deleteCloudTemplate,
   uploadTemplatePageImage,
   renderPage,
+  listBQTemplates,
+  createBQTemplate,
+  updateBQTemplate,
+  deleteBQTemplate,
 } from "./api/client";
-import type { GroupItem, TierItem, ServerFileInfo, CloudTemplate } from "./api/client";
+import type { GroupItem, TierItem, ServerFileInfo, CloudTemplate, BQTemplateAPI } from "./api/client";
 
 // Route views
 type AppView = "login" | "account" | "admin" | "main";
@@ -237,6 +241,7 @@ export default function App() {
     if (IS_DEV_MODE) return;
     if (view !== "main" || !auth.user) return;
     loadCloudTemplates();
+    loadCloudBQTemplates();
   }, [view, auth.user]);
 
   const loadCloudTemplates = async () => {
@@ -248,6 +253,36 @@ export default function App() {
       console.warn("Failed to load cloud templates:", err);
     }
   };
+
+  const loadCloudBQTemplates = async () => {
+    try {
+      const cloudList = await listBQTemplates();
+      const localBQTemplates: BQTemplate[] = cloudList.map(bqCloudToLocal);
+      setBqTemplates(localBQTemplates);
+    } catch (err) {
+      console.warn("Failed to load cloud BQ templates:", err);
+    }
+  };
+
+  /** Convert Cloud BQ Template → local BQTemplate type */
+  const bqCloudToLocal = (ct: BQTemplateAPI): BQTemplate => ({
+    id: ct.id,
+    name: ct.name,
+    boxes: (ct.boxes ?? []).map((b) => ({
+      column_name: b.column_name,
+      x: b.x,
+      y: b.y,
+      width: b.width,
+      height: b.height,
+      color: b.color || "#2980b9",
+    })),
+    notes: "",
+    preview_file_id: null,
+    preview_page: 0,
+    owner_uid: ct.owner_uid,
+    permission: ct.permission,
+    group: ct.group,
+  });
 
   /** Convert Cloud → local Template type */
   const cloudToLocal = (ct: CloudTemplate): Template => ({
@@ -837,23 +872,26 @@ export default function App() {
     }));
   }, []);
 
-  // Save BQ template
-  const handleSaveBQTemplate = useCallback((name: string, boxes: BoxInfo[]) => {
-    const newTemplate: BQTemplate = {
-      id: `bqt_${Date.now()}`,
-      name,
-      boxes: boxes.map((b, i) => ({
-        ...b,
+  // Save BQ template to cloud
+  const handleSaveBQTemplate = useCallback(async (name: string, boxes: BoxInfo[]) => {
+    try {
+      const apiBoxes = boxes.map((b, i) => ({
+        column_name: b.column_name,
+        x: b.x,
+        y: b.y,
+        width: b.width,
+        height: b.height,
         color: ["#e74c3c", "#3498db", "#2ecc71", "#9b59b6", "#f39c12", "#1abc9c"][i % 6],
-      })),
-      notes: "",
-      preview_file_id: state.selected_file_id,
-      preview_page: state.selected_page,
-      owner_uid: auth.user?.uid,
-    };
-    setBqTemplates((prev) => [...prev, newTemplate]);
-    setMsg(`Saved BQ template "${name}"`);
-  }, [state.selected_file_id, state.selected_page, auth.user]);
+      }));
+      const created = await createBQTemplate(name, apiBoxes);
+      const localTemplate = bqCloudToLocal(created);
+      setBqTemplates((prev) => [...prev, localTemplate]);
+      setMsg(`Saved BQ template "${name}" to cloud`);
+    } catch (err: any) {
+      console.error("Failed to save BQ template:", err);
+      setMsg(`Failed to save BQ template: ${err.message}`);
+    }
+  }, []);
 
   // Apply BQ template
   const handleApplyBQTemplate = useCallback((templateId: string) => {
@@ -875,10 +913,51 @@ export default function App() {
   }, [bqTemplates, state.selected_file_id, handleBQBoxesChange]);
 
   // Save/update all BQ templates (used by TemplateManagerPanel)
-  const handleSaveBQTemplates = useCallback((templates: BQTemplate[]) => {
+  const handleSaveBQTemplates = useCallback(async (templates: BQTemplate[]) => {
+    // For cloud storage, we handle each template individually
+    // This is called when TemplateManagerPanel updates templates (delete, rename)
+    // We sync by comparing with current state
+    const oldIds = new Set(bqTemplates.map(t => t.id));
+    const newIds = new Set(templates.map(t => t.id));
+    
+    // Delete removed templates
+    for (const old of bqTemplates) {
+      if (!newIds.has(old.id)) {
+        try {
+          await deleteBQTemplate(old.id);
+        } catch (err) {
+          console.warn("Failed to delete BQ template:", err);
+        }
+      }
+    }
+    
+    // Update existing templates that may have changed
+    for (const tmpl of templates) {
+      if (oldIds.has(tmpl.id)) {
+        const oldTmpl = bqTemplates.find(t => t.id === tmpl.id);
+        if (oldTmpl && (oldTmpl.name !== tmpl.name || JSON.stringify(oldTmpl.boxes) !== JSON.stringify(tmpl.boxes))) {
+          try {
+            await updateBQTemplate(tmpl.id, {
+              name: tmpl.name,
+              boxes: tmpl.boxes.map(b => ({
+                column_name: b.column_name,
+                x: b.x,
+                y: b.y,
+                width: b.width,
+                height: b.height,
+                color: b.color || "#2980b9",
+              })),
+            });
+          } catch (err) {
+            console.warn("Failed to update BQ template:", err);
+          }
+        }
+      }
+    }
+    
     setBqTemplates(templates);
     setMsg(`Saved ${templates.length} BQ template(s)`);
-  }, []);
+  }, [bqTemplates]);
 
   // Edit BQ row
   const handleBQRowEdit = useCallback((pageKey: string, rowId: number, field: keyof BQRow, value: any) => {

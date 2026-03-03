@@ -110,6 +110,8 @@ export interface BQTemplate {
   preview_page: number;
   owner_uid?: string;
   owner_name?: string;
+  permission?: string;               // "personal" | "public" | "group"
+  group?: string;                    // Group name for group-level sharing
 }
 
 /** Available BQ OCR engines */

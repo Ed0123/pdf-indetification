@@ -722,3 +722,72 @@ export async function extractBQ(
     LONG_TIMEOUT_MS
   );
 }
+
+// ─── BQ Templates API ────────────────────────────────────────────────────────
+
+/** BQ template box definition */
+export interface BQTemplateBoxAPI {
+  column_name: string;
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+  color: string;
+}
+
+/** BQ template response from API */
+export interface BQTemplateAPI {
+  id: string;
+  owner_uid: string;
+  name: string;
+  boxes: BQTemplateBoxAPI[];
+  permission: string;
+  group: string;
+  created_at: string;
+  updated_at: string;
+}
+
+/** List all BQ templates visible to current user. */
+export async function listBQTemplates(): Promise<BQTemplateAPI[]> {
+  return request<BQTemplateAPI[]>("/api/bq/templates/");
+}
+
+/** Create a new BQ template. */
+export async function createBQTemplate(
+  name: string,
+  boxes: BQTemplateBoxAPI[],
+  permission: string = "personal",
+  group?: string
+): Promise<BQTemplateAPI> {
+  return request<BQTemplateAPI>("/api/bq/templates/", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ name, boxes, permission, group }),
+  });
+}
+
+/** Update a BQ template. */
+export async function updateBQTemplate(
+  templateId: string,
+  data: {
+    name?: string;
+    boxes?: BQTemplateBoxAPI[];
+    permission?: string;
+    group?: string;
+  }
+): Promise<BQTemplateAPI> {
+  return request<BQTemplateAPI>(`/api/bq/templates/${templateId}`, {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(data),
+  });
+}
+
+/** Delete a BQ template. */
+export async function deleteBQTemplate(
+  templateId: string
+): Promise<{ deleted: string }> {
+  return request<{ deleted: string }>(`/api/bq/templates/${templateId}`, {
+    method: "DELETE",
+  });
+}
