@@ -15,12 +15,20 @@ interface BQExportPanelProps {
   bqPageData: Record<string, BQPageData>;  // key: `${fileId}-${pageNum}`
   onRowEdit: (pageKey: string, rowId: number, field: keyof BQRow, value: any) => void;
   onDeleteRow: (pageKey: string, rowId: number) => void;
+  /** Called when user clicks to edit a row - navigate to PDF page and highlight */
+  onNavigateToRow?: (
+    fileId: string, 
+    pageNum: number, 
+    bbox: { x0: number; y0: number; x1: number; y1: number } | null,
+    pageSize?: { width: number; height: number } | null
+  ) => void;
 }
 
 export function BQExportPanel({
   bqPageData,
   onRowEdit,
   onDeleteRow,
+  onNavigateToRow,
 }: BQExportPanelProps) {
   const [filterType, setFilterType] = useState<string>("all");
   const [exporting, setExporting] = useState(false);
@@ -97,10 +105,22 @@ export function BQExportPanel({
     return "";
   };
 
-  // Handle cell edit
-  const handleStartEdit = (pageKey: string, rowId: number, field: string, currentValue: any) => {
+  // Handle cell edit - also navigate to PDF and highlight
+  const handleStartEdit = (pageKey: string, rowId: number, field: string, currentValue: any, row: BQRow) => {
     setEditingCell({ pageKey, rowId, field });
     setEditValue(String(currentValue ?? ""));
+    
+    // Navigate to PDF page and highlight the row
+    if (onNavigateToRow && row.file_id) {
+      const bbox = (row.bbox_x0 !== undefined && row.bbox_y0 !== undefined && 
+                    row.bbox_x1 !== undefined && row.bbox_y1 !== undefined)
+        ? { x0: row.bbox_x0, y0: row.bbox_y0, x1: row.bbox_x1, y1: row.bbox_y1 }
+        : null;
+      const pageSize = (row.page_width && row.page_height)
+        ? { width: row.page_width, height: row.page_height }
+        : null;
+      onNavigateToRow(row.file_id, row.page_number, bbox, pageSize);
+    }
   };
 
   const handleSaveEdit = () => {
@@ -440,7 +460,7 @@ export function BQExportPanel({
                     ) : (
                       <span
                         style={editableCell}
-                        onClick={() => handleStartEdit(pageKey, row.id, "item_no", row.item_no)}
+                        onClick={() => handleStartEdit(pageKey, row.id, "item_no", row.item_no, row)}
                       >
                         {row.item_no || "-"}
                       </span>
@@ -448,18 +468,29 @@ export function BQExportPanel({
                   </td>
                   <td style={tdWide}>
                     {isEditing && editingCell.field === "description" ? (
-                      <input
-                        style={{ ...editInput, width: "100%" }}
+                      <textarea
+                        style={{ 
+                          ...editInput, 
+                          width: "100%", 
+                          minHeight: 80,
+                          resize: "vertical",
+                          fontFamily: "inherit",
+                          lineHeight: 1.4
+                        }}
                         value={editValue}
                         onChange={(e) => setEditValue(e.target.value)}
                         onBlur={handleSaveEdit}
-                        onKeyDown={(e) => e.key === "Enter" ? handleSaveEdit() : e.key === "Escape" && handleCancelEdit()}
+                        onKeyDown={(e) => {
+                          if (e.key === "Escape") handleCancelEdit();
+                          // Ctrl+Enter to save (allow plain Enter for newlines)
+                          if (e.key === "Enter" && e.ctrlKey) handleSaveEdit();
+                        }}
                         autoFocus
                       />
                     ) : (
                       <span
                         style={{ ...editableCell, display: "block", maxWidth: 300, overflow: "hidden", textOverflow: "ellipsis" }}
-                        onClick={() => handleStartEdit(pageKey, row.id, "description", row.description)}
+                        onClick={() => handleStartEdit(pageKey, row.id, "description", row.description, row)}
                         title={row.description}
                       >
                         {row.description || "-"}
@@ -480,7 +511,7 @@ export function BQExportPanel({
                     ) : (
                       <span
                         style={editableCell}
-                        onClick={() => handleStartEdit(pageKey, row.id, "quantity", row.quantity)}
+                        onClick={() => handleStartEdit(pageKey, row.id, "quantity", row.quantity, row)}
                       >
                         {row.quantity ?? "-"}
                       </span>
@@ -499,7 +530,7 @@ export function BQExportPanel({
                     ) : (
                       <span
                         style={editableCell}
-                        onClick={() => handleStartEdit(pageKey, row.id, "unit", row.unit)}
+                        onClick={() => handleStartEdit(pageKey, row.id, "unit", row.unit, row)}
                       >
                         {row.unit || "-"}
                       </span>
@@ -519,7 +550,7 @@ export function BQExportPanel({
                     ) : (
                       <span
                         style={editableCell}
-                        onClick={() => handleStartEdit(pageKey, row.id, "rate", row.rate)}
+                        onClick={() => handleStartEdit(pageKey, row.id, "rate", row.rate, row)}
                       >
                         {row.rate ?? "-"}
                       </span>
@@ -539,7 +570,7 @@ export function BQExportPanel({
                     ) : (
                       <span
                         style={editableCell}
-                        onClick={() => handleStartEdit(pageKey, row.id, "total", row.total)}
+                        onClick={() => handleStartEdit(pageKey, row.id, "total", row.total, row)}
                       >
                         {row.total ?? "-"}
                       </span>

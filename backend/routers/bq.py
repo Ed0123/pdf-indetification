@@ -140,6 +140,9 @@ class BQRowResponse(BaseModel):
     bbox_y0: Optional[float] = None
     bbox_x1: Optional[float] = None
     bbox_y1: Optional[float] = None
+    # Page dimensions for coordinate conversion
+    page_width: Optional[float] = None
+    page_height: Optional[float] = None
 
 
 class BQExtractResponse(BaseModel):
@@ -553,7 +556,9 @@ def _parse_bq_rows(
                         bbox_x0=line['x0'],
                         bbox_y0=line['y_top'],
                         bbox_x1=line['x1'],
-                        bbox_y1=line['y_bottom']
+                        bbox_y1=line['y_bottom'],
+                        page_width=page_width,
+                        page_height=page_height
                     ))
                     row_id += 1
             else:
@@ -655,7 +660,9 @@ def _parse_bq_rows(
                             bbox_x0=bbox_x0,
                             bbox_y0=bbox_y0,
                             bbox_x1=bbox_x1,
-                            bbox_y1=bbox_y1
+                            bbox_y1=bbox_y1,
+                            page_width=page_width,
+                            page_height=page_height
                         ))
                         row_id += 1
                     else:
@@ -699,7 +706,9 @@ def _parse_bq_rows(
                             bbox_x0=bbox_x0,
                             bbox_y0=bbox_y0,
                             bbox_x1=bbox_x1,
-                            bbox_y1=bbox_y1
+                            bbox_y1=bbox_y1,
+                            page_width=page_width,
+                            page_height=page_height
                         ))
                         row_id += 1
     
@@ -728,7 +737,9 @@ def _parse_bq_rows(
                 quantity=None,
                 unit="",
                 rate=None,
-                total=None
+                total=None,
+                page_width=None,
+                page_height=None
             ))
             row_id += 1
     

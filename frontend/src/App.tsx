@@ -117,6 +117,11 @@ export default function App() {
   // BQ (Bill of Quantities) state
   const [bqPageData, setBqPageData] = useState<Record<string, BQPageData>>({});
   const [bqTemplates, setBqTemplates] = useState<BQTemplate[]>([]);
+  
+  // Highlight box for BQ row navigation (absolute PDF coords)
+  const [highlightBox, setHighlightBox] = useState<{ x0: number; y0: number; x1: number; y1: number } | null>(null);
+  // PDF page dimensions for coordinate conversion
+  const [pdfPageSize, setPdfPageSize] = useState<{ width: number; height: number } | null>(null);
 
   const fileInputRef = useRef<HTMLInputElement>(null);
 
@@ -991,6 +996,24 @@ export default function App() {
     });
   }, []);
 
+  // Navigate to PDF page and highlight BQ row
+  const handleNavigateToRow = useCallback((
+    fileId: string, 
+    pageNum: number, 
+    bbox: { x0: number; y0: number; x1: number; y1: number } | null,
+    pageSize?: { width: number; height: number } | null
+  ) => {
+    // Navigate to the page
+    project.selectPage(fileId, pageNum);
+    // Set highlight box and page size for coordinate conversion
+    setHighlightBox(bbox);
+    setPdfPageSize(pageSize || null);
+    // Clear highlight after 5 seconds
+    if (bbox) {
+      setTimeout(() => setHighlightBox(null), 5000);
+    }
+  }, [project]);
+
   // Handle box drawing in BQ mode - route to BQ boxes instead of regular boxes
   const handleDrawBoxBQ = useCallback(
     (box: BoxInfo) => {
@@ -1340,6 +1363,7 @@ export default function App() {
               bqPageData={bqPageData}
               onRowEdit={handleBQRowEdit}
               onDeleteRow={handleBQRowDelete}
+              onNavigateToRow={handleNavigateToRow}
             />
           )}
 
@@ -1422,6 +1446,8 @@ export default function App() {
             boxes={activeModule === "bq_ocr" ? currentBQBoxes : currentBoxes}
             selectedColumn={selectedColumn}
             onDrawBox={activeModule === "bq_ocr" ? handleDrawBoxBQ : handleDrawBox}
+            highlightBox={highlightBox}
+            pdfPageSize={pdfPageSize}
           />
         </div>
       </div>

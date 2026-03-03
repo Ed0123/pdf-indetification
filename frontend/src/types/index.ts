@@ -89,6 +89,14 @@ export interface BQRow {
   unit: string;                 // Unit (e.g. "Set", "Nr", etc.)
   rate: number | null;          // Unit rate
   total: number | null;         // Total amount
+  // Bounding box for UI highlighting (absolute PDF coordinates)
+  bbox_x0?: number;
+  bbox_y0?: number;
+  bbox_x1?: number;
+  bbox_y1?: number;
+  // Page dimensions for coordinate conversion
+  page_width?: number;
+  page_height?: number;
 }
 
 /** BQ page data - stores boxes and extracted rows for a single page */

@@ -8,13 +8,17 @@ interface PDFViewerProps {
   boxes: Record<string, BoxInfo>;
   selectedColumn: string | null;
   onDrawBox: (box: BoxInfo) => void;
+  /** Optional highlight box (absolute PDF coords) for BQ row navigation */
+  highlightBox?: { x0: number; y0: number; x1: number; y1: number } | null;
+  /** PDF page dimensions needed to convert absolute coords to relative */
+  pdfPageSize?: { width: number; height: number } | null;
 }
 
 const MIN_ZOOM = 0.2;
 const MAX_ZOOM = 4.0;
 const ZOOM_STEP = 0.05;
 
-export function PDFViewer({ fileId, pageNum, boxes, selectedColumn, onDrawBox }: PDFViewerProps) {
+export function PDFViewer({ fileId, pageNum, boxes, selectedColumn, onDrawBox, highlightBox, pdfPageSize }: PDFViewerProps) {
   const containerRef = useRef<HTMLDivElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const imgRef = useRef<HTMLImageElement>(null);
@@ -38,7 +42,7 @@ export function PDFViewer({ fileId, pageNum, boxes, selectedColumn, onDrawBox }:
       .catch((e) => { setError(String(e)); setLoading(false); });
   }, [fileId, pageNum]);
 
-  // Redraw canvas boxes whenever boxes / selectedColumn / zoom / imgNatural change
+  // Redraw canvas boxes whenever boxes / selectedColumn / zoom / imgNatural / highlightBox change
   useEffect(() => {
     const canvas = canvasRef.current;
     const img = imgRef.current;
@@ -80,7 +84,26 @@ export function PDFViewer({ fileId, pageNum, boxes, selectedColumn, onDrawBox }:
       ctx.setLineDash([5, 3]);
       ctx.strokeRect(x, y, w, h);
     }
-  }, [boxes, selectedColumn, zoom, imgNatural, drawing]);
+
+    // Draw highlight box for BQ row navigation (absolute PDF coords → relative)
+    if (highlightBox && pdfPageSize && pdfPageSize.width > 0 && pdfPageSize.height > 0) {
+      // Convert absolute PDF coordinates to relative 0-1
+      const rx = highlightBox.x0 / pdfPageSize.width;
+      const ry = highlightBox.y0 / pdfPageSize.height;
+      const rw = (highlightBox.x1 - highlightBox.x0) / pdfPageSize.width;
+      const rh = (highlightBox.y1 - highlightBox.y0) / pdfPageSize.height;
+      
+      // Draw highlight with orange/yellow color and thicker line
+      ctx.strokeStyle = "#f39c12";
+      ctx.lineWidth = 3;
+      ctx.setLineDash([]);
+      ctx.strokeRect(rx * displayW, ry * displayH, rw * displayW, rh * displayH);
+      
+      // Semi-transparent fill
+      ctx.fillStyle = "rgba(243, 156, 18, 0.15)";
+      ctx.fillRect(rx * displayW, ry * displayH, rw * displayW, rh * displayH);
+    }
+  }, [boxes, selectedColumn, zoom, imgNatural, drawing, highlightBox, pdfPageSize]);
 
   // Ctrl+Wheel zoom
   const handleWheel = useCallback((e: React.WheelEvent) => {

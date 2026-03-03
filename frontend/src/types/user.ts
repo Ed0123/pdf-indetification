@@ -53,6 +53,8 @@ export const TIER_FEATURES = [
   { key: "export_excel", label: "匯出 Excel" },
   { key: "export_pdf", label: "匯出 PDF 頁面" },
   { key: "templates", label: "範本管理" },
+  { key: "bq_ocr", label: "BQ OCR 提取" },
+  { key: "bq_export", label: "BQ 數據匯出" },
 ] as const;
 
 export type TierFeatureKey = typeof TIER_FEATURES[number]["key"];
