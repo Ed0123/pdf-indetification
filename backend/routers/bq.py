@@ -15,6 +15,7 @@ from pydantic import BaseModel
 
 from ..auth_middleware import require_auth
 from ..firebase_setup import get_db
+from .pdf import _get_path  # Import the file path resolver from pdf router
 
 # ─── Configuration ─────────────────────────────────────────────────────────────
 
@@ -120,16 +121,6 @@ def _check_bq_permission(user: dict) -> dict:
         status_code=403,
         detail=f"BQ feature requires sponsor tier or above (current: {user_tier})"
     )
-
-
-def _get_uploaded_pdf_path(file_id: str) -> str:
-    """Get path to uploaded PDF file."""
-    import tempfile
-    upload_dir = os.path.join(tempfile.gettempdir(), "pdf_uploads")
-    path = os.path.join(upload_dir, f"{file_id}.pdf")
-    if not os.path.exists(path):
-        raise HTTPException(status_code=404, detail=f"File not found: {file_id}")
-    return path
 
 
 def _extract_text_from_box(pdf_path: str, page_num: int, box: BoxDefinition, engine: str = "pdfplumber") -> str:
@@ -383,8 +374,8 @@ async def extract_bq(
     # Check permission
     user_profile = _check_bq_permission(user)
     
-    # Get PDF path
-    pdf_path = _get_uploaded_pdf_path(request.file_id)
+    # Get PDF path from the in-memory store (shared with pdf router)
+    pdf_path = _get_path(request.file_id)
     
     # Process each page
     all_rows: list[BQRowResponse] = []

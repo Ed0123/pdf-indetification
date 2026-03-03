@@ -15,6 +15,9 @@ import { CloudProjectsPanel } from "./components/CloudProjectsPanel";
 import { ActivityBar, type ModuleId } from "./components/ActivityBar";
 import { BQOCRPanel } from "./components/BQOCRPanel";
 import { BQExportPanel } from "./components/BQExportPanel";
+import { TemplateManagerPanel } from "./components/TemplateManagerPanel";
+import { ExcelExportPanel } from "./components/ExcelExportPanel";
+import { PDFExportPanel } from "./components/PDFExportPanel";
 import type { SelectedPage } from "./components/PageSelectorModal";
 import { useProject } from "./hooks/useProject";
 import { useAuth } from "./hooks/useAuth";
@@ -866,6 +869,12 @@ export default function App() {
     setMsg(`Applied BQ template "${template.name}"`);
   }, [bqTemplates, state.selected_file_id, handleBQBoxesChange]);
 
+  // Save/update all BQ templates (used by TemplateManagerPanel)
+  const handleSaveBQTemplates = useCallback((templates: BQTemplate[]) => {
+    setBqTemplates(templates);
+    setMsg(`Saved ${templates.length} BQ template(s)`);
+  }, []);
+
   // Edit BQ row
   const handleBQRowEdit = useCallback((pageKey: string, rowId: number, field: keyof BQRow, value: any) => {
     setBqPageData((prev) => {
@@ -1219,24 +1228,43 @@ export default function App() {
           )}
 
           {activeModule === "templates" && (
-            <div style={{ padding: 20, textAlign: "center", color: "#666" }}>
-              <p>Template Manager</p>
-              <button onClick={handleManageTemplates}>Open Templates</button>
-            </div>
+            <TemplateManagerPanel
+              templates={state.templates}
+              bqTemplates={bqTemplates}
+              files={state.pdf_files}
+              currentBoxes={Object.values(currentBoxes).map((b, i) => ({
+                ...b,
+                color: ["#e74c3c", "#2980b9", "#27ae60", "#f39c12"][i % 4],
+              }))}
+              currentBQBoxes={Object.values(currentBQBoxes)}
+              currentFileId={state.selected_file_id}
+              currentPage={state.selected_page}
+              currentUserUid={auth.user?.uid}
+              onSaveTemplates={handleTemplateSave}
+              onApplyTemplate={handleTemplateApply}
+              onSaveBQTemplates={handleSaveBQTemplates}
+              onApplyBQTemplate={handleApplyBQTemplate}
+            />
           )}
 
           {activeModule === "exportexcel" && (
-            <div style={{ padding: 20, textAlign: "center", color: "#666" }}>
-              <p>Excel Export</p>
-              <button onClick={handleExportExcel}>Export to Excel</button>
-            </div>
+            <ExcelExportPanel
+              files={state.pdf_files}
+              columns={state.columns}
+              selectedFileId={state.selected_file_id}
+              selectedPage={state.selected_page}
+              onSelectPage={project.selectPage}
+              onCellEdit={(fid, pg, col, text) => project.setCell(fid, pg, col, text)}
+              onExport={handleExportExcel}
+            />
           )}
 
           {activeModule === "exportpdf" && (
-            <div style={{ padding: 20, textAlign: "center", color: "#666" }}>
-              <p>PDF Export</p>
-              <button onClick={handleExportPdf}>Export Pages</button>
-            </div>
+            <PDFExportPanel
+              files={state.pdf_files}
+              columns={state.columns}
+              onExport={handleExportPdfConfirm}
+            />
           )}
         </div>
 

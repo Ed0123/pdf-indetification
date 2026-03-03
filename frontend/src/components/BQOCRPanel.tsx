@@ -13,6 +13,7 @@
 import React, { useState, useMemo, useEffect, useCallback } from "react";
 import type { PDFFileInfo, Template, BoxInfo, BQRow, BQPageData, BQTemplate } from "../types";
 import { listBQEngines, extractBQ, type BQEngineInfo, type BQRowAPI } from "../api/client";
+import { PageSelectorModal, type SelectedPage } from "./PageSelectorModal";
 
 // BQ-specific column definitions
 const BQ_COLUMNS = [
@@ -80,6 +81,9 @@ export function BQOCRPanel({
   const [selectedTemplateId, setSelectedTemplateId] = useState<string>("");
   const [newTplName, setNewTplName] = useState("");
   const [showNewTplInput, setShowNewTplInput] = useState(false);
+
+  // Page selector for batch extract
+  const [showBatchSelector, setShowBatchSelector] = useState(false);
 
   // Current file/page data
   const file = files.find((f) => f.file_id === selectedFileId);
@@ -224,13 +228,23 @@ export function BQOCRPanel({
     }
   }, [selectedFileId, selectedPage, currentBoxes, selectedEngine, hasDataRange, pageKey, selectedTemplateId, onBQDataChange]);
 
-  // Handle batch OCR (all pages)
-  const handleBatchExtract = useCallback(async () => {
+  // Show batch page selector
+  const handleShowBatchSelector = useCallback(() => {
     if (!hasDataRange) {
-      setError("Please draw boxes on this page first, then use batch to apply to all pages");
+      setError("Please draw boxes on this page first, then use batch to apply to selected pages");
+      return;
+    }
+    setShowBatchSelector(true);
+  }, [hasDataRange]);
+
+  // Handle batch OCR (selected pages)
+  const handleBatchExtract = useCallback(async (selectedPages: SelectedPage[]) => {
+    if (selectedPages.length === 0) {
+      setShowBatchSelector(false);
       return;
     }
 
+    setShowBatchSelector(false);
     setExtracting(true);
     setError(null);
     setLastExtractInfo(null);
@@ -244,66 +258,70 @@ export function BQOCRPanel({
         height: box.height,
       }));
 
-      // Process all pages from all files
+      // Process selected pages
       let totalRows = 0;
       let totalCost = 0;
+      let failures = 0;
 
-      for (const f of files) {
-        for (const p of f.pages) {
-          try {
-            const result = await extractBQ({
-              file_id: f.file_id,
-              pages: [p.page_number],
-              boxes,
-              engine: selectedEngine,
-            });
+      for (const sp of selectedPages) {
+        try {
+          const result = await extractBQ({
+            file_id: sp.file_id,
+            pages: [sp.page_number],
+            boxes,
+            engine: selectedEngine,
+          });
 
-            const rows: BQRow[] = result.rows.map((r: BQRowAPI) => ({
-              id: r.id,
-              file_id: r.file_id,
-              page_number: r.page_number,
-              page_label: r.page_label,
-              revision: r.revision,
-              bill_name: r.bill_name,
-              collection: r.collection,
-              type: r.type as "heading1" | "heading2" | "item",
-              item_no: r.item_no,
-              description: r.description,
-              quantity: r.quantity,
-              unit: r.unit,
-              rate: r.rate,
-              total: r.total,
-            }));
+          const rows: BQRow[] = result.rows.map((r: BQRowAPI) => ({
+            id: r.id,
+            file_id: r.file_id,
+            page_number: r.page_number,
+            page_label: r.page_label,
+            revision: r.revision,
+            bill_name: r.bill_name,
+            collection: r.collection,
+            type: r.type as "heading1" | "heading2" | "item",
+            item_no: r.item_no,
+            description: r.description,
+            quantity: r.quantity,
+            unit: r.unit,
+            rate: r.rate,
+            total: r.total,
+          }));
 
-            const key = `${f.file_id}-${p.page_number}`;
-            const newPageData: BQPageData = {
-              file_id: f.file_id,
-              page_number: p.page_number,
-              boxes: { ...currentBoxes },
-              rows,
-            };
-            onBQDataChange(key, newPageData);
+          const key = `${sp.file_id}-${sp.page_number}`;
+          const newPageData: BQPageData = {
+            file_id: sp.file_id,
+            page_number: sp.page_number,
+            boxes: { ...currentBoxes },
+            rows,
+          };
+          onBQDataChange(key, newPageData);
 
-            totalRows += result.rows.length;
-            totalCost += result.quota_cost;
-          } catch (err) {
-            // Continue processing other pages
-            console.warn(`Failed to process ${f.file_name} page ${p.page_number + 1}:`, err);
-          }
+          totalRows += result.rows.length;
+          totalCost += result.quota_cost;
+        } catch (err) {
+          // Continue processing other pages
+          failures++;
+          console.warn(`Failed to process ${sp.file_name} page ${sp.page_number + 1}:`, err);
         }
       }
 
+      const suffix = failures > 0 ? ` (${failures} failed)` : "";
       setLastExtractInfo({
         rows: totalRows,
         engine: selectedEngine,
         cost: totalCost,
       });
+      if (failures > 0) {
+        setError(`Processed ${selectedPages.length - failures} of ${selectedPages.length} pages${suffix}`);
+      }
     } catch (err: any) {
       setError(err.message || "Batch extraction failed");
     } finally {
       setExtracting(false);
     }
-  }, [files, currentBoxes, selectedEngine, hasDataRange, onBQDataChange]);
+  }, [currentBoxes, selectedEngine, onBQDataChange]);
 
   // Handle template save
   const handleSaveTemplate = () => {
@@ -614,10 +632,10 @@ export function BQOCRPanel({
               cursor: !hasDataRange ? "not-allowed" : "pointer",
             }}
             disabled={!hasDataRange || extracting}
-            onClick={handleBatchExtract}
-            title="Apply current boxes and extract from all pages"
+            onClick={handleShowBatchSelector}
+            title="Select pages and apply current boxes to extract"
           >
-            {extracting ? "⏳ Processing..." : `📚 Batch All (${allPages.length} pages)`}
+            {extracting ? "⏳ Processing..." : `📚 Batch Extract...`}
           </button>
         </div>
         {!hasDataRange && (
@@ -626,6 +644,17 @@ export function BQOCRPanel({
           </div>
         )}
       </div>
+
+      {/* Batch Page Selector Modal */}
+      {showBatchSelector && (
+        <PageSelectorModal
+          files={files}
+          title="Batch Extract — Select Pages"
+          confirmLabel="Extract Selected Pages"
+          onConfirm={handleBatchExtract}
+          onCancel={() => setShowBatchSelector(false)}
+        />
+      )}
     </div>
   );
 }
