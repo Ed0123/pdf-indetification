@@ -78,13 +78,13 @@ TIERS_COLLECTION = "tiers"
 DEFAULT_GROUPS = ["General"]
 DEFAULT_TIERS = [
     {"name": "basic", "label": "基本", "quota": 100, "storage_quota_mb": 0,
-     "features": {"ocr": True, "export_excel": True, "export_pdf": True, "templates": True, "cloud_save": False}},
+     "features": {"ocr": True, "export_excel": True, "export_pdf": True, "templates": True, "cloud_save": False, "bq_ocr": False, "bq_export": False}},
     {"name": "sponsor", "label": "贊助", "quota": 300, "storage_quota_mb": 100,
-     "features": {"ocr": True, "export_excel": True, "export_pdf": True, "templates": True, "cloud_save": True}},
+     "features": {"ocr": True, "export_excel": True, "export_pdf": True, "templates": True, "cloud_save": True, "bq_ocr": True, "bq_export": True}},
     {"name": "premium", "label": "特許", "quota": 500, "storage_quota_mb": 300,
-     "features": {"ocr": True, "export_excel": True, "export_pdf": True, "templates": True, "cloud_save": True}},
+     "features": {"ocr": True, "export_excel": True, "export_pdf": True, "templates": True, "cloud_save": True, "bq_ocr": True, "bq_export": True}},
     {"name": "admin", "label": "管理員", "quota": -1, "storage_quota_mb": -1,
-     "features": {"ocr": True, "export_excel": True, "export_pdf": True, "templates": True, "cloud_save": True}},
+     "features": {"ocr": True, "export_excel": True, "export_pdf": True, "templates": True, "cloud_save": True, "bq_ocr": True, "bq_export": True}},
 ]
 
 def _user_ref(uid: str):

@@ -85,6 +85,11 @@ export function BQOCRPanel({
   // Page selector for batch extract
   const [showBatchSelector, setShowBatchSelector] = useState(false);
 
+  // Inline editing state
+  const [editingRowId, setEditingRowId] = useState<number | null>(null);
+  const [editingField, setEditingField] = useState<string | null>(null);
+  const [editValue, setEditValue] = useState<string>("");
+
   // Current file/page data
   const file = files.find((f) => f.file_id === selectedFileId);
   const pageKey = selectedFileId ? `${selectedFileId}-${selectedPage}` : "";
@@ -161,6 +166,58 @@ export function BQOCRPanel({
   const columnBoxNames = ["Item", "Description", "Qty", "Unit", "Rate", "Total"];
   const drawnColumns = columnBoxNames.filter((c) => !!currentBoxes[c]);
   const hasColumnBoxes = drawnColumns.length >= 2; // At least Item + Description or similar
+
+  // Handle inline cell edit start
+  const handleCellClick = useCallback((rowId: number, field: string, currentValue: string) => {
+    setEditingRowId(rowId);
+    setEditingField(field);
+    setEditValue(currentValue);
+  }, []);
+
+  // Handle inline cell edit save
+  const handleCellSave = useCallback(() => {
+    if (editingRowId === null || editingField === null || !pageKey || !currentPageBQData) return;
+    
+    const updatedRows = currentPageBQData.rows.map((row) => {
+      if (row.id === editingRowId) {
+        const updatedRow = { ...row };
+        if (editingField === "description") {
+          updatedRow.description = editValue;
+        } else if (editingField === "item_no") {
+          updatedRow.item_no = editValue;
+        } else if (editingField === "unit") {
+          updatedRow.unit = editValue;
+        } else if (editingField === "quantity") {
+          const num = parseFloat(editValue);
+          updatedRow.quantity = isNaN(num) ? null : num;
+        } else if (editingField === "rate") {
+          const num = parseFloat(editValue);
+          updatedRow.rate = isNaN(num) ? null : num;
+        } else if (editingField === "total") {
+          const num = parseFloat(editValue);
+          updatedRow.total = isNaN(num) ? null : num;
+        }
+        return updatedRow;
+      }
+      return row;
+    });
+    
+    // Update bqPageData via the parent's update function
+    const updatedData = { ...currentPageBQData, rows: updatedRows };
+    onBQDataChange(pageKey, updatedData);
+    
+    // Clear editing state
+    setEditingRowId(null);
+    setEditingField(null);
+    setEditValue("");
+  }, [editingRowId, editingField, editValue, pageKey, currentPageBQData, onBQDataChange]);
+
+  // Handle inline cell edit cancel
+  const handleCellCancel = useCallback(() => {
+    setEditingRowId(null);
+    setEditingField(null);
+    setEditValue("");
+  }, []);
 
   // Handle OCR extraction
   const handleExtract = useCallback(async () => {

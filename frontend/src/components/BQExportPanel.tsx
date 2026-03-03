@@ -29,6 +29,11 @@ export function BQExportPanel({
   const [editValue, setEditValue] = useState("");
   const [showExportModal, setShowExportModal] = useState(false);
   const [projectId, setProjectId] = useState("");
+  
+  // Export filter state
+  const [exportFilterPage, setExportFilterPage] = useState<string>("all");
+  const [exportFilterRev, setExportFilterRev] = useState<string>("all");
+  const [exportFilterType, setExportFilterType] = useState<string>("all");
 
   // Flatten all rows from all pages
   const allRows = useMemo(() => {
@@ -55,6 +60,23 @@ export function BQExportPanel({
     const notesCount = allRows.filter(r => r.row.type === "notes").length;
     const pagesWithData = new Set(allRows.map(r => r.pageKey)).size;
     return { heading1Count, heading2Count, itemCount, notesCount, total: allRows.length, pagesWithData };
+  }, [allRows]);
+
+  // Unique pages and revisions for export filters
+  const uniquePages = useMemo(() => {
+    const pages = new Set<string>();
+    allRows.forEach(({ row }) => {
+      if (row.page_label) pages.add(row.page_label);
+    });
+    return Array.from(pages).sort();
+  }, [allRows]);
+
+  const uniqueRevisions = useMemo(() => {
+    const revs = new Set<string>();
+    allRows.forEach(({ row }) => {
+      if (row.revision) revs.add(row.revision);
+    });
+    return Array.from(revs).sort();
   }, [allRows]);
 
   // Parse bill/page from page_label (format: AA/BB where AA=bill, BB=page)
@@ -101,9 +123,20 @@ export function BQExportPanel({
     setEditValue("");
   };
 
+  // Get filtered rows for export
+  const getFilteredExportRows = () => {
+    return allRows.filter(({ row }) => {
+      if (exportFilterPage !== "all" && row.page_label !== exportFilterPage) return false;
+      if (exportFilterRev !== "all" && row.revision !== exportFilterRev) return false;
+      if (exportFilterType !== "all" && row.type !== exportFilterType) return false;
+      return true;
+    });
+  };
+
   // Build export data in JSON format
   const buildExportData = (pid: string) => {
-    return allRows.map(({ row }, idx) => {
+    const rowsToExport = getFilteredExportRows();
+    return rowsToExport.map(({ row }, idx) => {
       const { bill, page } = parseBillPage(row.page_label || "");
       const ref = buildRef(row);
       const isItem = row.type === "item";
@@ -130,8 +163,9 @@ export function BQExportPanel({
 
   // Handle JSON export
   const handleExportJSON = () => {
-    if (allRows.length === 0) {
-      setExportError("No data to export");
+    const filteredForExport = getFilteredExportRows();
+    if (filteredForExport.length === 0) {
+      setExportError("No data to export (check filters)");
       return;
     }
     
@@ -152,8 +186,9 @@ export function BQExportPanel({
 
   // Handle Excel export
   const handleExportExcel = async () => {
-    if (allRows.length === 0) {
-      setExportError("No data to export");
+    const filteredForExport = getFilteredExportRows();
+    if (filteredForExport.length === 0) {
+      setExportError("No data to export (check filters)");
       return;
     }
 
@@ -285,6 +320,46 @@ export function BQExportPanel({
                 style={{ padding: "6px 10px", width: "100%", border: "1px solid #ddd", borderRadius: 4 }}
               />
             </div>
+            
+            {/* Export Filters */}
+            <div style={{ marginBottom: 16, padding: "12px", background: "#f8f9fa", borderRadius: 4 }}>
+              <label style={{ fontSize: 12, color: "#666", display: "block", marginBottom: 8, fontWeight: 600 }}>
+                Filter Export Data
+              </label>
+              <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+                <select
+                  value={exportFilterPage}
+                  onChange={(e) => setExportFilterPage(e.target.value)}
+                  style={{ padding: "4px 8px", border: "1px solid #ddd", borderRadius: 4, fontSize: 12 }}
+                >
+                  <option value="all">All Pages</option>
+                  {uniquePages.map(p => <option key={p} value={p}>{p}</option>)}
+                </select>
+                <select
+                  value={exportFilterRev}
+                  onChange={(e) => setExportFilterRev(e.target.value)}
+                  style={{ padding: "4px 8px", border: "1px solid #ddd", borderRadius: 4, fontSize: 12 }}
+                >
+                  <option value="all">All Revisions</option>
+                  {uniqueRevisions.map(r => <option key={r} value={r}>{r}</option>)}
+                </select>
+                <select
+                  value={exportFilterType}
+                  onChange={(e) => setExportFilterType(e.target.value)}
+                  style={{ padding: "4px 8px", border: "1px solid #ddd", borderRadius: 4, fontSize: 12 }}
+                >
+                  <option value="all">All Types</option>
+                  <option value="item">Items</option>
+                  <option value="notes">Notes</option>
+                  <option value="heading1">Heading 1</option>
+                  <option value="heading2">Heading 2</option>
+                </select>
+              </div>
+              <div style={{ fontSize: 11, color: "#888", marginTop: 6 }}>
+                {getFilteredExportRows().length} of {allRows.length} rows will be exported
+              </div>
+            </div>
+            
             <div style={{ display: "flex", gap: 8, justifyContent: "flex-end" }}>
               <button
                 style={{ ...modalBtn, background: "#95a5a6" }}

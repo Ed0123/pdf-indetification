@@ -9,6 +9,7 @@ Provides endpoints for:
 
 import os
 import re
+from datetime import datetime, timezone
 from typing import Optional, Literal
 from fastapi import APIRouter, HTTPException, Depends, Request
 from pydantic import BaseModel
@@ -24,6 +25,70 @@ USERS_COLLECTION = "users"
 TIERS_COLLECTION = "tiers"
 
 router = APIRouter(prefix="/api/bq", tags=["bq"])
+
+
+# ─── Usage recording helpers ───────────────────────────────────────────────────
+
+def _user_ref(uid: str):
+    """Reference to a user document in Firestore."""
+    return get_db().collection(USERS_COLLECTION).document(uid)
+
+
+def _tiers_collection():
+    """Reference to tiers collection."""
+    return get_db().collection(TIERS_COLLECTION)
+
+
+def _get_tier_quota(tier_name: str) -> int:
+    """Return monthly page quota for a tier name. -1 = unlimited."""
+    docs = list(_tiers_collection().stream())
+    for d in docs:
+        data = d.to_dict()
+        if data.get("name") == tier_name:
+            return data.get("quota", 100)
+    return 100  # fallback
+
+
+def _record_usage(uid: str, pages: int) -> dict:
+    """Record BQ OCR usage for a user (shared with page OCR quota)."""
+    ref = _user_ref(uid)
+    snap = ref.get()
+    if not snap.exists:
+        raise HTTPException(404, "User profile not found")
+
+    profile = snap.to_dict()
+    current_month = datetime.now(timezone.utc).strftime("%Y-%m")
+
+    # Reset counter if new month
+    if profile.get("usage_month") != current_month:
+        profile["usage_month"] = current_month
+        profile["usage_pages"] = 0
+
+    # Tier limits
+    quota = _get_tier_quota(profile.get("tier", "basic"))
+    limit = float("inf") if quota == -1 else quota
+    current_usage = profile.get("usage_pages", 0)
+
+    # Check if would exceed limit
+    new_count = current_usage + pages
+    if new_count > limit:
+        return {
+            "usage_pages": current_usage,
+            "limit": quota,
+            "over_limit": True,
+        }
+
+    # Record usage
+    ref.update({
+        "usage_month": current_month,
+        "usage_pages": new_count,
+    })
+
+    return {
+        "usage_pages": new_count,
+        "limit": quota,
+        "over_limit": False,
+    }
 
 
 # ─── Request/Response Models ───────────────────────────────────────────────────
@@ -70,6 +135,11 @@ class BQRowResponse(BaseModel):
     unit: str = ""
     rate: Optional[float] = None
     total: Optional[float] = None
+    # Bounding box for UI highlighting (PDF coordinates)
+    bbox_x0: Optional[float] = None
+    bbox_y0: Optional[float] = None
+    bbox_x1: Optional[float] = None
+    bbox_y1: Optional[float] = None
 
 
 class BQExtractResponse(BaseModel):
@@ -334,198 +404,304 @@ def _parse_bq_rows(
             if not col_words.get("Description") and col_words.get("_unassigned"):
                 col_words["Description"] = col_words["_unassigned"]
             
-            # Step 2: Analyze Description column - group by Y distance into text blocks
-            desc_words = sorted(col_words.get("Description", []), key=lambda w: w['y'])
+            # ============================================================
+            # NEW APPROACH: Line-by-line analysis
+            # ============================================================
+            # Step 2a: Group Description words into LINES first
+            desc_words = sorted(col_words.get("Description", []), key=lambda w: (w['y'], w['x0']))
             
-            # Calculate line spacing threshold
-            # Analyze distances between consecutive words
-            if len(desc_words) >= 2:
-                y_distances = []
-                for i in range(1, len(desc_words)):
-                    dist = desc_words[i]['y'] - desc_words[i-1]['y']
-                    if dist > 0:  # Only positive distances (next line is below)
-                        y_distances.append(dist)
-                
-                if y_distances:
-                    # Use median distance as typical line spacing
-                    sorted_dists = sorted(y_distances)
-                    median_dist = sorted_dists[len(sorted_dists) // 2]
-                    # Threshold: 1.8x median is considered same block
-                    block_threshold = median_dist * 1.8
-                else:
-                    block_threshold = 15  # Default
-            else:
-                block_threshold = 15
-            
-            # Group Description words into text blocks
-            desc_blocks: list[dict] = []  # [{texts: [], y_start, y_end}]
+            # Group words into lines (words with similar Y = same line)
+            line_y_tolerance = 5
+            desc_lines: list[dict] = []  # [{texts: [], y_top, y_bottom, y_center}]
             
             for word in desc_words:
-                if not desc_blocks:
-                    desc_blocks.append({
+                if not desc_lines:
+                    desc_lines.append({
                         'texts': [word['text']],
-                        'y_start': word['y_top'],
-                        'y_end': word['y_bottom'],
-                        'y_center': word['y']
+                        'y_top': word['y_top'],
+                        'y_bottom': word['y_bottom'],
+                        'y_center': word['y'],
+                        'x0': word['x0'],
+                        'x1': word['x1']
                     })
                 else:
-                    last_block = desc_blocks[-1]
-                    dist = word['y_top'] - last_block['y_end']
-                    
-                    if dist <= block_threshold:
-                        # Same block - merge
-                        last_block['texts'].append(word['text'])
-                        last_block['y_end'] = word['y_bottom']
-                        # Update center as average
-                        last_block['y_center'] = (last_block['y_start'] + word['y_bottom']) / 2
+                    last_line = desc_lines[-1]
+                    # Same line if Y is very close
+                    if abs(word['y'] - last_line['y_center']) <= line_y_tolerance:
+                        last_line['texts'].append(word['text'])
+                        last_line['x1'] = max(last_line['x1'], word['x1'])
+                        last_line['y_bottom'] = max(last_line['y_bottom'], word['y_bottom'])
                     else:
-                        # New block
-                        desc_blocks.append({
+                        # New line
+                        desc_lines.append({
                             'texts': [word['text']],
-                            'y_start': word['y_top'],
-                            'y_end': word['y_bottom'],
-                            'y_center': word['y']
+                            'y_top': word['y_top'],
+                            'y_bottom': word['y_bottom'],
+                            'y_center': word['y'],
+                            'x0': word['x0'],
+                            'x1': word['x1']
                         })
             
-            # Finalize block descriptions
-            for block in desc_blocks:
-                block['description'] = ' '.join(block['texts'])
+            # Finalize line text
+            for line in desc_lines:
+                line['text'] = ' '.join(line['texts'])
             
-            # Step 3: Extract Item, Qty, Unit, Rate, Total values with Y positions
-            def extract_col_values(col_name: str) -> list[dict]:
-                """Extract values from a column with their Y positions"""
-                words = sorted(col_words.get(col_name, []), key=lambda w: w['y'])
-                # Group words on same Y into single values
-                values = []
+            # Step 2b: Calculate line spacing threshold
+            if len(desc_lines) >= 2:
+                line_gaps = []
+                for i in range(1, len(desc_lines)):
+                    gap = desc_lines[i]['y_top'] - desc_lines[i-1]['y_bottom']
+                    if gap > 0:
+                        line_gaps.append(gap)
+                
+                if line_gaps:
+                    sorted_gaps = sorted(line_gaps)
+                    median_gap = sorted_gaps[len(sorted_gaps) // 2]
+                    # Threshold: 2.5x median gap is considered a paragraph break
+                    para_threshold = median_gap * 2.5
+                else:
+                    para_threshold = 20
+            else:
+                para_threshold = 20
+            
+            parse_debug["line_count"] = len(desc_lines)
+            parse_debug["para_threshold"] = para_threshold
+            
+            # Step 2c: Extract Item values with Y positions (these mark new items)
+            def extract_col_lines(col_name: str) -> list[dict]:
+                """Extract values from a column, grouped by line"""
+                words = sorted(col_words.get(col_name, []), key=lambda w: (w['y'], w['x0']))
+                lines = []
                 y_tolerance = 5
                 
                 for word in words:
-                    if not values:
-                        values.append({'text': word['text'], 'y': word['y']})
+                    if not lines:
+                        lines.append({
+                            'text': word['text'],
+                            'y': word['y'],
+                            'y_top': word['y_top'],
+                            'y_bottom': word['y_bottom'],
+                            'x0': word['x0'],
+                            'x1': word['x1']
+                        })
                     else:
-                        last = values[-1]
+                        last = lines[-1]
                         if abs(word['y'] - last['y']) <= y_tolerance:
-                            # Same line, append
                             last['text'] += ' ' + word['text']
+                            last['x1'] = max(last['x1'], word['x1'])
                         else:
-                            values.append({'text': word['text'], 'y': word['y']})
-                
-                return values
+                            lines.append({
+                                'text': word['text'],
+                                'y': word['y'],
+                                'y_top': word['y_top'],
+                                'y_bottom': word['y_bottom'],
+                                'x0': word['x0'],
+                                'x1': word['x1']
+                            })
+                return lines
             
-            item_values = extract_col_values("Item")
-            qty_values = extract_col_values("Qty")
-            unit_values = extract_col_values("Unit")
-            rate_values = extract_col_values("Rate")
-            total_values = extract_col_values("Total")
+            item_lines = extract_col_lines("Item")
+            qty_lines = extract_col_lines("Qty")
+            unit_lines = extract_col_lines("Unit")
+            rate_lines = extract_col_lines("Rate")
+            total_lines = extract_col_lines("Total")
             
-            # Debug: log item and qty values
-            parse_debug["item_values"] = [{"text": v['text'], "y": v['y']} for v in item_values]
-            parse_debug["qty_values"] = [{"text": v['text'], "y": v['y']} for v in qty_values]
-            parse_debug["desc_blocks_count"] = len(desc_blocks)
-            parse_debug["desc_blocks_sample"] = [{"desc": b['description'][:50] if b['description'] else "", 
-                                                   "y_start": b['y_start'], "y_end": b['y_end']} 
-                                                  for b in desc_blocks[:5]]
+            # Debug info
+            parse_debug["item_values"] = [{"text": v['text'], "y": v['y']} for v in item_lines]
+            parse_debug["qty_values"] = [{"text": v['text'], "y": v['y']} for v in qty_lines]
             
-            # Step 4: Match Item/Qty/Unit/Rate/Total to nearest Description block
-            def find_nearest_block(y: float, blocks: list[dict]) -> int:
-                """Find index of block with Y range closest to y"""
-                if not blocks:
-                    return -1
-                
-                best_idx = 0
-                best_dist = float('inf')
-                
-                for i, block in enumerate(blocks):
-                    # Check if y is within block range
-                    if block['y_start'] <= y <= block['y_end']:
-                        return i
-                    # Or find closest
-                    dist = min(abs(y - block['y_start']), abs(y - block['y_end']))
-                    if dist < best_dist:
-                        best_dist = dist
-                        best_idx = i
-                
-                return best_idx
+            # Step 3: Build output rows based on Item positions and Description lines
+            # Strategy: Each Item marks a new "item" row. Description lines between items belong to that item.
+            # Description lines before any item, or with large gaps AND no item, are "notes"
+            
+            def find_value_at_y(values: list[dict], y: float, tolerance: float = 15) -> dict | None:
+                """Find a value whose Y is close to y"""
+                for v in values:
+                    if abs(v['y'] - y) <= tolerance:
+                        return v
+                return None
             
             def parse_number(s: str) -> float | None:
-                """Parse number, handling commas"""
                 s = s.replace(",", "").strip()
                 try:
                     return float(s)
                 except ValueError:
                     return None
             
-            # Create output rows
-            # First, match items to blocks
-            block_data: list[dict] = [{'block': b, 'item': '', 'qty': None, 'unit': '', 'rate': None, 'total': None} 
-                                       for b in desc_blocks]
+            # Sort item positions
+            item_positions = sorted([(v['y'], v) for v in item_lines], key=lambda x: x[0])
             
-            # Match Item values
-            for val in item_values:
-                idx = find_nearest_block(val['y'], desc_blocks)
-                if idx >= 0:
-                    block_data[idx]['item'] = val['text']
-            
-            # Match Qty values
-            for val in qty_values:
-                idx = find_nearest_block(val['y'], desc_blocks)
-                if idx >= 0:
-                    block_data[idx]['qty'] = parse_number(val['text'])
-            
-            # Match Unit values
-            for val in unit_values:
-                idx = find_nearest_block(val['y'], desc_blocks)
-                if idx >= 0:
-                    block_data[idx]['unit'] = val['text']
-            
-            # Match Rate values
-            for val in rate_values:
-                idx = find_nearest_block(val['y'], desc_blocks)
-                if idx >= 0:
-                    block_data[idx]['rate'] = parse_number(val['text'])
-            
-            # Match Total values
-            for val in total_values:
-                idx = find_nearest_block(val['y'], desc_blocks)
-                if idx >= 0:
-                    block_data[idx]['total'] = parse_number(val['text'])
-            
-            # Step 5: Create output rows
-            for bd in block_data:
-                block = bd['block']
-                item_no = bd['item']
-                quantity = bd['qty']
-                unit = bd['unit']
-                rate = bd['rate']
-                total = bd['total']
-                description = block['description']
+            # If no items, everything is notes
+            if not item_positions:
+                # All description lines are notes
+                for line in desc_lines:
+                    rows.append(BQRowResponse(
+                        id=row_id,
+                        file_id=file_id,
+                        page_number=page_num,
+                        page_label=page_label,
+                        revision=revision,
+                        bill_name=bill_name,
+                        collection=collection,
+                        type="notes",
+                        item_no="",
+                        description=line['text'],
+                        quantity=None,
+                        unit="",
+                        rate=None,
+                        total=None,
+                        bbox_x0=line['x0'],
+                        bbox_y0=line['y_top'],
+                        bbox_x1=line['x1'],
+                        bbox_y1=line['y_bottom']
+                    ))
+                    row_id += 1
+            else:
+                # Build description blocks based on Item positions
+                # For each Item, collect description lines that are:
+                # 1. Within a Y range slightly above to next Item's Y (or page end)
+                # 2. Don't have a large paragraph gap
                 
-                # Skip empty
-                if not description and not item_no:
-                    continue
+                all_blocks = []
                 
-                # Classification: item if has Item ref AND (Qty OR Unit)
-                has_item = bool(item_no.strip())
-                has_qty_unit = quantity is not None or bool(unit.strip())
-                row_type = "item" if (has_item and has_qty_unit) else "notes"
+                # First, any Description lines BEFORE the first Item are notes
+                first_item_y = item_positions[0][0]
+                notes_before = []
+                for line in desc_lines:
+                    if line['y_center'] < first_item_y - 20:  # Lines clearly above first item
+                        notes_before.append(line)
                 
-                rows.append(BQRowResponse(
-                    id=row_id,
-                    file_id=file_id,
-                    page_number=page_num,
-                    page_label=page_label,
-                    revision=revision,
-                    bill_name=bill_name,
-                    collection=collection,
-                    type=row_type,
-                    item_no=item_no,
-                    description=description,
-                    quantity=quantity,
-                    unit=unit,
-                    rate=rate,
-                    total=total
-                ))
-                row_id += 1
+                # Group notes_before by paragraph gaps
+                if notes_before:
+                    current_block = {'type': 'notes', 'lines': [notes_before[0]], 'y_start': notes_before[0]['y_top'], 'y_end': notes_before[0]['y_bottom']}
+                    for i in range(1, len(notes_before)):
+                        gap = notes_before[i]['y_top'] - current_block['y_end']
+                        if gap > para_threshold:
+                            # New notes block
+                            all_blocks.append(current_block)
+                            current_block = {'type': 'notes', 'lines': [notes_before[i]], 'y_start': notes_before[i]['y_top'], 'y_end': notes_before[i]['y_bottom']}
+                        else:
+                            current_block['lines'].append(notes_before[i])
+                            current_block['y_end'] = notes_before[i]['y_bottom']
+                    all_blocks.append(current_block)
+                
+                # Now process each Item
+                for idx, (item_y, item_val) in enumerate(item_positions):
+                    # Find the Y range for this item's description
+                    y_start = item_y - 10  # Slightly above item to catch same-line description
+                    
+                    if idx < len(item_positions) - 1:
+                        next_item_y = item_positions[idx + 1][0]
+                        y_end = next_item_y - 5  # Up to next item
+                    else:
+                        y_end = dr_y1 + 100  # To page end
+                    
+                    # Collect description lines in this range
+                    item_desc_lines = [l for l in desc_lines if y_start <= l['y_center'] <= y_end]
+                    
+                    # Find Qty, Unit, Rate, Total for this item
+                    qty_val = find_value_at_y(qty_lines, item_y, 20)
+                    unit_val = find_value_at_y(unit_lines, item_y, 20)
+                    rate_val = find_value_at_y(rate_lines, item_y, 20)
+                    total_val = find_value_at_y(total_lines, item_y, 20)
+                    
+                    all_blocks.append({
+                        'type': 'item',
+                        'item_no': item_val['text'],
+                        'lines': item_desc_lines,
+                        'y_start': item_y,
+                        'y_end': y_end,
+                        'qty': qty_val,
+                        'unit': unit_val,
+                        'rate': rate_val,
+                        'total': total_val,
+                        'item_x0': item_val.get('x0', 0),
+                        'item_x1': item_val.get('x1', 0),
+                    })
+                
+                # Sort all blocks by y_start
+                all_blocks.sort(key=lambda b: b['y_start'])
+                
+                parse_debug["blocks_count"] = len(all_blocks)
+                
+                # Create output rows
+                for block in all_blocks:
+                    if block['type'] == 'notes':
+                        desc_text = ' '.join(l['text'] for l in block['lines'])
+                        # Calculate bounding box for highlighting
+                        if block['lines']:
+                            bbox_x0 = min(l['x0'] for l in block['lines'])
+                            bbox_x1 = max(l['x1'] for l in block['lines'])
+                            bbox_y0 = block['y_start']
+                            bbox_y1 = block['y_end']
+                        else:
+                            bbox_x0 = bbox_x1 = bbox_y0 = bbox_y1 = 0
+                        
+                        rows.append(BQRowResponse(
+                            id=row_id,
+                            file_id=file_id,
+                            page_number=page_num,
+                            page_label=page_label,
+                            revision=revision,
+                            bill_name=bill_name,
+                            collection=collection,
+                            type="notes",
+                            item_no="",
+                            description=desc_text,
+                            quantity=None,
+                            unit="",
+                            rate=None,
+                            total=None,
+                            bbox_x0=bbox_x0,
+                            bbox_y0=bbox_y0,
+                            bbox_x1=bbox_x1,
+                            bbox_y1=bbox_y1
+                        ))
+                        row_id += 1
+                    else:
+                        # Item block
+                        desc_text = ' '.join(l['text'] for l in block['lines'])
+                        qty = parse_number(block['qty']['text']) if block['qty'] else None
+                        unit = block['unit']['text'] if block['unit'] else ""
+                        rate = parse_number(block['rate']['text']) if block['rate'] else None
+                        total = parse_number(block['total']['text']) if block['total'] else None
+                        
+                        # Calculate bounding box (include Item column for full row coverage)
+                        if block['lines']:
+                            # Use Item column's x0 as left boundary for full row coverage
+                            item_x0 = block.get('item_x0', 0)
+                            lines_x0 = min(l['x0'] for l in block['lines'])
+                            bbox_x0 = min(item_x0, lines_x0) if item_x0 > 0 else lines_x0
+                            bbox_x1 = max(l['x1'] for l in block['lines'])
+                            bbox_y0 = min(l['y_top'] for l in block['lines'])
+                            bbox_y1 = max(l['y_bottom'] for l in block['lines'])
+                        else:
+                            bbox_x0 = block.get('item_x0', 0)
+                            bbox_x1 = block.get('item_x1', 0)
+                            bbox_y0 = block['y_start']
+                            bbox_y1 = block['y_end']
+                        
+                        rows.append(BQRowResponse(
+                            id=row_id,
+                            file_id=file_id,
+                            page_number=page_num,
+                            page_label=page_label,
+                            revision=revision,
+                            bill_name=bill_name,
+                            collection=collection,
+                            type="item",
+                            item_no=block['item_no'],
+                            description=desc_text,
+                            quantity=qty,
+                            unit=unit,
+                            rate=rate,
+                            total=total,
+                            bbox_x0=bbox_x0,
+                            bbox_y0=bbox_y0,
+                            bbox_x1=bbox_x1,
+                            bbox_y1=bbox_y1
+                        ))
+                        row_id += 1
     
     except ImportError as e:
         parse_debug["error"] = f"ImportError: {str(e)}"
@@ -669,6 +845,15 @@ async def extract_bq(
     quota_cost = pages_processed * 1  # 1 point per page for pdfplumber
     if request.engine.startswith("camelot"):
         quota_cost = pages_processed * 3
+    
+    # Record usage (shared with page OCR quota)
+    if quota_cost > 0:
+        usage_result = _record_usage(user["uid"], quota_cost)
+        if usage_result.get("over_limit"):
+            raise HTTPException(
+                status_code=429,
+                detail=f"Monthly quota exceeded. Usage: {usage_result['usage_pages']}/{usage_result['limit']} pages"
+            )
     
     return BQExtractResponse(
         success=True,
