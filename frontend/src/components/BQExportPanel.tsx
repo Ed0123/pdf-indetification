@@ -133,7 +133,35 @@ export function BQExportPanel({
       value = editValue ? parseFloat(editValue) : null;
     }
     
+    // Find the current row to get existing values for auto-calculation
+    const currentRowEntry = allRows.find(r => r.pageKey === pageKey && r.row.id === rowId);
+    const currentRow = currentRowEntry?.row;
+    
+    // Mark the field as user edited
+    if (currentRow && ["quantity", "rate", "total"].includes(field)) {
+      const userEdited = currentRow.user_edited || {};
+      onRowEdit(pageKey, rowId, "user_edited" as keyof BQRow, { ...userEdited, [field]: true });
+    }
+    
+    // Save the edited value
     onRowEdit(pageKey, rowId, field as keyof BQRow, value);
+    
+    // Auto-calculate total when rate or quantity changes
+    if (currentRow && (field === "rate" || field === "quantity")) {
+      const newQty = field === "quantity" ? value : currentRow.quantity;
+      const newRate = field === "rate" ? value : currentRow.rate;
+      
+      if (newQty !== null && newRate !== null) {
+        const calculatedTotal = newQty * newRate;
+        onRowEdit(pageKey, rowId, "total", calculatedTotal);
+        // Mark total as auto-calculated (not directly edited by user)
+        const userEdited = currentRow.user_edited || {};
+        if (!userEdited.total) {
+          // Only auto-update if user hasn't manually edited total
+        }
+      }
+    }
+    
     setEditingCell(null);
     setEditValue("");
   };
@@ -171,6 +199,14 @@ export function BQExportPanel({
         revision: row.revision,
         ref,
         data_detail: row.description,
+        // Bounding box coordinates for data detail (PDF absolute coordinates)
+        data_X1: row.bbox_x0?.toString() ?? "",
+        data_X2: row.bbox_x1?.toString() ?? "",
+        data_Y1: row.bbox_y0?.toString() ?? "",
+        data_Y2: row.bbox_y1?.toString() ?? "",
+        // Page dimensions for coordinate conversion
+        page_width: row.page_width?.toString() ?? "",
+        page_height: row.page_height?.toString() ?? "",
         ...(isItem ? {
           qty: row.quantity?.toString() ?? "",
           unit: row.unit,
@@ -179,6 +215,44 @@ export function BQExportPanel({
         } : {}),
       };
     });
+  };
+
+  // Build column range info from boxes (relative 0-1 coordinates)
+  const buildColumnRanges = () => {
+    const columnRanges: Record<string, { x1: number; x2: number; y1: number; y2: number }> = {};
+    
+    // Get boxes from all pages and aggregate
+    for (const [_pageKey, pageData] of Object.entries(bqPageData)) {
+      for (const [columnName, box] of Object.entries(pageData.boxes)) {
+        // Skip if not a column header box
+        if (!["Item", "Description", "Qty", "Unit", "Rate", "Total", "DataRange"].includes(columnName)) {
+          continue;
+        }
+        
+        // Store the relative coordinates (0-1)
+        // Convert to absolute using first page's dimensions if available
+        const firstRow = pageData.rows[0];
+        const pageWidth = firstRow?.page_width ?? 1;
+        const pageHeight = firstRow?.page_height ?? 1;
+        
+        const absX1 = box.x * pageWidth;
+        const absX2 = (box.x + box.width) * pageWidth;
+        const absY1 = box.y * pageHeight;
+        const absY2 = (box.y + box.height) * pageHeight;
+        
+        // Only update if not already set (use first occurrence)
+        if (!columnRanges[columnName]) {
+          columnRanges[columnName] = {
+            x1: absX1,
+            x2: absX2,
+            y1: absY1,
+            y2: absY2
+          };
+        }
+      }
+    }
+    
+    return columnRanges;
   };
 
   // Handle JSON export
@@ -191,8 +265,20 @@ export function BQExportPanel({
     
     const pid = projectId.trim() || `BQ_${new Date().toISOString().slice(0, 10)}`;
     const exportData = buildExportData(pid);
+    const columnRanges = buildColumnRanges();
     
-    const blob = new Blob([JSON.stringify(exportData, null, 2)], { type: "application/json" });
+    // Build full export structure with project info 
+    const fullExport = {
+      project_info: {
+        project_id: pid,
+        export_date: new Date().toISOString(),
+        total_rows: exportData.length,
+        column_ranges: columnRanges
+      },
+      data: exportData
+    };
+    
+    const blob = new Blob([JSON.stringify(fullExport, null, 2)], { type: "application/json" });
     const url = URL.createObjectURL(blob);
     const a = document.createElement("a");
     a.href = url;
@@ -220,7 +306,7 @@ export function BQExportPanel({
       const exportData = buildExportData(pid);
       
       // Convert to Excel-friendly format
-      const headers = ["ID", "Project", "Type", "Bill", "Page", "Item", "Revision", "Ref", "Description", "Qty", "Unit", "Rate", "Total"];
+      const headers = ["ID", "Project", "Type", "Bill", "Page", "Item", "Revision", "Ref", "Description", "Qty", "Unit", "Rate", "Total", "Data_X1", "Data_X2", "Data_Y1", "Data_Y2", "Page_Width", "Page_Height"];
       const rows = exportData.map(d => [
         d.id,
         d.project_id,
@@ -235,6 +321,12 @@ export function BQExportPanel({
         d.unit ?? "",
         d.rate ?? "",
         d.total ?? "",
+        d.data_X1 ?? "",
+        d.data_X2 ?? "",
+        d.data_Y1 ?? "",
+        d.data_Y2 ?? "",
+        d.page_width ?? "",
+        d.page_height ?? "",
       ]);
 
       // Create CSV with proper escaping for Excel

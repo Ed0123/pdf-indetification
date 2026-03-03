@@ -425,15 +425,22 @@ def _parse_bq_rows(
                         'y_bottom': word['y_bottom'],
                         'y_center': word['y'],
                         'x0': word['x0'],
-                        'x1': word['x1']
+                        'x1': word['x1'],
+                        'word_count': 1
                     })
                 else:
                     last_line = desc_lines[-1]
                     # Same line if Y is very close
                     if abs(word['y'] - last_line['y_center']) <= line_y_tolerance:
                         last_line['texts'].append(word['text'])
+                        last_line['x0'] = min(last_line['x0'], word['x0'])
                         last_line['x1'] = max(last_line['x1'], word['x1'])
+                        last_line['y_top'] = min(last_line['y_top'], word['y_top'])
                         last_line['y_bottom'] = max(last_line['y_bottom'], word['y_bottom'])
+                        # Update y_center as running average
+                        old_count = last_line['word_count']
+                        last_line['y_center'] = (last_line['y_center'] * old_count + word['y']) / (old_count + 1)
+                        last_line['word_count'] = old_count + 1
                     else:
                         # New line
                         desc_lines.append({
@@ -442,7 +449,8 @@ def _parse_bq_rows(
                             'y_bottom': word['y_bottom'],
                             'y_center': word['y'],
                             'x0': word['x0'],
-                            'x1': word['x1']
+                            'x1': word['x1'],
+                            'word_count': 1
                         })
             
             # Finalize line text
@@ -568,13 +576,15 @@ def _parse_bq_rows(
                 # 2. Don't have a large paragraph gap
                 
                 all_blocks = []
+                assigned_lines = set()  # Track which lines have been assigned to avoid duplicates
                 
                 # First, any Description lines BEFORE the first Item are notes
                 first_item_y = item_positions[0][0]
                 notes_before = []
                 for line in desc_lines:
-                    if line['y_center'] < first_item_y - 20:  # Lines clearly above first item
+                    if line['y_center'] < first_item_y - 10:  # Lines clearly above first item
                         notes_before.append(line)
+                        assigned_lines.add(id(line))
                 
                 # Group notes_before by paragraph gaps
                 if notes_before:
@@ -593,7 +603,8 @@ def _parse_bq_rows(
                 # Now process each Item
                 for idx, (item_y, item_val) in enumerate(item_positions):
                     # Find the Y range for this item's description
-                    y_start = item_y - 10  # Slightly above item to catch same-line description
+                    # Start from item's Y position (not above it to avoid overlaps)
+                    y_start = item_y - 5  # Small margin for same-line description
                     
                     if idx < len(item_positions) - 1:
                         next_item_y = item_positions[idx + 1][0]
@@ -601,8 +612,15 @@ def _parse_bq_rows(
                     else:
                         y_end = dr_y1 + 100  # To page end
                     
-                    # Collect description lines in this range
-                    item_desc_lines = [l for l in desc_lines if y_start <= l['y_center'] <= y_end]
+                    # Collect description lines in this range that haven't been assigned yet
+                    item_desc_lines = [
+                        l for l in desc_lines 
+                        if y_start <= l['y_center'] <= y_end and id(l) not in assigned_lines
+                    ]
+                    
+                    # Mark these lines as assigned
+                    for l in item_desc_lines:
+                        assigned_lines.add(id(l))
                     
                     # Find Qty, Unit, Rate, Total for this item
                     qty_val = find_value_at_y(qty_lines, item_y, 20)
@@ -624,6 +642,22 @@ def _parse_bq_rows(
                         'item_x1': item_val.get('x1', 0),
                     })
                 
+                # Check for any unassigned lines and add them as trailing notes
+                unassigned_lines = [l for l in desc_lines if id(l) not in assigned_lines]
+                if unassigned_lines:
+                    # Sort by Y position and group as notes
+                    unassigned_sorted = sorted(unassigned_lines, key=lambda l: l['y_center'])
+                    current_block = {'type': 'notes', 'lines': [unassigned_sorted[0]], 'y_start': unassigned_sorted[0]['y_top'], 'y_end': unassigned_sorted[0]['y_bottom']}
+                    for i in range(1, len(unassigned_sorted)):
+                        gap = unassigned_sorted[i]['y_top'] - current_block['y_end']
+                        if gap > para_threshold:
+                            all_blocks.append(current_block)
+                            current_block = {'type': 'notes', 'lines': [unassigned_sorted[i]], 'y_start': unassigned_sorted[i]['y_top'], 'y_end': unassigned_sorted[i]['y_bottom']}
+                        else:
+                            current_block['lines'].append(unassigned_sorted[i])
+                            current_block['y_end'] = unassigned_sorted[i]['y_bottom']
+                    all_blocks.append(current_block)
+                
                 # Sort all blocks by y_start
                 all_blocks.sort(key=lambda b: b['y_start'])
                 
@@ -632,13 +666,15 @@ def _parse_bq_rows(
                 # Create output rows
                 for block in all_blocks:
                     if block['type'] == 'notes':
-                        desc_text = ' '.join(l['text'] for l in block['lines'])
-                        # Calculate bounding box for highlighting
+                        # Sort lines by Y position to ensure correct top-to-bottom order
+                        sorted_lines = sorted(block['lines'], key=lambda l: l['y_center'])
+                        desc_text = ' ; '.join(l['text'] for l in sorted_lines)
+                        # Calculate bounding box using actual line boundaries
                         if block['lines']:
                             bbox_x0 = min(l['x0'] for l in block['lines'])
                             bbox_x1 = max(l['x1'] for l in block['lines'])
-                            bbox_y0 = block['y_start']
-                            bbox_y1 = block['y_end']
+                            bbox_y0 = min(l['y_top'] for l in block['lines'])
+                            bbox_y1 = max(l['y_bottom'] for l in block['lines'])
                         else:
                             bbox_x0 = bbox_x1 = bbox_y0 = bbox_y1 = 0
                         
@@ -667,7 +703,9 @@ def _parse_bq_rows(
                         row_id += 1
                     else:
                         # Item block
-                        desc_text = ' '.join(l['text'] for l in block['lines'])
+                        # Sort lines by Y position to ensure correct top-to-bottom order
+                        sorted_lines = sorted(block['lines'], key=lambda l: l['y_center'])
+                        desc_text = ' ; '.join(l['text'] for l in sorted_lines)
                         qty = parse_number(block['qty']['text']) if block['qty'] else None
                         unit = block['unit']['text'] if block['unit'] else ""
                         rate = parse_number(block['rate']['text']) if block['rate'] else None

@@ -18,6 +18,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 
 from backend.auth_middleware import require_auth
+from backend.email_service import notify_admin_new_user, notify_user_activated
 from backend.firebase_setup import get_db
 
 router = APIRouter()
@@ -191,6 +192,15 @@ def _get_or_create_profile(uid: str, email: str | None = None,
         "photo_url": photo_url or "",
     }
     ref.set(profile)
+
+    # Notify admin of new pending user registration
+    if default_status == "pending":
+        notify_admin_new_user(
+            user_email=email or "",
+            display_name=display_name or "",
+            uid=uid,
+        )
+
     return profile
 
 
@@ -291,8 +301,23 @@ def admin_update_user(uid: str, body: AdminUserUpdate, user: dict = Depends(requ
         if "status" in changes and changes["status"] != "active":
             raise HTTPException(400, "Cannot change your own status to non-active")
 
+    # Check if status is changing to "active" (for email notification)
+    old_status = ref.get().to_dict().get("status")
     ref.update(changes)
-    return ref.get().to_dict()
+    updated_profile = ref.get().to_dict()
+
+    # Notify user when their account is activated
+    if (
+        "status" in changes
+        and changes["status"] == "active"
+        and old_status != "active"
+    ):
+        notify_user_activated(
+            user_email=updated_profile.get("email", ""),
+            display_name=updated_profile.get("display_name", ""),
+        )
+
+    return updated_profile
 
 
 @router.post("/usage/record")

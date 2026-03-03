@@ -267,6 +267,13 @@ export function BQOCRPanel({
         unit: r.unit,
         rate: r.rate,
         total: r.total,
+        // Bbox for UI highlighting
+        bbox_x0: r.bbox_x0,
+        bbox_y0: r.bbox_y0,
+        bbox_x1: r.bbox_x1,
+        bbox_y1: r.bbox_y1,
+        page_width: r.page_width,
+        page_height: r.page_height,
       }));
 
       // Update BQ page data
@@ -363,6 +370,13 @@ export function BQOCRPanel({
             unit: r.unit,
             rate: r.rate,
             total: r.total,
+            // Bbox for UI highlighting
+            bbox_x0: r.bbox_x0,
+            bbox_y0: r.bbox_y0,
+            bbox_x1: r.bbox_x1,
+            bbox_y1: r.bbox_y1,
+            page_width: r.page_width,
+            page_height: r.page_height,
           }));
 
           const key = `${sp.file_id}-${sp.page_number}`;

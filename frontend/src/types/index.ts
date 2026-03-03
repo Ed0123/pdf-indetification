@@ -97,6 +97,12 @@ export interface BQRow {
   // Page dimensions for coordinate conversion
   page_width?: number;
   page_height?: number;
+  // User edit tracking - stores original values before user edit
+  user_edited?: {
+    quantity?: boolean;
+    rate?: boolean;
+    total?: boolean;
+  };
 }
 
 /** BQ page data - stores boxes and extracted rows for a single page */
@@ -106,6 +112,14 @@ export interface BQPageData {
   boxes: Record<string, BoxInfo>;      // Column/zone boxes
   rows: BQRow[];                       // Extracted BQ rows for this page
   applied_template?: string;           // Last applied BQ template name
+  // Page totals for collection calculation
+  page_total?: number;                 // Sum of all item totals on this page
+  collection_box?: {                   // Collection zone box coordinates
+    x0: number;
+    y0: number;
+    x1: number;
+    y1: number;
+  };
 }
 
 /** BQ Template - saved box configuration for BQ extraction */

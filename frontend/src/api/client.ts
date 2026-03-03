@@ -677,6 +677,14 @@ export interface BQRowAPI {
   unit: string;
   rate: number | null;
   total: number | null;
+  // Bounding box for UI highlighting (absolute PDF coordinates)
+  bbox_x0?: number;
+  bbox_y0?: number;
+  bbox_x1?: number;
+  bbox_y1?: number;
+  // Page dimensions for coordinate conversion
+  page_width?: number;
+  page_height?: number;
 }
 
 /** BQ extraction request */
