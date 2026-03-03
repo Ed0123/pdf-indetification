@@ -71,7 +71,7 @@ export interface StatusInfo {
 // ─── BQ (Bill of Quantities) Types ────────────────────────────────────────────
 
 /** BQ item types for hierarchical classification */
-export type BQItemType = "heading1" | "heading2" | "item";
+export type BQItemType = "heading1" | "heading2" | "item" | "notes";
 
 /** A single BQ row extracted from a PDF page */
 export interface BQRow {
@@ -82,7 +82,7 @@ export interface BQRow {
   revision: string;             // e.g. "Addendum No. 2" from Revision zone
   bill_name: string;            // e.g. "BILL NO. 4 - BASEMENT" from BillName zone
   collection: string;           // e.g. "CARRIED TO COLLECTION $" from Collection zone
-  type: BQItemType;             // heading1, heading2, or item
+  type: BQItemType;             // heading1, heading2, item, or notes
   item_no: string;              // Item number (e.g. "1", "2", etc.)
   description: string;          // Item description
   quantity: number | null;      // Quantity

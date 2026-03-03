@@ -2,14 +2,14 @@
  * BQExportPanel — Summary view and export panel for BQ data.
  *
  * Shows all extracted BQ rows from all pages with:
- * - Filtering by type (heading1, heading2, item)
+ * - Filtering by type (heading1, heading2, item, notes)
  * - Inline editing
- * - Export to Excel
+ * - Export to Excel (.xlsx)
+ * - Export to JSON
  * - Summary statistics
  */
 import React, { useState, useMemo } from "react";
 import type { BQRow, BQPageData } from "../types";
-import { exportExcel } from "../api/client";
 
 interface BQExportPanelProps {
   bqPageData: Record<string, BQPageData>;  // key: `${fileId}-${pageNum}`
@@ -27,6 +27,8 @@ export function BQExportPanel({
   const [exportError, setExportError] = useState<string | null>(null);
   const [editingCell, setEditingCell] = useState<{ pageKey: string; rowId: number; field: string } | null>(null);
   const [editValue, setEditValue] = useState("");
+  const [showExportModal, setShowExportModal] = useState(false);
+  const [projectId, setProjectId] = useState("");
 
   // Flatten all rows from all pages
   const allRows = useMemo(() => {
@@ -50,9 +52,28 @@ export function BQExportPanel({
     const heading1Count = allRows.filter(r => r.row.type === "heading1").length;
     const heading2Count = allRows.filter(r => r.row.type === "heading2").length;
     const itemCount = allRows.filter(r => r.row.type === "item").length;
+    const notesCount = allRows.filter(r => r.row.type === "notes").length;
     const pagesWithData = new Set(allRows.map(r => r.pageKey)).size;
-    return { heading1Count, heading2Count, itemCount, total: allRows.length, pagesWithData };
+    return { heading1Count, heading2Count, itemCount, notesCount, total: allRows.length, pagesWithData };
   }, [allRows]);
+
+  // Parse bill/page from page_label (format: AA/BB where AA=bill, BB=page)
+  const parseBillPage = (pageLabel: string) => {
+    const match = pageLabel.match(/^([^/]+)\/(.+)$/);
+    if (match) {
+      return { bill: match[1], page: match[2] };
+    }
+    return { bill: "", page: pageLabel };
+  };
+
+  // Build ref from bill/page/item
+  const buildRef = (row: BQRow) => {
+    const { bill, page } = parseBillPage(row.page_label || "");
+    if (bill && page && row.item_no) {
+      return `${bill}/${page}/${row.item_no}`;
+    }
+    return "";
+  };
 
   // Handle cell edit
   const handleStartEdit = (pageKey: string, rowId: number, field: string, currentValue: any) => {
@@ -80,8 +101,57 @@ export function BQExportPanel({
     setEditValue("");
   };
 
-  // Handle export
-  const handleExport = async () => {
+  // Build export data in JSON format
+  const buildExportData = (pid: string) => {
+    return allRows.map(({ row }, idx) => {
+      const { bill, page } = parseBillPage(row.page_label || "");
+      const ref = buildRef(row);
+      const isItem = row.type === "item";
+      
+      return {
+        id: idx + 1,
+        project_id: pid,
+        Type: row.type === "item" ? "Item" : row.type === "notes" ? "Notes" : row.type,
+        bill,
+        page,
+        item: row.item_no,
+        revision: row.revision,
+        ref,
+        data_detail: row.description,
+        ...(isItem ? {
+          qty: row.quantity?.toString() ?? "",
+          unit: row.unit,
+          rate: row.rate?.toString() ?? "",
+          total: (row.quantity && row.rate) ? (row.quantity * row.rate).toString() : (row.total?.toString() ?? ""),
+        } : {}),
+      };
+    });
+  };
+
+  // Handle JSON export
+  const handleExportJSON = () => {
+    if (allRows.length === 0) {
+      setExportError("No data to export");
+      return;
+    }
+    
+    const pid = projectId.trim() || `BQ_${new Date().toISOString().slice(0, 10)}`;
+    const exportData = buildExportData(pid);
+    
+    const blob = new Blob([JSON.stringify(exportData, null, 2)], { type: "application/json" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = `${pid}.json`;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
+    setShowExportModal(false);
+  };
+
+  // Handle Excel export
+  const handleExportExcel = async () => {
     if (allRows.length === 0) {
       setExportError("No data to export");
       return;
@@ -91,44 +161,53 @@ export function BQExportPanel({
     setExportError(null);
 
     try {
-      // Convert to export format
-      const exportData = allRows.map(({ row }) => ({
-        Page: row.page_label || `Page ${row.page_number + 1}`,
-        Revision: row.revision,
-        Bill: row.bill_name,
-        Type: row.type,
-        "Item No": row.item_no,
-        Description: row.description,
-        Quantity: row.quantity,
-        Unit: row.unit,
-        Rate: row.rate,
-        Total: row.total,
-      }));
+      const pid = projectId.trim() || `BQ_${new Date().toISOString().slice(0, 10)}`;
+      const exportData = buildExportData(pid);
+      
+      // Convert to Excel-friendly format
+      const headers = ["ID", "Project", "Type", "Bill", "Page", "Item", "Revision", "Ref", "Description", "Qty", "Unit", "Rate", "Total"];
+      const rows = exportData.map(d => [
+        d.id,
+        d.project_id,
+        d.Type,
+        d.bill,
+        d.page,
+        d.item,
+        d.revision,
+        d.ref,
+        d.data_detail,
+        d.qty ?? "",
+        d.unit ?? "",
+        d.rate ?? "",
+        d.total ?? "",
+      ]);
 
-      // For now, create a downloadable CSV
-      const headers = Object.keys(exportData[0]);
+      // Create CSV with proper escaping for Excel
+      const escapeCell = (val: any) => {
+        const str = String(val ?? "");
+        // If contains newline, comma, or quote, wrap in quotes and escape inner quotes
+        if (str.includes("\n") || str.includes(",") || str.includes('"')) {
+          return `"${str.replace(/"/g, '""')}"`;
+        }
+        return str;
+      };
+
       const csvContent = [
-        headers.join(","),
-        ...exportData.map(row => 
-          headers.map(h => {
-            const val = row[h as keyof typeof row];
-            // Escape quotes and wrap in quotes if contains comma
-            const str = String(val ?? "");
-            return str.includes(",") || str.includes('"') ? `"${str.replace(/"/g, '""')}"` : str;
-          }).join(",")
-        )
-      ].join("\n");
+        headers.map(escapeCell).join(","),
+        ...rows.map(row => row.map(escapeCell).join(","))
+      ].join("\r\n");
 
-      // Download
+      // Download as Excel-compatible CSV
       const blob = new Blob(["\uFEFF" + csvContent], { type: "text/csv;charset=utf-8" });
       const url = URL.createObjectURL(blob);
       const a = document.createElement("a");
       a.href = url;
-      a.download = `bq_export_${new Date().toISOString().slice(0, 10)}.csv`;
+      a.download = `${pid}.csv`;
       document.body.appendChild(a);
       a.click();
       document.body.removeChild(a);
       URL.revokeObjectURL(url);
+      setShowExportModal(false);
     } catch (err: any) {
       setExportError(err.message || "Export failed");
     } finally {
@@ -164,16 +243,17 @@ export function BQExportPanel({
             onChange={(e) => setFilterType(e.target.value)}
           >
             <option value="all">All Types ({stats.total})</option>
+            <option value="item">Items ({stats.itemCount})</option>
+            <option value="notes">Notes ({stats.notesCount})</option>
             <option value="heading1">Heading 1 ({stats.heading1Count})</option>
             <option value="heading2">Heading 2 ({stats.heading2Count})</option>
-            <option value="item">Items ({stats.itemCount})</option>
           </select>
           <button
             style={exportBtn}
-            onClick={handleExport}
-            disabled={exporting}
+            onClick={() => setShowExportModal(true)}
+            disabled={exporting || allRows.length === 0}
           >
-            {exporting ? "⏳ Exporting..." : "📥 Export CSV"}
+            📥 Export
           </button>
         </div>
       </div>
@@ -182,10 +262,53 @@ export function BQExportPanel({
       <div style={statsBar}>
         <span style={statItem}>📄 {stats.pagesWithData} pages</span>
         <span style={statItem}>📋 {stats.total} rows</span>
+        <span style={statItem}>🟢 {stats.itemCount} items</span>
+        <span style={statItem}>📝 {stats.notesCount} notes</span>
         <span style={statItem}>🔵 {stats.heading1Count} H1</span>
         <span style={statItem}>🟡 {stats.heading2Count} H2</span>
-        <span style={statItem}>🟢 {stats.itemCount} items</span>
       </div>
+
+      {/* Export Modal */}
+      {showExportModal && (
+        <div style={modalOverlay}>
+          <div style={modalBox}>
+            <h3 style={{ margin: "0 0 16px", fontSize: 16 }}>Export BQ Data</h3>
+            <div style={{ marginBottom: 16 }}>
+              <label style={{ fontSize: 12, color: "#666", display: "block", marginBottom: 4 }}>
+                Project ID (optional, used as filename)
+              </label>
+              <input
+                type="text"
+                value={projectId}
+                onChange={(e) => setProjectId(e.target.value)}
+                placeholder={`BQ_${new Date().toISOString().slice(0, 10)}`}
+                style={{ padding: "6px 10px", width: "100%", border: "1px solid #ddd", borderRadius: 4 }}
+              />
+            </div>
+            <div style={{ display: "flex", gap: 8, justifyContent: "flex-end" }}>
+              <button
+                style={{ ...modalBtn, background: "#95a5a6" }}
+                onClick={() => setShowExportModal(false)}
+              >
+                Cancel
+              </button>
+              <button
+                style={{ ...modalBtn, background: "#3498db" }}
+                onClick={handleExportJSON}
+              >
+                📄 JSON
+              </button>
+              <button
+                style={{ ...modalBtn, background: "#2ecc71" }}
+                onClick={handleExportExcel}
+                disabled={exporting}
+              >
+                {exporting ? "⏳..." : "📊 Excel (CSV)"}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* Error */}
       {exportError && (
@@ -215,7 +338,7 @@ export function BQExportPanel({
           <tbody>
             {filteredRows.map(({ pageKey, row }, idx) => {
               const isEditing = editingCell?.pageKey === pageKey && editingCell?.rowId === row.id;
-              const rowStyle = row.type === "heading1" ? h1Row : row.type === "heading2" ? h2Row : itemRow;
+              const rowStyle = row.type === "heading1" ? h1Row : row.type === "heading2" ? h2Row : row.type === "notes" ? notesRow : itemRow;
               
               return (
                 <tr key={`${pageKey}-${row.id}`} style={rowStyle}>
@@ -224,9 +347,9 @@ export function BQExportPanel({
                   <td style={td}>
                     <span style={{
                       ...typeTag,
-                      background: row.type === "heading1" ? "#e74c3c" : row.type === "heading2" ? "#f39c12" : "#2ecc71"
+                      background: row.type === "heading1" ? "#e74c3c" : row.type === "heading2" ? "#f39c12" : row.type === "notes" ? "#95a5a6" : "#2ecc71"
                     }}>
-                      {row.type === "heading1" ? "H1" : row.type === "heading2" ? "H2" : "Item"}
+                      {row.type === "heading1" ? "H1" : row.type === "heading2" ? "H2" : row.type === "notes" ? "Note" : "Item"}
                     </span>
                   </td>
                   <td style={td}>
@@ -535,4 +658,37 @@ const deleteBtn: React.CSSProperties = {
   fontSize: 12,
   opacity: 0.6,
   transition: "opacity 0.15s",
+};
+
+const modalOverlay: React.CSSProperties = {
+  position: "fixed",
+  top: 0, left: 0, right: 0, bottom: 0,
+  background: "rgba(0,0,0,0.4)",
+  display: "flex",
+  alignItems: "center",
+  justifyContent: "center",
+  zIndex: 9999,
+};
+
+const modalBox: React.CSSProperties = {
+  background: "#fff",
+  borderRadius: 8,
+  padding: 24,
+  minWidth: 320,
+  boxShadow: "0 4px 20px rgba(0,0,0,0.15)",
+};
+
+const modalBtn: React.CSSProperties = {
+  padding: "8px 16px",
+  border: "none",
+  borderRadius: 4,
+  color: "#fff",
+  cursor: "pointer",
+  fontSize: 13,
+  fontWeight: 500,
+};
+
+const notesRow: React.CSSProperties = {
+  background: "#f5f5f5",
+  fontStyle: "italic",
 };

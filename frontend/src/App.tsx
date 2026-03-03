@@ -103,6 +103,10 @@ export default function App() {
   const [treeCollapsed, setTreeCollapsed] = useState(false);
   const [dataTableCollapsed, setDataTableCollapsed] = useState(false);
 
+  // Resizable panels
+  const [dataTableHeight, setDataTableHeight] = useState(50); // percentage
+  const [contentWidth, setContentWidth] = useState(48); // percentage
+
   // Activity bar module selection
   const [activeModule, setActiveModule] = useState<ModuleId>("singlepage");
 
@@ -485,7 +489,8 @@ export default function App() {
     }
   };
 
-  const handleManageTemplates = () => setShowTemplateModal(true);
+  // Switch to templates module when clicking toolbar Templates button
+  const handleManageTemplates = () => setActiveModule("templates");
 
   const handleExportPdf = () => {
     if (!state.pdf_files.length) return;
@@ -1131,24 +1136,24 @@ export default function App() {
           )}
         </div>
 
-        {/* Column 2: Module Content (switches based on activeModule) */}
+        {/* Column 2: Module Content (switches based on activeModule) - resizable */}
         <div style={{
-          flex: "0 0 48%",
+          flex: `0 0 ${contentWidth}%`,
           display: "flex",
           flexDirection: "column",
-          borderRight: "1px solid #ddd",
           overflow: "hidden",
+          position: "relative",
         }}>
           {activeModule === "singlepage" && (
             <>
-              {/* Collapsible DataTable */}
+              {/* Resizable DataTable */}
               <div style={{
                 display: "flex",
                 flexDirection: "column",
-                flex: dataTableCollapsed ? "0 0 28px" : "1 1 50%",
+                height: dataTableCollapsed ? 28 : `${dataTableHeight}%`,
+                minHeight: 28,
                 overflow: "hidden",
                 borderBottom: "1px solid #ddd",
-                transition: "flex 0.2s",
               }}>
                 <button
                   onClick={() => setDataTableCollapsed(!dataTableCollapsed)}
@@ -1176,6 +1181,38 @@ export default function App() {
                   />
                 )}
               </div>
+
+              {/* Vertical resize handle */}
+              {!dataTableCollapsed && (
+                <div
+                  style={{
+                    height: 6, cursor: "row-resize", background: "#e0e0e0",
+                    display: "flex", alignItems: "center", justifyContent: "center",
+                    borderBottom: "1px solid #ccc",
+                  }}
+                  onMouseDown={(e) => {
+                    e.preventDefault();
+                    const startY = e.clientY;
+                    const startHeight = dataTableHeight;
+                    const container = e.currentTarget.parentElement;
+                    const containerHeight = container?.clientHeight || 600;
+                    
+                    const onMove = (ev: MouseEvent) => {
+                      const delta = ev.clientY - startY;
+                      const newHeight = startHeight + (delta / containerHeight) * 100;
+                      setDataTableHeight(Math.min(80, Math.max(15, newHeight)));
+                    };
+                    const onUp = () => {
+                      document.removeEventListener("mousemove", onMove);
+                      document.removeEventListener("mouseup", onUp);
+                    };
+                    document.addEventListener("mousemove", onMove);
+                    document.addEventListener("mouseup", onUp);
+                  }}
+                >
+                  <div style={{ width: 40, height: 2, background: "#aaa", borderRadius: 1 }} />
+                </div>
+              )}
 
               {/* SinglePageDataTable (always visible below) */}
               <div style={{ flex: 1, overflow: "hidden" }}>
@@ -1266,6 +1303,36 @@ export default function App() {
               onExport={handleExportPdfConfirm}
             />
           )}
+        </div>
+
+        {/* Horizontal resize handle between content and PDF viewer */}
+        <div
+          style={{
+            width: 6, cursor: "col-resize", background: "#e0e0e0",
+            display: "flex", alignItems: "center", justifyContent: "center",
+            borderLeft: "1px solid #ccc", borderRight: "1px solid #ccc",
+          }}
+          onMouseDown={(e) => {
+            e.preventDefault();
+            const startX = e.clientX;
+            const startWidth = contentWidth;
+            const container = e.currentTarget.parentElement;
+            const containerWidth = container?.clientWidth || 1200;
+            
+            const onMove = (ev: MouseEvent) => {
+              const delta = ev.clientX - startX;
+              const newWidth = startWidth + (delta / containerWidth) * 100;
+              setContentWidth(Math.min(75, Math.max(25, newWidth)));
+            };
+            const onUp = () => {
+              document.removeEventListener("mousemove", onMove);
+              document.removeEventListener("mouseup", onUp);
+            };
+            document.addEventListener("mousemove", onMove);
+            document.addEventListener("mouseup", onUp);
+          }}
+        >
+          <div style={{ width: 2, height: 40, background: "#aaa", borderRadius: 1 }} />
         </div>
 
         {/* Column 3: PDF Viewer */}
