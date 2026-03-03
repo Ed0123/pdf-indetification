@@ -256,6 +256,37 @@ export async function exportPdfPages(
   triggerDownload(blob, "exported_pages.zip");
 }
 
+/** Text annotation for PDF overlay */
+export interface TextAnnotation {
+  file_id: string;
+  page_number: number;
+  text: string;
+  x: number;
+  y: number;
+  font_size?: number;
+  color?: string;
+  bold?: boolean;
+  align?: "left" | "center" | "right";
+}
+
+/** Export PDF pages with text annotations as a ZIP. */
+export async function exportAnnotatedPdf(
+  pages: { file_id: string; page_number: number; filename: string }[],
+  annotations: TextAnnotation[] = [],
+  includeAnnotations: boolean = true
+): Promise<void> {
+  const blob = await requestBlob("/api/pdf/export-annotated", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ 
+      pages, 
+      annotations,
+      include_annotations: includeAnnotations 
+    }),
+  });
+  triggerDownload(blob, includeAnnotations ? "annotated_pages.zip" : "exported_pages.zip");
+}
+
 /** Export project data to Excel and trigger a file download. */
 export async function exportExcel(payload: object): Promise<void> {
   const blob = await requestBlob("/api/export/excel", {

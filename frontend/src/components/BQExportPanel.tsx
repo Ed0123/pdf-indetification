@@ -6,10 +6,12 @@
  * - Inline editing
  * - Export to Excel (.xlsx)
  * - Export to JSON
+ * - Export to PDF (with/without annotations)
  * - Summary statistics
  */
 import React, { useState, useMemo } from "react";
 import type { BQRow, BQPageData } from "../types";
+import { exportAnnotatedPdf, type TextAnnotation } from "../api/client";
 
 interface BQExportPanelProps {
   bqPageData: Record<string, BQPageData>;  // key: `${fileId}-${pageNum}`
@@ -69,6 +71,65 @@ export function BQExportPanel({
     const pagesWithData = new Set(allRows.map(r => r.pageKey)).size;
     return { heading1Count, heading2Count, itemCount, notesCount, total: allRows.length, pagesWithData };
   }, [allRows]);
+
+  // Calculate page totals (sum of all item totals per page)
+  const pageTotals = useMemo(() => {
+    const totals: Record<string, { 
+      pageKey: string;
+      pageLabel: string;
+      pageNumber: number;
+      fileId: string;
+      total: number;
+      itemCount: number;
+      collectionBox?: { x0: number; y0: number; x1: number; y1: number };
+      pageWidth?: number;
+      pageHeight?: number;
+    }> = {};
+    
+    for (const [pageKey, pageData] of Object.entries(bqPageData)) {
+      let pageTotal = 0;
+      let itemCount = 0;
+      let pageLabel = "";
+      
+      for (const row of pageData.rows) {
+        if (row.type === "item" && row.total !== null) {
+          pageTotal += row.total;
+          itemCount++;
+        }
+        if (!pageLabel && row.page_label) {
+          pageLabel = row.page_label;
+        }
+      }
+      
+      // Get collection box coordinates if available
+      const collectionBox = pageData.boxes["Collection"];
+      const firstRow = pageData.rows[0];
+      
+      totals[pageKey] = {
+        pageKey,
+        pageLabel,
+        pageNumber: pageData.page_number,
+        fileId: pageData.file_id,
+        total: pageTotal,
+        itemCount,
+        collectionBox: collectionBox ? {
+          x0: collectionBox.x * (firstRow?.page_width ?? 1),
+          y0: collectionBox.y * (firstRow?.page_height ?? 1),
+          x1: (collectionBox.x + collectionBox.width) * (firstRow?.page_width ?? 1),
+          y1: (collectionBox.y + collectionBox.height) * (firstRow?.page_height ?? 1),
+        } : undefined,
+        pageWidth: firstRow?.page_width,
+        pageHeight: firstRow?.page_height,
+      };
+    }
+    
+    return totals;
+  }, [bqPageData]);
+
+  // Grand total across all pages
+  const grandTotal = useMemo(() => {
+    return Object.values(pageTotals).reduce((sum, pt) => sum + pt.total, 0);
+  }, [pageTotals]);
 
   // Unique pages and revisions for export filters
   const uniquePages = useMemo(() => {
@@ -267,13 +328,31 @@ export function BQExportPanel({
     const exportData = buildExportData(pid);
     const columnRanges = buildColumnRanges();
     
+    // Build page totals info for JSON export
+    const pageInfos = Object.values(pageTotals).map(pt => ({
+      page_id: pt.pageKey,
+      page_name: pt.pageLabel,
+      page_number: pt.pageNumber,
+      file_id: pt.fileId,
+      page_total: pt.total,
+      item_count: pt.itemCount,
+      page_total_x1: pt.collectionBox?.x0?.toString() ?? "",
+      page_total_x2: pt.collectionBox?.x1?.toString() ?? "",
+      page_total_y1: pt.collectionBox?.y0?.toString() ?? "",
+      page_total_y2: pt.collectionBox?.y1?.toString() ?? "",
+      page_width: pt.pageWidth?.toString() ?? "",
+      page_height: pt.pageHeight?.toString() ?? "",
+    }));
+    
     // Build full export structure with project info 
     const fullExport = {
       project_info: {
         project_id: pid,
         export_date: new Date().toISOString(),
         total_rows: exportData.length,
-        column_ranges: columnRanges
+        grand_total: grandTotal,
+        column_ranges: columnRanges,
+        pages: pageInfos
       },
       data: exportData
     };
@@ -362,6 +441,132 @@ export function BQExportPanel({
     }
   };
 
+  // Handle PDF export with annotations
+  const handleExportPDF = async (includeAnnotations: boolean) => {
+    const filteredForExport = getFilteredExportRows();
+    if (filteredForExport.length === 0) {
+      setExportError("No data to export (check filters)");
+      return;
+    }
+
+    setExporting(true);
+    setExportError(null);
+
+    try {
+      const pid = projectId.trim() || `BQ_${new Date().toISOString().slice(0, 10)}`;
+      
+      // Collect unique pages to export
+      const uniquePages = new Map<string, { file_id: string; page_number: number; page_label: string }>();
+      for (const { row } of filteredForExport) {
+        const key = `${row.file_id}-${row.page_number}`;
+        if (!uniquePages.has(key)) {
+          uniquePages.set(key, {
+            file_id: row.file_id,
+            page_number: row.page_number,
+            page_label: row.page_label || `page_${row.page_number + 1}`,
+          });
+        }
+      }
+
+      // Build page entries for export
+      const pages = Array.from(uniquePages.values()).map(p => ({
+        file_id: p.file_id,
+        page_number: p.page_number,
+        filename: `${pid}_${p.page_label.replace(/\//g, "-")}.pdf`,
+      }));
+
+      // Build annotations from user-edited fields
+      const annotations: TextAnnotation[] = [];
+      
+      if (includeAnnotations) {
+        for (const { row, pageKey } of filteredForExport) {
+          // Only add annotations for items with user edits
+          if (row.type === "item" && row.user_edited) {
+            const pageData = bqPageData[pageKey];
+            if (!pageData) continue;
+            
+            const pageWidth = row.page_width ?? 1;
+            const pageHeight = row.page_height ?? 1;
+            
+            // Get column boxes for positioning
+            const rateBox = pageData.boxes["Rate"];
+            const qtyBox = pageData.boxes["Qty"];
+            const totalBox = pageData.boxes["Total"];
+            
+            // Add quantity annotation
+            if (row.user_edited.quantity && row.quantity !== null && qtyBox) {
+              const x = qtyBox.x * pageWidth + 5;
+              const y = (row.bbox_y0 ?? 0) + 12;  // Slight offset from top of row
+              annotations.push({
+                file_id: row.file_id,
+                page_number: row.page_number,
+                text: row.quantity.toString(),
+                x,
+                y,
+                font_size: 9,
+                color: "#0000FF",  // Blue for user edits
+              });
+            }
+            
+            // Add rate annotation
+            if (row.user_edited.rate && row.rate !== null && rateBox) {
+              const x = rateBox.x * pageWidth + 5;
+              const y = (row.bbox_y0 ?? 0) + 12;
+              annotations.push({
+                file_id: row.file_id,
+                page_number: row.page_number,
+                text: row.rate.toFixed(2),
+                x,
+                y,
+                font_size: 9,
+                color: "#0000FF",
+              });
+            }
+            
+            // Add total annotation (auto-calculated or user-entered)
+            if ((row.user_edited.total || (row.user_edited.rate && row.user_edited.quantity)) && 
+                row.total !== null && totalBox) {
+              const x = totalBox.x * pageWidth + 5;
+              const y = (row.bbox_y0 ?? 0) + 12;
+              annotations.push({
+                file_id: row.file_id,
+                page_number: row.page_number,
+                text: row.total.toFixed(2),
+                x,
+                y,
+                font_size: 9,
+                color: "#0000FF",
+              });
+            }
+          }
+        }
+        
+        // Add page totals to collection boxes
+        for (const [pageKey, pt] of Object.entries(pageTotals)) {
+          if (pt.total > 0 && pt.collectionBox) {
+            annotations.push({
+              file_id: pt.fileId,
+              page_number: pt.pageNumber,
+              text: `$${pt.total.toFixed(2)}`,
+              x: pt.collectionBox.x0 + 5,
+              y: pt.collectionBox.y0 + 12,
+              font_size: 10,
+              color: "#008000",  // Green for totals
+              bold: true,
+            });
+          }
+        }
+      }
+
+      await exportAnnotatedPdf(pages, annotations, includeAnnotations);
+      setShowExportModal(false);
+    } catch (err: any) {
+      setExportError(err.message || "PDF export failed");
+    } finally {
+      setExporting(false);
+    }
+  };
+
   // Empty state
   if (allRows.length === 0) {
     return (
@@ -413,6 +618,11 @@ export function BQExportPanel({
         <span style={statItem}>📝 {stats.notesCount} notes</span>
         <span style={statItem}>🔵 {stats.heading1Count} H1</span>
         <span style={statItem}>🟡 {stats.heading2Count} H2</span>
+        {grandTotal > 0 && (
+          <span style={{ ...statItem, fontWeight: 700, color: "#27ae60" }}>
+            💰 Total: ${grandTotal.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+          </span>
+        )}
       </div>
 
       {/* Export Modal */}
@@ -472,7 +682,7 @@ export function BQExportPanel({
               </div>
             </div>
             
-            <div style={{ display: "flex", gap: 8, justifyContent: "flex-end" }}>
+            <div style={{ display: "flex", gap: 8, justifyContent: "flex-end", flexWrap: "wrap" }}>
               <button
                 style={{ ...modalBtn, background: "#95a5a6" }}
                 onClick={() => setShowExportModal(false)}
@@ -491,6 +701,20 @@ export function BQExportPanel({
                 disabled={exporting}
               >
                 {exporting ? "⏳..." : "📊 Excel (CSV)"}
+              </button>
+              <button
+                style={{ ...modalBtn, background: "#e74c3c" }}
+                onClick={() => handleExportPDF(false)}
+                disabled={exporting}
+              >
+                {exporting ? "⏳..." : "📄 PDF (原版)"}
+              </button>
+              <button
+                style={{ ...modalBtn, background: "#9b59b6" }}
+                onClick={() => handleExportPDF(true)}
+                disabled={exporting}
+              >
+                {exporting ? "⏳..." : "📝 PDF (含用戶輸入)"}
               </button>
             </div>
           </div>
