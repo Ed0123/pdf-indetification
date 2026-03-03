@@ -155,26 +155,29 @@ def _parse_bq_rows(
     boxes: list[BoxDefinition],
     engine: str,
     pdf_path: str
-) -> list[BQRowResponse]:
+) -> tuple[list[BQRowResponse], dict]:
     """
     Parse BQ data using text block analysis.
+    Returns (rows, debug_info) tuple.
     
     Key insight: Column Header boxes define the X boundaries for columns.
     We use the LEFT EDGE of each column header box as the starting point,
     and extend to the LEFT EDGE of the next column (sorted by X).
-    
-    Logic:
-    1. Sort column header boxes by X position (left to right)
-    2. Create contiguous X ranges: col1 starts at col1.x and ends at col2.x
-    3. For Description column: analyze Y distances between lines
-       - Close lines (within threshold) = same text block (merge)
-       - Far lines = separate text blocks (notes)
-    4. For Item, Qty, Unit, Rate, Total: find Y coordinate of each value
-    5. Match them to the nearest Description text block by Y coordinate
     """
     import fitz
     import logging
     logger = logging.getLogger(__name__)
+    
+    parse_debug = {
+        "page_size": None,
+        "data_range_bbox": None,
+        "column_x_ranges": {},
+        "words_extracted": 0,
+        "words_per_column": {},
+        "desc_blocks_count": 0,
+        "item_values": [],
+        "qty_values": [],
+    }
     
     # Extract zone information
     zone_data = {}
@@ -192,7 +195,14 @@ def _parse_bq_rows(
     data_range_box = next((b for b in boxes if b.column_name == "DataRange"), None)
     if not data_range_box:
         logger.warning("No DataRange box found")
-        return []
+        parse_debug["error"] = "No DataRange box found"
+        return [], parse_debug
+    
+    # Store DataRange box info for debugging
+    parse_debug["data_range_box_relative"] = {
+        "x": data_range_box.x, "y": data_range_box.y,
+        "w": data_range_box.width, "h": data_range_box.height
+    }
     
     # Find column boxes and sort by X position
     column_boxes = [(b.column_name, b) for b in boxes if b.column_name in [
@@ -200,21 +210,36 @@ def _parse_bq_rows(
     ]]
     column_boxes.sort(key=lambda x: x[1].x)  # Sort by X position
     
+    parse_debug["column_boxes_sorted"] = [c[0] for c in column_boxes]
     logger.info(f"Column boxes (sorted by X): {[c[0] for c in column_boxes]}")
     
     rows: list[BQRowResponse] = []
     row_id = 1
     
+    # Check if file exists
+    import os
+    parse_debug["pdf_path"] = pdf_path
+    parse_debug["pdf_exists"] = os.path.exists(pdf_path) if pdf_path else False
+    
+    if not pdf_path or not os.path.exists(pdf_path):
+        parse_debug["error"] = f"PDF file not found: {pdf_path}"
+        return [], parse_debug
+    
     try:
         import pdfplumber
         
         with pdfplumber.open(pdf_path) as pdf:
+            parse_debug["pdf_page_count"] = len(pdf.pages)
+            parse_debug["requested_page"] = page_num
+            
             if page_num >= len(pdf.pages):
-                return []
+                parse_debug["error"] = f"Page {page_num} out of range (PDF has {len(pdf.pages)} pages)"
+                return rows, parse_debug
             
             page = pdf.pages[page_num]
             page_width = page.width
             page_height = page.height
+            parse_debug["page_size"] = {"width": page_width, "height": page_height}
             
             # Get DataRange bounding box (absolute coordinates)
             dr_bbox = (
@@ -224,6 +249,7 @@ def _parse_bq_rows(
                 (data_range_box.y + data_range_box.height) * page_height
             )
             dr_x0, dr_y0, dr_x1, dr_y1 = dr_bbox
+            parse_debug["data_range_bbox"] = {"x0": dr_x0, "y0": dr_y0, "x1": dr_x1, "y1": dr_y1}
             
             # Build contiguous column X ranges from sorted columns
             # Each column spans from its X to the next column's X (or DataRange right edge)
@@ -240,6 +266,7 @@ def _parse_bq_rows(
                     col_right = dr_x1
                 
                 col_x_ranges[col_name] = (col_left, col_right)
+                parse_debug["column_x_ranges"][col_name] = {"x0": col_left, "x1": col_right}
                 logger.info(f"Column {col_name}: X range [{col_left:.1f}, {col_right:.1f}]")
             
             # If no column boxes defined, fallback: treat everything as Description
@@ -250,10 +277,17 @@ def _parse_bq_rows(
             cropped = page.within_bbox(dr_bbox)
             words = cropped.extract_words(keep_blank_chars=True, y_tolerance=3, x_tolerance=3)
             
+            parse_debug["words_extracted"] = len(words)
+            
+            # Log first few words for debugging
+            if words:
+                sample_words = [{"text": w['text'], "x0": w['x0'], "x1": w['x1'], "top": w['top']} for w in words[:5]]
+                parse_debug["sample_words"] = sample_words
+            
             logger.info(f"Extracted {len(words)} words from DataRange")
             
             if not words:
-                return rows
+                return rows, parse_debug
             
             # Step 1: Assign each word to a column based on X position
             col_words: dict[str, list] = {col: [] for col in col_x_ranges}
@@ -285,11 +319,14 @@ def _parse_bq_rows(
                         'text': text,
                         'y': word_y_mid,
                         'y_top': w['top'],
-                        'y_bottom': w['bottom']
+                        'y_bottom': w['bottom'],
+                        'x0': w['x0'],
+                        'x1': w['x1']
                     })
             
             # Log word distribution
             for col, wds in col_words.items():
+                parse_debug["words_per_column"][col] = len(wds)
                 if wds:
                     logger.info(f"Column {col}: {len(wds)} words")
             
@@ -380,6 +417,14 @@ def _parse_bq_rows(
             unit_values = extract_col_values("Unit")
             rate_values = extract_col_values("Rate")
             total_values = extract_col_values("Total")
+            
+            # Debug: log item and qty values
+            parse_debug["item_values"] = [{"text": v['text'], "y": v['y']} for v in item_values]
+            parse_debug["qty_values"] = [{"text": v['text'], "y": v['y']} for v in qty_values]
+            parse_debug["desc_blocks_count"] = len(desc_blocks)
+            parse_debug["desc_blocks_sample"] = [{"desc": b['description'][:50] if b['description'] else "", 
+                                                   "y_start": b['y_start'], "y_end": b['y_end']} 
+                                                  for b in desc_blocks[:5]]
             
             # Step 4: Match Item/Qty/Unit/Rate/Total to nearest Description block
             def find_nearest_block(y: float, blocks: list[dict]) -> int:
@@ -482,7 +527,8 @@ def _parse_bq_rows(
                 ))
                 row_id += 1
     
-    except ImportError:
+    except ImportError as e:
+        parse_debug["error"] = f"ImportError: {str(e)}"
         # Fallback to PyMuPDF text extraction
         text = _extract_text_from_box(pdf_path, page_num, data_range_box, engine)
         lines = text.split("\n")
@@ -510,7 +556,12 @@ def _parse_bq_rows(
             ))
             row_id += 1
     
-    return rows
+    except Exception as e:
+        # Catch any other exception
+        parse_debug["error"] = f"Exception: {type(e).__name__}: {str(e)}"
+        logger.error(f"BQ parse error: {e}", exc_info=True)
+    
+    return rows, parse_debug
 
 
 # ─── Endpoints ─────────────────────────────────────────────────────────────────
@@ -580,6 +631,7 @@ async def extract_bq(
     all_rows: list[BQRowResponse] = []
     warnings: list[str] = []
     pages_processed = 0
+    parse_debug = {}  # Will be populated from first page
     
     # Add warning if no column boxes defined
     if not column_boxes:
@@ -587,13 +639,17 @@ async def extract_bq(
     
     for page_num in request.pages:
         try:
-            rows = _parse_bq_rows(
+            rows, page_debug = _parse_bq_rows(
                 file_id=request.file_id,
                 page_num=page_num,
                 boxes=request.boxes,
                 engine=request.engine,
                 pdf_path=pdf_path
             )
+            
+            # Keep parse_debug from first page
+            if not parse_debug and page_debug:
+                parse_debug = page_debug
             
             # Renumber IDs to be globally unique
             start_id = len(all_rows) + 1
@@ -605,6 +661,9 @@ async def extract_bq(
             
         except Exception as e:
             warnings.append(f"Page {page_num + 1}: {str(e)}")
+    
+    # Merge parse_debug into debug_info
+    debug_info["parse_debug"] = parse_debug
     
     # Calculate quota cost
     quota_cost = pages_processed * 1  # 1 point per page for pdfplumber
