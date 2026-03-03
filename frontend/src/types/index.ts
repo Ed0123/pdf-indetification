@@ -67,3 +67,56 @@ export interface StatusInfo {
   progress: number | null;   // 0-100, or null = no progress bar
   ocr_available: boolean;
 }
+
+// ─── BQ (Bill of Quantities) Types ────────────────────────────────────────────
+
+/** BQ item types for hierarchical classification */
+export type BQItemType = "heading1" | "heading2" | "item";
+
+/** A single BQ row extracted from a PDF page */
+export interface BQRow {
+  id: number;                    // Unique row ID
+  file_id: string;              // Source PDF file
+  page_number: number;          // Source page (0-based)
+  page_label: string;           // e.g. "4.4/4" from PageNo zone
+  revision: string;             // e.g. "Addendum No. 2" from Revision zone
+  bill_name: string;            // e.g. "BILL NO. 4 - BASEMENT" from BillName zone
+  collection: string;           // e.g. "CARRIED TO COLLECTION $" from Collection zone
+  type: BQItemType;             // heading1, heading2, or item
+  item_no: string;              // Item number (e.g. "1", "2", etc.)
+  description: string;          // Item description
+  quantity: number | null;      // Quantity
+  unit: string;                 // Unit (e.g. "Set", "Nr", etc.)
+  rate: number | null;          // Unit rate
+  total: number | null;         // Total amount
+}
+
+/** BQ page data - stores boxes and extracted rows for a single page */
+export interface BQPageData {
+  file_id: string;
+  page_number: number;
+  boxes: Record<string, BoxInfo>;      // Column/zone boxes
+  rows: BQRow[];                       // Extracted BQ rows for this page
+  applied_template?: string;           // Last applied BQ template name
+}
+
+/** BQ Template - saved box configuration for BQ extraction */
+export interface BQTemplate {
+  id: string;
+  name: string;
+  boxes: TemplateBox[];              // Column and zone positions
+  notes: string;
+  preview_file_id: string | null;
+  preview_page: number;
+  owner_uid?: string;
+  owner_name?: string;
+}
+
+/** Available BQ OCR engines */
+export interface BQEngineInfo {
+  id: string;
+  name: string;
+  quota_cost: number;
+  available: boolean;
+  description?: string;
+}

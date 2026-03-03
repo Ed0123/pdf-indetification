@@ -649,3 +649,76 @@ export async function deleteCloudProject(
     method: "DELETE",
   });
 }
+
+// ─── BQ (Bill of Quantities) API ─────────────────────────────────────────────
+
+/** BQ engine info */
+export interface BQEngineInfo {
+  id: string;
+  name: string;
+  quota_cost: number;
+  available: boolean;
+  description?: string;
+}
+
+/** BQ extracted row */
+export interface BQRowAPI {
+  id: number;
+  file_id: string;
+  page_number: number;
+  page_label: string;
+  revision: string;
+  bill_name: string;
+  collection: string;
+  type: string;
+  item_no: string;
+  description: string;
+  quantity: number | null;
+  unit: string;
+  rate: number | null;
+  total: number | null;
+}
+
+/** BQ extraction request */
+export interface BQExtractRequest {
+  file_id: string;
+  pages: number[];
+  boxes: Array<{
+    column_name: string;
+    x: number;
+    y: number;
+    width: number;
+    height: number;
+  }>;
+  engine?: string;
+}
+
+/** BQ extraction response */
+export interface BQExtractResponse {
+  success: boolean;
+  rows: BQRowAPI[];
+  warnings: string[];
+  engine: string;
+  pages_processed: number;
+  quota_cost: number;
+}
+
+/** List available BQ OCR engines. */
+export async function listBQEngines(): Promise<BQEngineInfo[]> {
+  return request<BQEngineInfo[]>("/api/bq/engines");
+}
+
+/** Extract BQ data from PDF pages. */
+export async function extractBQ(
+  params: BQExtractRequest
+): Promise<BQExtractResponse> {
+  return request<BQExtractResponse>(
+    "/api/bq/extract",
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(params),
+    },
+    LONG_TIMEOUT_MS
+  );
+}

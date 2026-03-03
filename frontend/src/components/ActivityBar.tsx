@@ -1,0 +1,143 @@
+/**
+ * ActivityBar — vertical module navigation sidebar.
+ *
+ * Provides navigation between different modules:
+ * - Page View: Single page data table (default)
+ * - BQ OCR: Bill of Quantities extraction
+ * - BQ Export: BQ data summary and export
+ * - Templates: Template management
+ * - Export: Excel/PDF export
+ */
+import React from "react";
+
+export type ModuleId = 
+  | "singlepage"
+  | "bq_ocr"
+  | "bq_export"
+  | "templates"
+  | "exportexcel"
+  | "exportpdf";
+
+interface ModuleConfig {
+  id: ModuleId;
+  icon: string;
+  label: string;
+  shortLabel: string;
+  description: string;
+  tier?: string;  // Required tier for access
+}
+
+const MODULES: ModuleConfig[] = [
+  { id: "singlepage", icon: "📄", label: "Page View", shortLabel: "Page", description: "View and edit data for each page" },
+  { id: "bq_ocr", icon: "📋", label: "BQ OCR", shortLabel: "BQ", description: "Extract Bill of Quantities data", tier: "sponsor" },
+  { id: "bq_export", icon: "📊", label: "BQ Export", shortLabel: "BQ Ex", description: "Review and export BQ data", tier: "sponsor" },
+  { id: "templates", icon: "📝", label: "Templates", shortLabel: "Tmpl", description: "Manage extraction templates" },
+  { id: "exportexcel", icon: "📗", label: "Excel Export", shortLabel: "Excel", description: "Export data to Excel" },
+  { id: "exportpdf", icon: "📕", label: "PDF Export", shortLabel: "PDF", description: "Export selected PDF pages" },
+];
+
+interface ActivityBarProps {
+  activeModule: ModuleId;
+  onModuleChange: (module: ModuleId) => void;
+  userTier?: string;
+  collapsed?: boolean;
+  onToggleCollapse?: () => void;
+}
+
+export function ActivityBar({
+  activeModule,
+  onModuleChange,
+  userTier = "basic",
+  collapsed = false,
+  onToggleCollapse,
+}: ActivityBarProps) {
+  // Check if user has access to a module
+  const hasAccess = (module: ModuleConfig): boolean => {
+    if (!module.tier) return true;
+    const tierOrder = ["basic", "sponsor", "premium", "admin"];
+    const userIdx = tierOrder.indexOf(userTier);
+    const reqIdx = tierOrder.indexOf(module.tier);
+    return userIdx >= reqIdx;
+  };
+
+  return (
+    <div style={container}>
+      {MODULES.map((mod) => {
+        const isActive = activeModule === mod.id;
+        const isLocked = !hasAccess(mod);
+        
+        return (
+          <button
+            key={mod.id}
+            style={{
+              ...moduleBtn,
+              background: isActive ? "#fff" : "transparent",
+              color: isActive ? "#333" : isLocked ? "#bbb" : "#666",
+              cursor: isLocked ? "not-allowed" : "pointer",
+              borderLeft: isActive ? "3px solid #3498db" : "3px solid transparent",
+            }}
+            onClick={() => !isLocked && onModuleChange(mod.id)}
+            disabled={isLocked}
+            title={isLocked ? `Requires ${mod.tier} tier` : mod.description}
+          >
+            <span style={{ fontSize: collapsed ? 18 : 16 }}>{mod.icon}</span>
+            {!collapsed && (
+              <span style={{ fontSize: 11, marginTop: 2 }}>{mod.shortLabel}</span>
+            )}
+            {isLocked && (
+              <span style={lockIcon}>🔒</span>
+            )}
+          </button>
+        );
+      })}
+      
+      {/* Collapse toggle */}
+      {onToggleCollapse && (
+        <button
+          style={{
+            ...moduleBtn,
+            marginTop: "auto",
+            borderLeft: "3px solid transparent",
+          }}
+          onClick={onToggleCollapse}
+          title={collapsed ? "Expand sidebar" : "Collapse sidebar"}
+        >
+          <span style={{ fontSize: 14 }}>{collapsed ? "▶" : "◀"}</span>
+        </button>
+      )}
+    </div>
+  );
+}
+
+// ─── Styles ─────────────────────────────────────────────────────────────────
+
+const container: React.CSSProperties = {
+  display: "flex",
+  flexDirection: "column",
+  background: "#f5f5f5",
+  borderRight: "1px solid #e0e0e0",
+  width: "fit-content",
+  minWidth: 48,
+  height: "100%",
+};
+
+const moduleBtn: React.CSSProperties = {
+  display: "flex",
+  flexDirection: "column",
+  alignItems: "center",
+  justifyContent: "center",
+  padding: "10px 8px",
+  border: "none",
+  background: "transparent",
+  cursor: "pointer",
+  transition: "all 0.15s ease",
+  position: "relative",
+  minHeight: 56,
+};
+
+const lockIcon: React.CSSProperties = {
+  position: "absolute",
+  top: 4,
+  right: 4,
+  fontSize: 8,
+};

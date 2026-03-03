@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useRef, useCallback } from "react";
+import React, { useState, useEffect, useRef, useCallback, useMemo } from "react";
 import { Toolbar } from "./components/Toolbar";
 import { PDFTreeView } from "./components/PDFTreeView";
 import { DataTable } from "./components/DataTable";
@@ -12,12 +12,15 @@ import { LoginPage } from "./components/LoginPage";
 import { MyAccountPage } from "./components/MyAccountPage";
 import { AdminPanel } from "./components/AdminPanel";
 import { CloudProjectsPanel } from "./components/CloudProjectsPanel";
+import { ActivityBar, type ModuleId } from "./components/ActivityBar";
+import { BQOCRPanel } from "./components/BQOCRPanel";
+import { BQExportPanel } from "./components/BQExportPanel";
 import type { SelectedPage } from "./components/PageSelectorModal";
 import { useProject } from "./hooks/useProject";
 import { useAuth } from "./hooks/useAuth";
 import { saveDraft, loadDraft, clearDraft } from "./storage/localDraft";
 import type { DraftPayload } from "./storage/localDraft";
-import type { PDFFileInfo, PageData, StatusInfo, Template, TemplateBox } from "./types";
+import type { PDFFileInfo, PageData, StatusInfo, Template, TemplateBox, BoxInfo, BQPageData, BQRow, BQTemplate } from "./types";
 import type { UserProfile } from "./types/user";
 import type { ExportPageEntry } from "./components/PDFExportModal";
 import {
@@ -96,6 +99,13 @@ export default function App() {
   // Collapsible panels
   const [treeCollapsed, setTreeCollapsed] = useState(false);
   const [dataTableCollapsed, setDataTableCollapsed] = useState(false);
+
+  // Activity bar module selection
+  const [activeModule, setActiveModule] = useState<ModuleId>("singlepage");
+
+  // BQ (Bill of Quantities) state
+  const [bqPageData, setBqPageData] = useState<Record<string, BQPageData>>({});
+  const [bqTemplates, setBqTemplates] = useState<BQTemplate[]>([]);
 
   const fileInputRef = useRef<HTMLInputElement>(null);
 
@@ -785,6 +795,122 @@ export default function App() {
   );
 
   // --------------------------------------------------------------------------
+  // BQ (Bill of Quantities) handlers
+  // --------------------------------------------------------------------------
+
+  // Get current BQ boxes for the selected page
+  const currentBQBoxes = useMemo(() => {
+    if (!state.selected_file_id) return {};
+    const pageKey = `${state.selected_file_id}-${state.selected_page}`;
+    return bqPageData[pageKey]?.boxes ?? {};
+  }, [state.selected_file_id, state.selected_page, bqPageData]);
+
+  // Handle BQ boxes change (from BQOCRPanel)
+  const handleBQBoxesChange = useCallback((boxes: Record<string, BoxInfo>) => {
+    if (!state.selected_file_id) return;
+    const pageKey = `${state.selected_file_id}-${state.selected_page}`;
+    setBqPageData((prev) => ({
+      ...prev,
+      [pageKey]: {
+        ...prev[pageKey],
+        file_id: state.selected_file_id!,
+        page_number: state.selected_page,
+        boxes,
+        rows: prev[pageKey]?.rows ?? [],
+      },
+    }));
+  }, [state.selected_file_id, state.selected_page]);
+
+  // Handle BQ data change (after OCR extraction)
+  const handleBQDataChange = useCallback((pageKey: string, data: BQPageData) => {
+    setBqPageData((prev) => ({
+      ...prev,
+      [pageKey]: data,
+    }));
+  }, []);
+
+  // Save BQ template
+  const handleSaveBQTemplate = useCallback((name: string, boxes: BoxInfo[]) => {
+    const newTemplate: BQTemplate = {
+      id: `bqt_${Date.now()}`,
+      name,
+      boxes: boxes.map((b, i) => ({
+        ...b,
+        color: ["#e74c3c", "#3498db", "#2ecc71", "#9b59b6", "#f39c12", "#1abc9c"][i % 6],
+      })),
+      notes: "",
+      preview_file_id: state.selected_file_id,
+      preview_page: state.selected_page,
+      owner_uid: auth.user?.uid,
+    };
+    setBqTemplates((prev) => [...prev, newTemplate]);
+    setMsg(`Saved BQ template "${name}"`);
+  }, [state.selected_file_id, state.selected_page, auth.user]);
+
+  // Apply BQ template
+  const handleApplyBQTemplate = useCallback((templateId: string) => {
+    const template = bqTemplates.find((t) => t.id === templateId);
+    if (!template || !state.selected_file_id) return;
+    
+    const boxes: Record<string, BoxInfo> = {};
+    template.boxes.forEach((b) => {
+      boxes[b.column_name] = {
+        column_name: b.column_name,
+        x: b.x,
+        y: b.y,
+        width: b.width,
+        height: b.height,
+      };
+    });
+    handleBQBoxesChange(boxes);
+    setMsg(`Applied BQ template "${template.name}"`);
+  }, [bqTemplates, state.selected_file_id, handleBQBoxesChange]);
+
+  // Edit BQ row
+  const handleBQRowEdit = useCallback((pageKey: string, rowId: number, field: keyof BQRow, value: any) => {
+    setBqPageData((prev) => {
+      const pageData = prev[pageKey];
+      if (!pageData) return prev;
+      return {
+        ...prev,
+        [pageKey]: {
+          ...pageData,
+          rows: pageData.rows.map((row) =>
+            row.id === rowId ? { ...row, [field]: value } : row
+          ),
+        },
+      };
+    });
+  }, []);
+
+  // Delete BQ row
+  const handleBQRowDelete = useCallback((pageKey: string, rowId: number) => {
+    setBqPageData((prev) => {
+      const pageData = prev[pageKey];
+      if (!pageData) return prev;
+      return {
+        ...prev,
+        [pageKey]: {
+          ...pageData,
+          rows: pageData.rows.filter((row) => row.id !== rowId),
+        },
+      };
+    });
+  }, []);
+
+  // Handle box drawing in BQ mode - route to BQ boxes instead of regular boxes
+  const handleDrawBoxBQ = useCallback(
+    (box: BoxInfo) => {
+      if (!state.selected_file_id) return;
+      handleBQBoxesChange({
+        ...currentBQBoxes,
+        [box.column_name]: box,
+      });
+    },
+    [state.selected_file_id, currentBQBoxes, handleBQBoxesChange]
+  );
+
+  // --------------------------------------------------------------------------
   // Render — route-based
   // --------------------------------------------------------------------------
 
@@ -955,8 +1081,15 @@ export default function App() {
         />
       )}
 
-      {/* Main area: Tree | (DataTable + SinglePageDataTable) | PDFViewer */}
+      {/* Main area: ActivityBar | Tree | Module Content | PDFViewer */}
       <div style={{ display: "flex", flex: 1, overflow: "hidden", minHeight: 0 }}>
+
+        {/* Column 0: Activity Bar */}
+        <ActivityBar
+          activeModule={activeModule}
+          onModuleChange={setActiveModule}
+          userTier={profile?.tier ?? "basic"}
+        />
 
         {/* Column 1: PDF Tree (collapsible) */}
         <div style={{
@@ -989,7 +1122,7 @@ export default function App() {
           )}
         </div>
 
-        {/* Column 2: DataTable (collapsible) + SinglePageDataTable */}
+        {/* Column 2: Module Content (switches based on activeModule) */}
         <div style={{
           flex: "0 0 48%",
           display: "flex",
@@ -997,62 +1130,114 @@ export default function App() {
           borderRight: "1px solid #ddd",
           overflow: "hidden",
         }}>
-          {/* Collapsible DataTable */}
-          <div style={{
-            display: "flex",
-            flexDirection: "column",
-            flex: dataTableCollapsed ? "0 0 28px" : "1 1 50%",
-            overflow: "hidden",
-            borderBottom: "1px solid #ddd",
-            transition: "flex 0.2s",
-          }}>
-            <button
-              onClick={() => setDataTableCollapsed(!dataTableCollapsed)}
-              style={{
-                border: "none", background: "#f5f5f5", borderBottom: "1px solid #ddd",
-                cursor: "pointer", padding: "4px 8px", fontSize: 11, color: "#888",
-                textAlign: "left",
-              }}
-              title={dataTableCollapsed ? "Expand data table" : "Collapse data table"}
-            >
-              {dataTableCollapsed ? "▼ Data Table" : "▲ Data Table"}
-            </button>
-            {!dataTableCollapsed && (
-              <DataTable
-                files={state.pdf_files}
-                columns={state.columns}
-                selectedFileId={state.selected_file_id}
-                selectedPage={state.selected_page}
-                selectedColumn={selectedColumn}
-                onSelectCell={handleSelectCell}
-                onCellEdit={(fid, pg, col, text) => project.setCell(fid, pg, col, text)}
-                onAddColumn={project.addColumn}
-                onRemoveColumn={project.removeColumn}
-                onToggleColumn={project.toggleColumn}
-              />
-            )}
-          </div>
+          {activeModule === "singlepage" && (
+            <>
+              {/* Collapsible DataTable */}
+              <div style={{
+                display: "flex",
+                flexDirection: "column",
+                flex: dataTableCollapsed ? "0 0 28px" : "1 1 50%",
+                overflow: "hidden",
+                borderBottom: "1px solid #ddd",
+                transition: "flex 0.2s",
+              }}>
+                <button
+                  onClick={() => setDataTableCollapsed(!dataTableCollapsed)}
+                  style={{
+                    border: "none", background: "#f5f5f5", borderBottom: "1px solid #ddd",
+                    cursor: "pointer", padding: "4px 8px", fontSize: 11, color: "#888",
+                    textAlign: "left",
+                  }}
+                  title={dataTableCollapsed ? "Expand data table" : "Collapse data table"}
+                >
+                  {dataTableCollapsed ? "▼ Data Table" : "▲ Data Table"}
+                </button>
+                {!dataTableCollapsed && (
+                  <DataTable
+                    files={state.pdf_files}
+                    columns={state.columns}
+                    selectedFileId={state.selected_file_id}
+                    selectedPage={state.selected_page}
+                    selectedColumn={selectedColumn}
+                    onSelectCell={handleSelectCell}
+                    onCellEdit={(fid, pg, col, text) => project.setCell(fid, pg, col, text)}
+                    onAddColumn={project.addColumn}
+                    onRemoveColumn={project.removeColumn}
+                    onToggleColumn={project.toggleColumn}
+                  />
+                )}
+              </div>
 
-          {/* SinglePageDataTable (always visible below) */}
-          <div style={{ flex: 1, overflow: "hidden" }}>
-            <SinglePageDataTable
+              {/* SinglePageDataTable (always visible below) */}
+              <div style={{ flex: 1, overflow: "hidden" }}>
+                <SinglePageDataTable
+                  files={state.pdf_files}
+                  columns={state.columns}
+                  selectedFileId={state.selected_file_id}
+                  selectedPage={state.selected_page}
+                  selectedColumn={selectedColumn}
+                  templates={state.templates}
+                  onSelectPage={project.selectPage}
+                  onSelectCell={handleSelectCell}
+                  onCellEdit={(fid, pg, col, text) => project.setCell(fid, pg, col, text)}
+                  onAddColumn={project.addColumn}
+                  onRemoveColumn={project.removeColumn}
+                  onRecognizePage={handleRecognizeSinglePage}
+                  onSaveNewTemplate={handleSingleSaveNewTemplate}
+                  onUpdateTemplate={handleSingleUpdateTemplate}
+                  onApplyTemplate={handleSingleApplyTemplate}
+                />
+              </div>
+            </>
+          )}
+
+          {activeModule === "bq_ocr" && (
+            <BQOCRPanel
               files={state.pdf_files}
-              columns={state.columns}
+              templates={state.templates}
+              bqTemplates={bqTemplates}
               selectedFileId={state.selected_file_id}
               selectedPage={state.selected_page}
               selectedColumn={selectedColumn}
-              templates={state.templates}
+              currentBoxes={currentBQBoxes}
+              bqPageData={bqPageData}
               onSelectPage={project.selectPage}
-              onSelectCell={handleSelectCell}
-              onCellEdit={(fid, pg, col, text) => project.setCell(fid, pg, col, text)}
-              onAddColumn={project.addColumn}
-              onRemoveColumn={project.removeColumn}
-              onRecognizePage={handleRecognizeSinglePage}
-              onSaveNewTemplate={handleSingleSaveNewTemplate}
-              onUpdateTemplate={handleSingleUpdateTemplate}
-              onApplyTemplate={handleSingleApplyTemplate}
+              onSelectColumn={setSelectedColumn}
+              onBoxesChange={handleBQBoxesChange}
+              onBQDataChange={handleBQDataChange}
+              onSaveBQTemplate={handleSaveBQTemplate}
+              onApplyBQTemplate={handleApplyBQTemplate}
             />
-          </div>
+          )}
+
+          {activeModule === "bq_export" && (
+            <BQExportPanel
+              bqPageData={bqPageData}
+              onRowEdit={handleBQRowEdit}
+              onDeleteRow={handleBQRowDelete}
+            />
+          )}
+
+          {activeModule === "templates" && (
+            <div style={{ padding: 20, textAlign: "center", color: "#666" }}>
+              <p>Template Manager</p>
+              <button onClick={handleManageTemplates}>Open Templates</button>
+            </div>
+          )}
+
+          {activeModule === "exportexcel" && (
+            <div style={{ padding: 20, textAlign: "center", color: "#666" }}>
+              <p>Excel Export</p>
+              <button onClick={handleExportExcel}>Export to Excel</button>
+            </div>
+          )}
+
+          {activeModule === "exportpdf" && (
+            <div style={{ padding: 20, textAlign: "center", color: "#666" }}>
+              <p>PDF Export</p>
+              <button onClick={handleExportPdf}>Export Pages</button>
+            </div>
+          )}
         </div>
 
         {/* Column 3: PDF Viewer */}
@@ -1060,9 +1245,9 @@ export default function App() {
           <PDFViewer
             fileId={state.selected_file_id}
             pageNum={state.selected_page}
-            boxes={currentBoxes}
+            boxes={activeModule === "bq_ocr" ? currentBQBoxes : currentBoxes}
             selectedColumn={selectedColumn}
-            onDrawBox={handleDrawBox}
+            onDrawBox={activeModule === "bq_ocr" ? handleDrawBoxBQ : handleDrawBox}
           />
         </div>
       </div>
