@@ -80,6 +80,7 @@ class BQExtractResponse(BaseModel):
     engine: str = "pdfplumber"
     pages_processed: int = 0
     quota_cost: int = 0
+    debug_info: dict = {}  # Debug information about parsing
 
 
 # ─── Helper Functions ──────────────────────────────────────────────────────────
@@ -158,17 +159,22 @@ def _parse_bq_rows(
     """
     Parse BQ data using text block analysis.
     
+    Key insight: Column Header boxes define the X boundaries for columns.
+    We use the LEFT EDGE of each column header box as the starting point,
+    and extend to the LEFT EDGE of the next column (sorted by X).
+    
     Logic:
-    1. Use Column Headers X ranges to slice DataRange text into columns
-    2. For Description column: analyze Y distances between lines
+    1. Sort column header boxes by X position (left to right)
+    2. Create contiguous X ranges: col1 starts at col1.x and ends at col2.x
+    3. For Description column: analyze Y distances between lines
        - Close lines (within threshold) = same text block (merge)
        - Far lines = separate text blocks (notes)
-    3. For Item, Qty, Unit, Rate, Total: find Y coordinate of each value
-    4. Match them to the nearest Description text block by Y coordinate
-    
-    This approach handles multi-line descriptions correctly.
+    4. For Item, Qty, Unit, Rate, Total: find Y coordinate of each value
+    5. Match them to the nearest Description text block by Y coordinate
     """
     import fitz
+    import logging
+    logger = logging.getLogger(__name__)
     
     # Extract zone information
     zone_data = {}
@@ -185,12 +191,16 @@ def _parse_bq_rows(
     # Find DataRange box
     data_range_box = next((b for b in boxes if b.column_name == "DataRange"), None)
     if not data_range_box:
+        logger.warning("No DataRange box found")
         return []
     
-    # Find column boxes
-    column_boxes = {b.column_name: b for b in boxes if b.column_name in [
+    # Find column boxes and sort by X position
+    column_boxes = [(b.column_name, b) for b in boxes if b.column_name in [
         "Item", "Description", "Qty", "Unit", "Rate", "Total"
-    ]}
+    ]]
+    column_boxes.sort(key=lambda x: x[1].x)  # Sort by X position
+    
+    logger.info(f"Column boxes (sorted by X): {[c[0] for c in column_boxes]}")
     
     rows: list[BQRowResponse] = []
     row_id = 1
@@ -213,18 +223,34 @@ def _parse_bq_rows(
                 (data_range_box.x + data_range_box.width) * page_width,
                 (data_range_box.y + data_range_box.height) * page_height
             )
+            dr_x0, dr_y0, dr_x1, dr_y1 = dr_bbox
             
-            # Calculate column X ranges (absolute coordinates)
-            col_x_ranges = {}
-            for col_name, box in column_boxes.items():
-                col_x_ranges[col_name] = (
-                    box.x * page_width,
-                    (box.x + box.width) * page_width
-                )
+            # Build contiguous column X ranges from sorted columns
+            # Each column spans from its X to the next column's X (or DataRange right edge)
+            col_x_ranges: dict[str, tuple[float, float]] = {}
+            
+            for i, (col_name, box) in enumerate(column_boxes):
+                col_left = box.x * page_width
+                
+                # Right edge: next column's left edge, or DataRange right edge
+                if i < len(column_boxes) - 1:
+                    next_box = column_boxes[i + 1][1]
+                    col_right = next_box.x * page_width
+                else:
+                    col_right = dr_x1
+                
+                col_x_ranges[col_name] = (col_left, col_right)
+                logger.info(f"Column {col_name}: X range [{col_left:.1f}, {col_right:.1f}]")
+            
+            # If no column boxes defined, fallback: treat everything as Description
+            if not col_x_ranges:
+                col_x_ranges["Description"] = (dr_x0, dr_x1)
             
             # Extract words from DataRange
             cropped = page.within_bbox(dr_bbox)
             words = cropped.extract_words(keep_blank_chars=True, y_tolerance=3, x_tolerance=3)
+            
+            logger.info(f"Extracted {len(words)} words from DataRange")
             
             if not words:
                 return rows
@@ -242,7 +268,7 @@ def _parse_bq_rows(
                 
                 assigned = False
                 for col_name, (cx0, cx1) in col_x_ranges.items():
-                    if cx0 <= word_x_mid <= cx1:
+                    if cx0 <= word_x_mid < cx1:  # Note: < not <= for right boundary
                         col_words[col_name].append({
                             'text': text,
                             'y': word_y_mid,
@@ -261,6 +287,11 @@ def _parse_bq_rows(
                         'y_top': w['top'],
                         'y_bottom': w['bottom']
                     })
+            
+            # Log word distribution
+            for col, wds in col_words.items():
+                if wds:
+                    logger.info(f"Column {col}: {len(wds)} words")
             
             # If Description column is empty, use unassigned words
             if not col_words.get("Description") and col_words.get("_unassigned"):
@@ -531,10 +562,28 @@ async def extract_bq(
     # Get PDF path from the in-memory store (shared with pdf router)
     pdf_path = _get_path(request.file_id)
     
+    # Debug info: what boxes were received
+    box_names = [b.column_name for b in request.boxes]
+    column_boxes = [b.column_name for b in request.boxes if b.column_name in 
+                    ["Item", "Description", "Qty", "Unit", "Rate", "Total"]]
+    zone_boxes = [b.column_name for b in request.boxes if b.column_name in 
+                  ["DataRange", "PageNo", "Revision", "BillName", "Collection"]]
+    
+    debug_info = {
+        "all_boxes_received": box_names,
+        "column_boxes": column_boxes,
+        "zone_boxes": zone_boxes,
+        "missing_columns": [c for c in ["Item", "Description", "Qty", "Unit"] if c not in column_boxes],
+    }
+    
     # Process each page
     all_rows: list[BQRowResponse] = []
     warnings: list[str] = []
     pages_processed = 0
+    
+    # Add warning if no column boxes defined
+    if not column_boxes:
+        warnings.append("No column header boxes defined (Item, Description, Qty, Unit, Rate, Total). Please draw column boxes on the PDF.")
     
     for page_num in request.pages:
         try:
@@ -568,5 +617,6 @@ async def extract_bq(
         warnings=warnings,
         engine=request.engine,
         pages_processed=pages_processed,
-        quota_cost=quota_cost
+        quota_cost=quota_cost,
+        debug_info=debug_info
     )

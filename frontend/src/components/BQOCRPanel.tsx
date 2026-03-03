@@ -156,11 +156,21 @@ export function BQOCRPanel({
   // Check required boxes
   const hasDataRange = !!currentBoxes["DataRange"];
   const boxCount = Object.keys(currentBoxes).length;
+  
+  // Check column boxes
+  const columnBoxNames = ["Item", "Description", "Qty", "Unit", "Rate", "Total"];
+  const drawnColumns = columnBoxNames.filter((c) => !!currentBoxes[c]);
+  const hasColumnBoxes = drawnColumns.length >= 2; // At least Item + Description or similar
 
   // Handle OCR extraction
   const handleExtract = useCallback(async () => {
     if (!selectedFileId || !hasDataRange) {
       setError("Please draw the Data Range box first");
+      return;
+    }
+    
+    if (!hasColumnBoxes) {
+      setError("Please draw column header boxes (Item, Description, Qty, Unit etc.) to define column positions");
       return;
     }
 
@@ -221,12 +231,17 @@ export function BQOCRPanel({
       if (result.warnings.length > 0) {
         setError(`Warnings: ${result.warnings.join(", ")}`);
       }
+      
+      // Log debug info if available
+      if ((result as any).debug_info) {
+        console.log("BQ Extract debug info:", (result as any).debug_info);
+      }
     } catch (err: any) {
       setError(err.message || "Extraction failed");
     } finally {
       setExtracting(false);
     }
-  }, [selectedFileId, selectedPage, currentBoxes, selectedEngine, hasDataRange, pageKey, selectedTemplateId, onBQDataChange]);
+  }, [selectedFileId, selectedPage, currentBoxes, selectedEngine, hasDataRange, hasColumnBoxes, pageKey, selectedTemplateId, onBQDataChange]);
 
   // Show batch page selector
   const handleShowBatchSelector = useCallback(() => {
@@ -234,8 +249,12 @@ export function BQOCRPanel({
       setError("Please draw boxes on this page first, then use batch to apply to selected pages");
       return;
     }
+    if (!hasColumnBoxes) {
+      setError("Please draw column header boxes (Item, Description, Qty, Unit etc.) before batch processing");
+      return;
+    }
     setShowBatchSelector(true);
-  }, [hasDataRange]);
+  }, [hasDataRange, hasColumnBoxes]);
 
   // Handle batch OCR (selected pages)
   const handleBatchExtract = useCallback(async (selectedPages: SelectedPage[]) => {
