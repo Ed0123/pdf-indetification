@@ -158,12 +158,14 @@ def _parse_bq_rows(
     """
     Parse BQ data from extracted text using column-based extraction.
     
-    Classification logic:
-    - If row has Item ref AND (Qty OR Unit) → "item" (pricing item)
+    BQ Table Structure (horizontal integration):
+    - Each physical row in the PDF = one output row
+    - Columns: Ref (Item), Description, Qty, Unit, Rate, Total
+    - If row has Item ref AND Qty/Unit → "item"
     - Otherwise → "notes"
-    - Future engines may add heading/subheading classification
     
-    Uses y-coordinate alignment to match text across columns.
+    The key is HORIZONTAL integration: all columns on the same Y coordinate
+    should be merged into a single output row.
     """
     import fitz
     
@@ -211,164 +213,106 @@ def _parse_bq_rows(
                 (data_range_box.y + data_range_box.height) * page_height
             )
             
-            # Calculate column bounding boxes within DataRange
+            # Calculate column bounding boxes (absolute X coordinates)
             col_bboxes = {}
             for col_name, box in column_boxes.items():
                 col_x0 = box.x * page_width
                 col_x1 = (box.x + box.width) * page_width
-                # Use DataRange y bounds for columns
-                col_bboxes[col_name] = (col_x0, dr_bbox[1], col_x1, dr_bbox[3])
+                col_bboxes[col_name] = (col_x0, col_x1)
             
-            # Extract words from page with position info
+            # Extract words from DataRange
             cropped = page.within_bbox(dr_bbox)
             words = cropped.extract_words(keep_blank_chars=True, y_tolerance=3, x_tolerance=3)
             
             if not words:
-                # Fallback to table extraction
-                tables = cropped.extract_tables()
-                for table in tables:
-                    for row_data in table:
-                        if not row_data or all(not cell for cell in row_data):
-                            continue
-                        row_text = " ".join(str(cell or "") for cell in row_data).strip()
-                        if not row_text:
-                            continue
-                        
-                        # Simple classification: has number in first col + qty → item
-                        item_no = str(row_data[0] or "").strip() if len(row_data) > 0 else ""
-                        description = str(row_data[1] or "").strip() if len(row_data) > 1 else row_text
-                        quantity = None
-                        unit = ""
-                        rate = None
-                        total = None
-                        
-                        if len(row_data) > 2:
-                            try:
-                                qty_str = str(row_data[2] or "").strip().replace(",", "")
-                                if qty_str:
-                                    quantity = float(qty_str)
-                            except ValueError:
-                                pass
-                        if len(row_data) > 3:
-                            unit = str(row_data[3] or "").strip()
-                        if len(row_data) > 4:
-                            try:
-                                rate_str = str(row_data[4] or "").strip().replace(",", "")
-                                if rate_str:
-                                    rate = float(rate_str)
-                            except ValueError:
-                                pass
-                        if len(row_data) > 5:
-                            try:
-                                total_str = str(row_data[5] or "").strip().replace(",", "")
-                                if total_str:
-                                    total = float(total_str)
-                            except ValueError:
-                                pass
-                        
-                        # Classification: item if has item_no AND (qty OR unit)
-                        row_type = "item" if (item_no and (quantity is not None or unit)) else "notes"
-                        
-                        rows.append(BQRowResponse(
-                            id=row_id,
-                            file_id=file_id,
-                            page_number=page_num,
-                            page_label=page_label,
-                            revision=revision,
-                            bill_name=bill_name,
-                            collection=collection,
-                            type=row_type,
-                            item_no=item_no,
-                            description=description,
-                            quantity=quantity,
-                            unit=unit,
-                            rate=rate,
-                            total=total
-                        ))
-                        row_id += 1
                 return rows
             
-            # Group words by y-coordinate (tolerance 5px)
-            y_tolerance = 5
-            word_rows: dict[float, list] = {}
+            # Step 1: Group words by Y coordinate into physical rows
+            # Use smaller tolerance to avoid merging different lines
+            y_tolerance = 4
+            physical_rows: list[tuple[float, list]] = []
+            
             for w in words:
-                # Find matching y-row
                 y_mid = (w['top'] + w['bottom']) / 2
-                matched_y = None
-                for y in word_rows.keys():
-                    if abs(y - y_mid) <= y_tolerance:
-                        matched_y = y
+                found = False
+                for i, (row_y, row_words) in enumerate(physical_rows):
+                    if abs(row_y - y_mid) <= y_tolerance:
+                        row_words.append(w)
+                        # Update row_y to average
+                        physical_rows[i] = ((row_y * len(row_words) + y_mid) / (len(row_words) + 1), row_words)
+                        found = True
                         break
-                if matched_y is None:
-                    word_rows[y_mid] = [w]
-                else:
-                    word_rows[matched_y].append(w)
+                if not found:
+                    physical_rows.append((y_mid, [w]))
             
-            # Sort rows by y position
-            sorted_y = sorted(word_rows.keys())
+            # Sort by Y position (top to bottom)
+            physical_rows.sort(key=lambda x: x[0])
             
-            # Process each row
-            for y in sorted_y:
-                row_words = word_rows[y]
+            # Step 2: For each physical row, assign words to columns (HORIZONTAL integration)
+            def parse_number(s: str) -> float | None:
+                """Parse a number string, handling commas"""
+                s = s.replace(",", "").strip()
+                if not s:
+                    return None
+                try:
+                    return float(s)
+                except ValueError:
+                    return None
+            
+            for y_pos, row_words in physical_rows:
+                # Sort words by X position (left to right)
+                row_words.sort(key=lambda w: w['x0'])
                 
-                # Assign words to columns based on x position
-                col_texts: dict[str, str] = {col: "" for col in col_bboxes}
-                unassigned_texts: list[str] = []
+                # Assign each word to a column based on X position
+                col_texts = {col: [] for col in col_bboxes}
+                unassigned = []
                 
                 for w in row_words:
-                    word_x_mid = (w['x0'] + w['x1']) / 2
+                    word_x0 = w['x0']
+                    word_x1 = w['x1']
+                    word_x_mid = (word_x0 + word_x1) / 2
                     text = w['text'].strip()
                     if not text:
                         continue
                     
                     assigned = False
-                    for col_name, (cx0, cy0, cx1, cy1) in col_bboxes.items():
+                    for col_name, (cx0, cx1) in col_bboxes.items():
+                        # Check if word overlaps with column
                         if cx0 <= word_x_mid <= cx1:
-                            col_texts[col_name] = (col_texts[col_name] + " " + text).strip()
+                            col_texts[col_name].append(text)
                             assigned = True
                             break
                     
                     if not assigned:
-                        unassigned_texts.append(text)
+                        unassigned.append(text)
                 
-                # Build row data
-                item_no = col_texts.get("Item", "")
-                description = col_texts.get("Description", "") or " ".join(unassigned_texts)
-                quantity = None
-                unit = col_texts.get("Unit", "")
-                rate = None
-                total = None
+                # Build column values
+                item_no = " ".join(col_texts.get("Item", []))
+                description = " ".join(col_texts.get("Description", []))
+                qty_str = " ".join(col_texts.get("Qty", []))
+                unit = " ".join(col_texts.get("Unit", []))
+                rate_str = " ".join(col_texts.get("Rate", []))
+                total_str = " ".join(col_texts.get("Total", []))
                 
-                # Parse Qty
-                qty_str = col_texts.get("Qty", "").replace(",", "").strip()
-                if qty_str:
-                    try:
-                        quantity = float(qty_str)
-                    except ValueError:
-                        pass
+                # If Description is empty but we have unassigned text, use it
+                if not description and unassigned:
+                    description = " ".join(unassigned)
                 
-                # Parse Rate
-                rate_str = col_texts.get("Rate", "").replace(",", "").strip()
-                if rate_str:
-                    try:
-                        rate = float(rate_str)
-                    except ValueError:
-                        pass
+                # Parse numeric values
+                quantity = parse_number(qty_str)
+                rate = parse_number(rate_str)
+                total = parse_number(total_str)
                 
-                # Parse Total
-                total_str = col_texts.get("Total", "").replace(",", "").strip()
-                if total_str:
-                    try:
-                        total = float(total_str)
-                    except ValueError:
-                        pass
-                
-                # Skip empty rows
-                if not item_no and not description and quantity is None:
+                # Skip completely empty rows
+                if not item_no and not description and quantity is None and not unit:
                     continue
                 
-                # Classification: item if has item_no AND (qty OR unit)
-                row_type = "item" if (item_no and (quantity is not None or unit)) else "notes"
+                # Classification:
+                # - "item" if has Item ref AND (Qty OR Unit has value)
+                # - "notes" otherwise
+                has_item_ref = bool(item_no.strip())
+                has_qty_unit = quantity is not None or bool(unit.strip())
+                row_type = "item" if (has_item_ref and has_qty_unit) else "notes"
                 
                 rows.append(BQRowResponse(
                     id=row_id,
@@ -406,7 +350,7 @@ def _parse_bq_rows(
                 revision=revision,
                 bill_name=bill_name,
                 collection=collection,
-                type="notes",  # Default to notes for simple text extraction
+                type="notes",
                 item_no="",
                 description=line,
                 quantity=None,
