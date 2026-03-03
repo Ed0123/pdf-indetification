@@ -173,6 +173,74 @@ Text extraction follows a two-stage fallback approach per region:
 
 ---
 
+## 5.2  BQ-OCR (Bill of Quantities Extraction)
+
+### Overview
+BQ-OCR extracts structured table data from PDF Bill of Quantities documents using pdfplumber. It handles multi-column layouts with intelligent row merging.
+
+### Feature Access by Tier
+| Tier    | `bq_ocr` | `bq_export` | Quota          |
+|---------|:--------:|:-----------:|----------------|
+| basic   | ❌       | ❌          | 100 pages/mo   |
+| sponsor | ✅       | ✅          | 300 pages/mo   |
+| premium | ✅       | ✅          | 500 pages/mo   |
+| admin   | ✅       | ✅          | Unlimited      |
+
+### Extraction Pipeline
+| Step | Description |
+|------|-------------|
+| 1. Zone Detection | User defines boxes for: `DataRange`, `PageNo`, `Revision`, `BillName`, `Collection` |
+| 2. Column Headers | User defines boxes for columns: `Item`, `Description`, `Qty`, `Unit`, `Rate`, `Total` |
+| 3. Text Extraction | `pdfplumber` extracts all text with coordinates inside DataRange |
+| 4. Column Assignment | Each text block assigned to column based on X-coordinate overlap with header boxes |
+| 5. Line Grouping | Text blocks grouped into lines by Y-coordinate (threshold: median line height) |
+| 6. Row Merging | Consecutive lines merged if Y-distance < 1.5× median line height |
+| 7. Type Classification | Rows classified as: `heading1`, `heading2`, `item`, `notes` based on column population |
+
+### Row Type Classification Logic
+| Type | Condition |
+|------|-----------|
+| `heading1` | Only Description column has text (spans full width) |
+| `heading2` | 2+ columns have text but no Qty/Rate/Total values |
+| `item` | Item column OR Qty/Rate/Total has numeric value |
+| `notes` | All other rows (typically footnotes, continuation text) |
+
+### Response Schema (`BQRowResponse`)
+| Field | Type | Description |
+|-------|------|-------------|
+| `id` | int | Unique ID: `(page_num + 1) * 10000 + row_id` |
+| `page_number` | int | 0-indexed PDF page number |
+| `page_label` | str | Zone-defined label (e.g., "B/1/2") |
+| `revision` | str | Zone-defined revision text |
+| `type` | str | `heading1` \| `heading2` \| `item` \| `notes` |
+| `item_no` | str | Extracted Item column text |
+| `description` | str | Merged Description text |
+| `quantity` | float? | Parsed Qty value |
+| `unit` | str | Unit text |
+| `rate` | float? | Parsed Rate value |
+| `total` | float? | Parsed Total value |
+| `bbox` | dict? | `{x0, y0, x1, y1}` coordinates for UI highlighting |
+
+### Quota Integration
+- BQ extraction counts against the same `usage_pages` as regular OCR
+- Quota cost: 1 page per page processed (pdfplumber)
+- Returns HTTP 429 when quota exceeded
+
+### Export Filters
+| Filter | Options |
+|--------|---------|
+| Page   | All pages / specific page label |
+| Revision | All revisions / specific revision |
+| Type   | All / Items / Notes / Heading1 / Heading2 |
+
+### API Endpoints
+| Method | Path | Auth | Description |
+|--------|------|------|-------------|
+| GET | `/api/bq/engines` | Yes | List available BQ engines |
+| POST | `/api/bq/extract` | Yes | Extract BQ data from pages |
+
+---
+
 ## 6  API Endpoints
 
 ### Health & OCR
