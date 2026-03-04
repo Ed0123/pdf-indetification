@@ -29,9 +29,19 @@ SMTP_HOST = "smtp.gmail.com"
 SMTP_PORT = 587
 
 
+# ──────────────────── Notification helpers ────────────────────────────────────
+
+
 def _is_configured() -> bool:
     """Check if Gmail SMTP credentials are available."""
     return bool(GMAIL_USER and GMAIL_APP_PASSWORD)
+
+
+# log configuration on import so that deploy logs show settings existence
+if _is_configured():
+    logger.info("Email service configured; sender=%s, admin_notify=%s", GMAIL_USER, ADMIN_EMAIL)
+else:
+    logger.warning("Email service not configured; no SMTP credentials found in environment")
 
 
 def _send_email(to: str, subject: str, html_body: str) -> bool:
@@ -99,6 +109,43 @@ def notify_admin_new_user(user_email: str, display_name: str, uid: str) -> bool:
     </p>
 </div>"""
     return _send_email(ADMIN_EMAIL, subject, html)
+
+
+def notify_admin_new_message(user_email: str, user_name: str, body: str) -> bool:
+    """Notify admin that a user has sent a message.
+
+    Sent to ADMIN_EMAIL; body contains the user message.
+    """
+    subject = "📩 新用戶訊息 — PDF 文字擷取系統"
+    html = f"""\
+<div style="font-family: Arial, sans-serif; max-width: 600px;">
+    <h2 style="color: #007acc;">新用戶訊息通知</h2>
+    <p>來自 <strong>{user_name}</strong> ({user_email}) 的訊息：</p>
+    <blockquote style="background:#f7f7f7;padding:10px;border-left:4px solid #007acc;">
+        {body}
+    </blockquote>
+    <p>請至管理員儀表板中的「訊息」面板回覆。</p>
+    <p style="font-size: 12px; color: #555;">提醒：系統會在 7 天後自動刪除所有用戶訊息。</p>
+    <p style="color: #999; font-size: 12px;">此郵件由系統自動發送，請勿直接回覆。</p>
+</div>"""
+    return _send_email(ADMIN_EMAIL, subject, html)
+
+
+def notify_user_reply(user_email: str, user_name: str, reply: str) -> bool:
+    """Notify a user that an admin has replied to their message."""
+    subject = "📤 管理員回覆 — PDF 文字擷取系統"
+    html = f"""\
+<div style="font-family: Arial, sans-serif; max-width: 600px;">
+    <h2 style="color: #28a745;">管理員已回覆您的訊息</h2>
+    <p>{user_name} 您好，</p>
+    <p>以下是管理員的回覆：</p>
+    <blockquote style="background:#f7f7f7;padding:10px;border-left:4px solid #28a745;">
+        {reply}
+    </blockquote>
+    <p>您可以登入系統查看完整訊息歷史。</p>
+    <p style="color: #999; font-size: 12px;">此郵件由系統自動發送，請勿直接回覆。</p>
+</div>"""
+    return _send_email(user_email, subject, html)
 
 
 def notify_user_activated(user_email: str, display_name: str) -> bool:

@@ -12,32 +12,27 @@ interface PDFViewerProps {
   highlightBox?: { x0: number; y0: number; x1: number; y1: number } | null;
   /** PDF page dimensions needed to convert absolute coords to relative */
   pdfPageSize?: { width: number; height: number } | null;
-  /** Text annotations to display on the PDF */
+  /** Text annotations to display on the PDF (draggable overlays) */
   annotations?: TextAnnotation[];
-  /** Callback when user adds a new annotation */
-  onAddAnnotation?: (annotation: TextAnnotation) => void;
-  /** Callback when user deletes an annotation */
-  onDeleteAnnotation?: (annotationId: string) => void;
-  /** Whether annotation mode is enabled */
-  annotationMode?: boolean;
+  /** Callback when user drags an annotation to a new position */
+  onAnnotationMove?: (annotationId: string, newX: number, newY: number) => void;
 }
 
 const MIN_ZOOM = 0.2;
 const MAX_ZOOM = 4.0;
 const ZOOM_STEP = 0.05;
+const RENDER_SCALE = 2.0;
 
-export function PDFViewer({ 
-  fileId, 
-  pageNum, 
-  boxes, 
-  selectedColumn, 
-  onDrawBox, 
-  highlightBox, 
+export function PDFViewer({
+  fileId,
+  pageNum,
+  boxes,
+  selectedColumn,
+  onDrawBox,
+  highlightBox,
   pdfPageSize,
   annotations = [],
-  onAddAnnotation,
-  onDeleteAnnotation,
-  annotationMode = false 
+  onAnnotationMove,
 }: PDFViewerProps) {
   const containerRef = useRef<HTMLDivElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
@@ -48,13 +43,10 @@ export function PDFViewer({
   const [error, setError] = useState<string | null>(null);
   const [zoom, setZoom] = useState(1.0);
   const [pan, setPan] = useState({ x: 0, y: 0 });
-  const [drawing, setDrawing] = useState<{ startX: number; startY: number; curX: number; curY: number } | null>(null);
+  const [drawing, setDrawing] = useState<{
+    startX: number; startY: number; curX: number; curY: number;
+  } | null>(null);
   const [imgNatural, setImgNatural] = useState({ w: 0, h: 0 });
-  
-  // Annotation input state
-  const [annotationInput, setAnnotationInput] = useState<{ x: number; y: number; absX: number; absY: number } | null>(null);
-  const [annotationText, setAnnotationText] = useState("");
-  const annotationInputRef = useRef<HTMLInputElement>(null);
 
   // Fetch page image whenever file/page changes
   useEffect(() => {
@@ -67,7 +59,7 @@ export function PDFViewer({
       .catch((e) => { setError(String(e)); setLoading(false); });
   }, [fileId, pageNum]);
 
-  // Redraw canvas boxes whenever boxes / selectedColumn / zoom / imgNatural / highlightBox change
+  // Redraw canvas: boxes + highlight (annotations are now DOM overlays)
   useEffect(() => {
     const canvas = canvasRef.current;
     const img = imgRef.current;
@@ -86,13 +78,11 @@ export function PDFViewer({
       ctx.lineWidth = lineWidth;
       ctx.setLineDash([]);
       ctx.strokeRect(box.x * displayW, box.y * displayH, box.width * displayW, box.height * displayH);
-      // Label
       ctx.fillStyle = color;
       ctx.font = `${Math.max(11, 13 * zoom)}px sans-serif`;
       ctx.fillText(box.column_name, box.x * displayW + 2, box.y * displayH - 3);
     };
 
-    // Draw all boxes
     Object.values(boxes).forEach((box) => {
       const isSelected = box.column_name === selectedColumn;
       const boxColor = box.color || "#2980b9";
@@ -111,53 +101,20 @@ export function PDFViewer({
       ctx.strokeRect(x, y, w, h);
     }
 
-    // Draw highlight box for BQ row navigation (absolute PDF coords → relative)
+    // Draw highlight box for BQ row navigation
     if (highlightBox && pdfPageSize && pdfPageSize.width > 0 && pdfPageSize.height > 0) {
-      // Convert absolute PDF coordinates to relative 0-1
       const rx = highlightBox.x0 / pdfPageSize.width;
       const ry = highlightBox.y0 / pdfPageSize.height;
       const rw = (highlightBox.x1 - highlightBox.x0) / pdfPageSize.width;
       const rh = (highlightBox.y1 - highlightBox.y0) / pdfPageSize.height;
-      
-      // Draw highlight with orange/yellow color and thicker line
       ctx.strokeStyle = "#f39c12";
       ctx.lineWidth = 3;
       ctx.setLineDash([]);
       ctx.strokeRect(rx * displayW, ry * displayH, rw * displayW, rh * displayH);
-      
-      // Semi-transparent fill
       ctx.fillStyle = "rgba(243, 156, 18, 0.15)";
       ctx.fillRect(rx * displayW, ry * displayH, rw * displayW, rh * displayH);
     }
-
-    // Draw text annotations
-    if (annotations.length > 0 && pdfPageSize && pdfPageSize.width > 0 && pdfPageSize.height > 0) {
-      for (const ann of annotations) {
-        // Convert absolute PDF coordinates to display coordinates
-        // The image render scale is 2.0, so we need to account for that
-        const renderScale = 2.0;
-        const absToDisplayX = (absX: number) => (absX / pdfPageSize.width) * imgNatural.w * zoom / renderScale;
-        const absToDisplayY = (absY: number) => (absY / pdfPageSize.height) * imgNatural.h * zoom / renderScale;
-        
-        const x = absToDisplayX(ann.x);
-        const y = absToDisplayY(ann.y);
-        const fontSize = (ann.font_size ?? 10) * zoom;
-        
-        // Draw text
-        ctx.fillStyle = ann.color ?? "#000000";
-        ctx.font = `${fontSize}px sans-serif`;
-        ctx.fillText(ann.text, x, y);
-        
-        // Draw small indicator if annotation mode is on
-        if (annotationMode) {
-          ctx.fillStyle = "rgba(255, 0, 0, 0.5)";
-          ctx.beginPath();
-          ctx.arc(x - 4, y - fontSize/3, 3, 0, Math.PI * 2);
-          ctx.fill();
-        }
-      }
-    }
-  }, [boxes, selectedColumn, zoom, imgNatural, drawing, highlightBox, pdfPageSize, annotations, annotationMode]);
+  }, [boxes, selectedColumn, zoom, imgNatural, drawing, highlightBox, pdfPageSize]);
 
   // Ctrl+Wheel zoom
   const handleWheel = useCallback((e: React.WheelEvent) => {
@@ -175,67 +132,21 @@ export function PDFViewer({
       pandStartRef.current = { mx: e.clientX, my: e.clientY, px: pan.x, py: pan.y };
       return;
     }
-
-    // Left-button in annotation mode: add annotation
-    if (e.button === 0 && annotationMode && canvasRef.current && pdfPageSize && onAddAnnotation) {
-      const rect = canvasRef.current.getBoundingClientRect();
-      const displayX = e.clientX - rect.left;
-      const displayY = e.clientY - rect.top;
-      
-      // Convert display coordinates to absolute PDF coordinates
-      // Account for zoom and render scale (2.0)
-      const renderScale = 2.0;
-      const absX = (displayX / (imgNatural.w * zoom)) * pdfPageSize.width * renderScale;
-      const absY = (displayY / (imgNatural.h * zoom)) * pdfPageSize.height * renderScale;
-      
-      // Show input at clicked position
-      setAnnotationInput({ x: displayX, y: displayY, absX, absY });
-      setAnnotationText("");
-      setTimeout(() => annotationInputRef.current?.focus(), 50);
-      return;
-    }
-
     // Left-button: box drawing on canvas
     if (e.button !== 0 || !selectedColumn || !canvasRef.current) return;
     const rect = canvasRef.current.getBoundingClientRect();
     const x = e.clientX - rect.left;
     const y = e.clientY - rect.top;
     setDrawing({ startX: x, startY: y, curX: x, curY: y });
-  }, [pan, selectedColumn, annotationMode, pdfPageSize, onAddAnnotation, imgNatural, zoom]);
-
-  // Save annotation when pressing Enter
-  const handleSaveAnnotation = useCallback(() => {
-    if (!annotationInput || !annotationText.trim() || !onAddAnnotation) {
-      setAnnotationInput(null);
-      setAnnotationText("");
-      return;
-    }
-    
-    const newAnnotation: TextAnnotation = {
-      id: `ann-${Date.now()}`,
-      text: annotationText.trim(),
-      x: annotationInput.absX,
-      y: annotationInput.absY,
-      font_size: 10,
-      color: "#000000",
-      created_at: new Date().toISOString(),
-    };
-    
-    onAddAnnotation(newAnnotation);
-    setAnnotationInput(null);
-    setAnnotationText("");
-  }, [annotationInput, annotationText, onAddAnnotation]);
+  }, [pan, selectedColumn]);
 
   const handleMouseMove = useCallback((e: React.MouseEvent<HTMLDivElement>) => {
-    // Pan
     if (pandStartRef.current) {
       const dx = e.clientX - pandStartRef.current.mx;
       const dy = e.clientY - pandStartRef.current.my;
       setPan({ x: pandStartRef.current.px + dx, y: pandStartRef.current.py + dy });
       return;
     }
-
-    // Draw
     if (!drawing || !canvasRef.current) return;
     const rect = canvasRef.current.getBoundingClientRect();
     const x = e.clientX - rect.left;
@@ -244,25 +155,15 @@ export function PDFViewer({
   }, [drawing]);
 
   const handleMouseUp = useCallback((e: React.MouseEvent<HTMLDivElement>) => {
-    if (pandStartRef.current) {
-      pandStartRef.current = null;
-      return;
-    }
-
-    if (!drawing || !canvasRef.current || !selectedColumn) {
-      setDrawing(null);
-      return;
-    }
-
+    if (pandStartRef.current) { pandStartRef.current = null; return; }
+    if (!drawing || !canvasRef.current || !selectedColumn) { setDrawing(null); return; }
     const displayW = canvasRef.current.width;
     const displayH = canvasRef.current.height;
     if (displayW === 0 || displayH === 0) { setDrawing(null); return; }
-
     const x1 = Math.min(drawing.startX, drawing.curX) / displayW;
     const y1 = Math.min(drawing.startY, drawing.curY) / displayH;
     const w = Math.abs(drawing.curX - drawing.startX) / displayW;
     const h = Math.abs(drawing.curY - drawing.startY) / displayH;
-
     if (w > 0.005 && h > 0.005) {
       onDrawBox({ column_name: selectedColumn, x: x1, y: y1, width: w, height: h });
     }
@@ -273,8 +174,32 @@ export function PDFViewer({
     if (imgRef.current) setImgNatural({ w: imgRef.current.naturalWidth, h: imgRef.current.naturalHeight });
   };
 
+  // Coordinate conversion helpers
+  const absToDisplayX = useCallback((absX: number) => {
+    if (!pdfPageSize || pdfPageSize.width <= 0) return 0;
+    return (absX / pdfPageSize.width) * imgNatural.w * zoom / RENDER_SCALE;
+  }, [pdfPageSize, imgNatural.w, zoom]);
+
+  const absToDisplayY = useCallback((absY: number) => {
+    if (!pdfPageSize || pdfPageSize.height <= 0) return 0;
+    return (absY / pdfPageSize.height) * imgNatural.h * zoom / RENDER_SCALE;
+  }, [pdfPageSize, imgNatural.h, zoom]);
+
+  const displayToAbsX = useCallback((dispX: number) => {
+    if (!pdfPageSize || imgNatural.w <= 0) return 0;
+    return (dispX / (imgNatural.w * zoom)) * pdfPageSize.width * RENDER_SCALE;
+  }, [pdfPageSize, imgNatural.w, zoom]);
+
+  const displayToAbsY = useCallback((dispY: number) => {
+    if (!pdfPageSize || imgNatural.h <= 0) return 0;
+    return (dispY / (imgNatural.h * zoom)) * pdfPageSize.height * RENDER_SCALE;
+  }, [pdfPageSize, imgNatural.h, zoom]);
+
   const displayW = imgNatural.w * zoom;
   const displayH = imgNatural.h * zoom;
+
+  // Whether annotations should be interactive (not when drawing boxes)
+  const annotationsInteractive = !selectedColumn;
 
   return (
     <div style={{ display: "flex", flexDirection: "column", height: "100%", overflow: "hidden", background: "#888" }}>
@@ -294,10 +219,10 @@ export function PDFViewer({
         <button style={iconBtn} onClick={() => setZoom((z) => Math.min(MAX_ZOOM, parseFloat((z + 0.1).toFixed(2))))} title="Zoom in">+</button>
         <button style={iconBtn} onClick={() => { setZoom(1.0); setPan({ x: 0, y: 0 }); }} title="Reset">↺</button>
         <span style={{ marginLeft: "auto", opacity: 0.7 }}>
-          {annotationMode 
-            ? `✏️ Click to add text annotation (${annotations.length} on page)` 
-            : selectedColumn 
-              ? `Drawing box for: "${selectedColumn}"` 
+          {annotations.length > 0
+            ? `📝 ${annotations.length} text overlays on page (drag to reposition)`
+            : selectedColumn
+              ? `Drawing box for: "${selectedColumn}"`
               : "Click a table cell to select a column"}
         </span>
       </div>
@@ -305,7 +230,7 @@ export function PDFViewer({
       {/* Page viewport */}
       <div
         ref={containerRef}
-        style={{ flex: 1, overflow: "hidden", position: "relative", cursor: annotationMode ? "text" : selectedColumn ? "crosshair" : "default" }}
+        style={{ flex: 1, overflow: "hidden", position: "relative", cursor: selectedColumn ? "crosshair" : "default" }}
         onWheel={handleWheel}
         onMouseDown={handleMouseDown}
         onMouseMove={handleMouseMove}
@@ -313,12 +238,8 @@ export function PDFViewer({
         onMouseLeave={() => { setDrawing(null); pandStartRef.current = null; }}
         onContextMenu={(e) => e.preventDefault()}
       >
-        {loading && (
-          <div style={centeredOverlay}>Loading page...</div>
-        )}
-        {error && (
-          <div style={{ ...centeredOverlay, color: "#f55" }}>{error}</div>
-        )}
+        {loading && <div style={centeredOverlay}>Loading page...</div>}
+        {error && <div style={{ ...centeredOverlay, color: "#f55" }}>{error}</div>}
         {!loading && !imgSrc && !error && (
           <div style={centeredOverlay}>Select a page from the tree to view it here</div>
         )}
@@ -355,48 +276,149 @@ export function PDFViewer({
                 height: displayH,
               }}
             />
-            {/* Annotation text input */}
-            {annotationInput && (
-              <div
-                style={{
-                  position: "absolute",
-                  left: annotationInput.x,
-                  top: annotationInput.y,
-                  zIndex: 100,
+            {/* Draggable annotation overlays */}
+            {pdfPageSize && pdfPageSize.width > 0 && annotations.map((ann) => (
+              <DraggableAnnotation
+                key={ann.id}
+                annotation={ann}
+                displayX={absToDisplayX(ann.x)}
+                displayY={absToDisplayY(ann.y)}
+                zoom={zoom}
+                interactive={annotationsInteractive}
+                onDragEnd={(newDispX, newDispY) => {
+                  if (onAnnotationMove) {
+                    onAnnotationMove(ann.id, displayToAbsX(newDispX), displayToAbsY(newDispY));
+                  }
                 }}
-              >
-                <input
-                  ref={annotationInputRef}
-                  type="text"
-                  value={annotationText}
-                  onChange={(e) => setAnnotationText(e.target.value)}
-                  onKeyDown={(e) => {
-                    if (e.key === "Enter") {
-                      handleSaveAnnotation();
-                    } else if (e.key === "Escape") {
-                      setAnnotationInput(null);
-                      setAnnotationText("");
-                    }
-                  }}
-                  onBlur={handleSaveAnnotation}
-                  placeholder="Type text..."
-                  style={{
-                    padding: "2px 4px",
-                    border: "1px solid #333",
-                    borderRadius: 2,
-                    fontSize: 12,
-                    minWidth: 100,
-                    background: "rgba(255,255,255,0.95)",
-                  }}
-                />
-              </div>
-            )}
+              />
+            ))}
           </div>
         )}
       </div>
     </div>
   );
 }
+
+// ─── Draggable Annotation Overlay ──────────────────────────────────────────
+
+interface DraggableAnnotationProps {
+  annotation: TextAnnotation;
+  displayX: number;
+  displayY: number;
+  zoom: number;
+  interactive: boolean;
+  onDragEnd: (newDisplayX: number, newDisplayY: number) => void;
+}
+
+function DraggableAnnotation({
+  annotation,
+  displayX,
+  displayY,
+  zoom,
+  interactive,
+  onDragEnd,
+}: DraggableAnnotationProps) {
+  const [dragging, setDragging] = useState(false);
+  const [offset, setOffset] = useState({ dx: 0, dy: 0 });
+  const [hovered, setHovered] = useState(false);
+  const dragStartRef = useRef<{ mouseX: number; mouseY: number } | null>(null);
+
+  const fontSize = (annotation.font_size ?? 10) * zoom;
+  const isBold = annotation.bold;
+  const color = annotation.color ?? "#0000FF";
+
+  // Determine background color based on annotation type (from color hint)
+  const bgColor = color === "#008000" || color === "green"
+    ? "rgba(200, 255, 200, 0.85)"    // Green bg for page totals
+    : color === "#0000FF" || color === "blue"
+      ? "rgba(220, 230, 255, 0.85)"  // Blue bg for user edits
+      : "rgba(255, 255, 220, 0.85)"; // Yellow bg for others
+
+  const handleMouseDown = useCallback((e: React.MouseEvent) => {
+    if (!interactive) return;
+    e.preventDefault();
+    e.stopPropagation();
+    dragStartRef.current = { mouseX: e.clientX, mouseY: e.clientY };
+    setDragging(true);
+    setOffset({ dx: 0, dy: 0 });
+
+    const onMove = (ev: MouseEvent) => {
+      if (!dragStartRef.current) return;
+      setOffset({
+        dx: ev.clientX - dragStartRef.current.mouseX,
+        dy: ev.clientY - dragStartRef.current.mouseY,
+      });
+    };
+
+    const onUp = (ev: MouseEvent) => {
+      if (dragStartRef.current) {
+        const dx = ev.clientX - dragStartRef.current.mouseX;
+        const dy = ev.clientY - dragStartRef.current.mouseY;
+        if (Math.abs(dx) > 2 || Math.abs(dy) > 2) {
+          onDragEnd(displayX + dx, displayY + dy);
+        }
+      }
+      setDragging(false);
+      setOffset({ dx: 0, dy: 0 });
+      dragStartRef.current = null;
+      document.removeEventListener("mousemove", onMove);
+      document.removeEventListener("mouseup", onUp);
+    };
+
+    document.addEventListener("mousemove", onMove);
+    document.addEventListener("mouseup", onUp);
+  }, [interactive, displayX, displayY, onDragEnd]);
+
+  const finalX = displayX + (dragging ? offset.dx : 0);
+  const finalY = displayY + (dragging ? offset.dy : 0);
+
+  return (
+    <div
+      onMouseDown={handleMouseDown}
+      onMouseEnter={() => setHovered(true)}
+      onMouseLeave={() => { if (!dragging) setHovered(false); }}
+      style={{
+        position: "absolute",
+        left: finalX,
+        top: finalY - fontSize - 2,
+        fontSize,
+        lineHeight: 1.15,
+        color,
+        background: dragging
+          ? "rgba(255, 255, 150, 0.95)"
+          : hovered
+            ? bgColor
+            : bgColor.replace("0.85", "0.6"),
+        border: `1px solid ${
+          dragging ? "#e74c3c" : hovered ? color : "rgba(0,0,0,0.08)"
+        }`,
+        borderRadius: 2,
+        padding: `${Math.max(1, 1.5 * zoom)}px ${Math.max(2, 3 * zoom)}px`,
+        cursor: interactive ? (dragging ? "grabbing" : "grab") : "default",
+        userSelect: "none",
+        whiteSpace: "nowrap",
+        zIndex: dragging ? 100 : hovered ? 50 : 10,
+        fontFamily: "sans-serif",
+        fontWeight: isBold ? 700 : 400,
+        boxShadow: dragging
+          ? "0 3px 10px rgba(0,0,0,0.35)"
+          : hovered
+            ? "0 1px 4px rgba(0,0,0,0.2)"
+            : "none",
+        transition: dragging
+          ? "none"
+          : "box-shadow 0.15s, background 0.15s, border-color 0.15s",
+        pointerEvents: interactive ? "auto" : "none",
+        letterSpacing: "0.02em",
+      }}
+      title={interactive ? "拖曳以移動位置" : ""}
+    >
+      {annotation.text}
+    </div>
+  );
+}
+
+// ─── Styles ─────────────────────────────────────────────────────────────────
 
 const iconBtn: React.CSSProperties = {
   padding: "1px 8px",

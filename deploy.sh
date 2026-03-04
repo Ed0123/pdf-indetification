@@ -1,5 +1,22 @@
 #!/usr/bin/env bash
 # deploy.sh – Build and deploy frontend to Firebase Hosting + backend to Cloud Run
+#
+# This script is invoked by human or by our AI deployment agent.  It performs
+# a full release: builds the React frontend, deploys the Python backend to
+# Cloud Run, then publishes the frontend to Firebase Hosting.
+#
+# IMPORTANT: the backend uses Gmail SMTP for notification emails.  Three
+# environment variables **must** be provided in the shell before running this
+# script or via a preceding `gcloud run services update` call:
+#
+#     GMAIL_USER           – sender address (mcqshk@gmail.com)
+#     GMAIL_APP_PASSWORD   – 16‑character App Password (Google Account > Security > App Passwords)
+#     ADMIN_NOTIFY_EMAIL   – (optional) recipient for new-user alerts; default is GMAIL_USER
+#
+# If the agent runs this script, it must set those vars (or the run will
+# succeed but email functionality will be disabled); the script itself will
+# remind and then automatically persist them to the Cloud Run service.
+#
 # Usage: ./deploy.sh <GCP_PROJECT_ID> <CLOUD_RUN_REGION>
 #   e.g. ./deploy.sh my-firebase-project asia-east1
 
@@ -8,6 +25,15 @@ set -e
 PROJECT="${1:?Please pass GCP project ID as first arg}"
 REGION="${2:-asia-east1}"
 SERVICE="pdf-backend"
+
+# ensure required Gmail credentials are present; deployment without them will
+# result in a working service but with email notifications permanently
+# disabled, which confuses our automation.
+if [[ -z "$GMAIL_USER" || -z "$GMAIL_APP_PASSWORD" ]]; then
+  echo "ERROR: GMAIL_USER and GMAIL_APP_PASSWORD must be set in the environment."
+  echo "Set them before running deploy.sh or have the agent provide them."
+  exit 1
+fi
 
 echo "=== 1. Build React frontend ==="
 cd frontend
@@ -18,13 +44,36 @@ cd ..
 
 echo "=== 2. Deploy backend to Cloud Run ==="
 STORAGE_BUCKET="${PROJECT}.firebasestorage.app"
+# gather optional Gmail credentials from environment (must be set manually beforehand)
+if [[ -z "$GMAIL_USER" || -z "$GMAIL_APP_PASSWORD" ]]; then
+  echo "WARNING: GMAIL_USER and/or GMAIL_APP_PASSWORD not set in environment."
+  echo "  Email notifications will be disabled unless you add them later with `gcloud run services update`"
+fi
+# include ADMIN_NOTIFY_EMAIL if provided
+ENV_VARS="STORAGE_BUCKET=${STORAGE_BUCKET}"
+[[ -n "$GMAIL_USER" ]] && ENV_VARS=",${ENV_VARS},GMAIL_USER=${GMAIL_USER}"
+[[ -n "$GMAIL_APP_PASSWORD" ]] && ENV_VARS=",${ENV_VARS},GMAIL_APP_PASSWORD=${GMAIL_APP_PASSWORD}"
+[[ -n "$ADMIN_NOTIFY_EMAIL" ]] && ENV_VARS=",${ENV_VARS},ADMIN_NOTIFY_EMAIL=${ADMIN_NOTIFY_EMAIL}"
+
+# remove leading comma
+ENV_VARS=${ENV_VARS#,}
+
 gcloud run deploy "${SERVICE}" \
   --source . \
   --region "${REGION}" \
   --project "${PROJECT}" \
   --allow-unauthenticated \
   --port 8080 \
-  --set-env-vars "STORAGE_BUCKET=${STORAGE_BUCKET}"
+  --set-env-vars "${ENV_VARS}"
+
+# after deploy, reapply env vars to ensure persistence across revisions
+if [[ -n "$GMAIL_USER" || -n "$GMAIL_APP_PASSWORD" || -n "$ADMIN_NOTIFY_EMAIL" ]]; then
+  echo "Re-applying environment variables to service configuration..."
+  gcloud run services update "${SERVICE}" \
+    --region "${REGION}" \
+    --project "${PROJECT}" \
+    --update-env-vars "${ENV_VARS}"
+fi
 
 BACKEND_URL=$(gcloud run services describe "${SERVICE}" --region="${REGION}" --project="${PROJECT}" --format="value(status.url)")
 

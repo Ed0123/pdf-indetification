@@ -27,6 +27,7 @@ from backend.routers import templates as templates_router
 from backend.routers import cloud_projects as cloud_projects_router
 from backend.routers import bq as bq_router
 from backend.routers import bq_templates as bq_templates_router
+from backend.routers import messages as messages_router
 from backend.firebase_setup import init_firebase
 
 app = FastAPI(
@@ -52,6 +53,7 @@ app.include_router(pdf_export_router.router, prefix="/api/pdf", tags=["PDF Expor
 app.include_router(users_router.router, prefix="/api/users", tags=["Users"])
 app.include_router(templates_router.router, prefix="/api/templates", tags=["Templates"])
 app.include_router(cloud_projects_router.router, prefix="/api/projects/cloud", tags=["Cloud Projects"])
+app.include_router(messages_router.router, prefix="/api", tags=["Messages"])
 app.include_router(bq_router.router)  # BQ router has its own prefix
 app.include_router(bq_templates_router.router, prefix="/api/bq/templates", tags=["BQ Templates"])
 

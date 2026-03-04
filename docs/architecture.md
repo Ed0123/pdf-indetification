@@ -53,7 +53,22 @@
   - WhatsApp*
 - `"pending"` and `"suspended"` users are locked to the MyAccount page.
 - Only `"active"` users can access the main app.
-
+### 2.2.1 Session & Draft Management
+- Frontend installs a callback so that when **any API request** returns 401 even
+  after forcing a token refresh the app immediately shows a toast and redirects
+  to the login page.  This prevents the UI from becoming unresponsive after the
+  Firebase token expires.
+- A periodic keep‑alive ping (`recordUsage(0)`) runs every 30 minutes while the
+  user is logged in; it touches the Firebase SDK to ensure tokens are kept
+  fresh even if the tab is backgrounded or browser timers are throttled.
+- After 6 hours of no mouse/keyboard/touch activity the client automatically
+  signs the user out for security.  State is preserved in IndexedDB before the
+  logout, so the user can restore their project on next login.
+- Draft payloads now optionally include the original PDF `File` objects.  When
+  a draft is restored the user is warned and, if necessary, any missing
+  server‑side temporary files are transparently re‑uploaded using the cached
+  blobs.  This makes recovery from container restarts or cache evictions much
+  smoother.
 ### 2.3 Membership Tiers
 
 | Tier      | Monthly OCR Pages | Label              |
@@ -74,10 +89,17 @@
 - Cloud storage shows `storage_used_bytes` formatted as KB/MB.
 - Filter by name/email/phone.
 - Inline editing of: status, tier, group, notes.
+- **User messaging:** new "✉ 訊息" tab displays all messages sent via `/api/messages/`. Admins can reply inline; replies update the Firestore doc and trigger an email back to the user.
+  - Users are informed in the UI that their message will be automatically removed after 7 days, and admins receive the same reminder in the notification email.
 
 ---
 
 ## 3  Frontend UI Layout
+
+The left-hand **ActivityBar** displays navigation modules in a grouped order:
+**Templates** first, then the core tools (Page View / Excel Export / PDF Export),
+and finally the BQ features. Vertical separators appear between these groups.
+
 
 ```
 ┌─────────────────────────────────────────────────────────────┐
@@ -137,6 +159,7 @@
 - Owner shows "我" for own templates, "他人" for others.
 - **Filter input** at top — filters by name, column names, notes, owner, and ID.
 - `currentUserUid` prop passed from App for ownership display.
+- Templates now display a thumbnail of the preview page; page templates upload an image to Cloud Storage and BQ templates follow the same mechanism so the preview is visible even when the source PDF isn't loaded.
 
 ---
 
@@ -186,6 +209,18 @@ BQ-OCR extracts structured table data from PDF Bill of Quantities documents usin
 | premium | ✅       | ✅          | 500 pages/mo   |
 | admin   | ✅       | ✅          | Unlimited      |
 
+### Batch Extraction UI Enhancements
+- Users may now supply a page-range string (e.g. `1-100`, `5,10-20,25-80`) when
+  performing a BQ‑OCR batch; the panel accepts the input beside the batch
+  button and will parse it automatically.
+- The page selector dialog includes the same range field, plus a live count
+  and visual feedback when the selection would exceed the per‑batch
+  200‑page limit or the user's remaining OCR quota.  The dialog also shows
+  current usage and remaining quota so operators can make informed choices.
+- While a batch extraction is running the entire BQ‑OCR panel is covered by a
+  translucent overlay with a progress bar; all controls are disabled until
+  processing completes.
+
 ### Extraction Pipeline
 | Step | Description |
 |------|-------------|
@@ -225,6 +260,9 @@ BQ-OCR extracts structured table data from PDF Bill of Quantities documents usin
 - BQ extraction counts against the same `usage_pages` as regular OCR
 - Quota cost: 1 page per page processed (pdfplumber)
 - Returns HTTP 429 when quota exceeded
+- **Admin API fix:** listing users now performs a monthly reset on each
+  profile so the admin panel always reflects the current month's usage even
+  if the user has not yet triggered an OCR operation.
 
 ### Export Filters
 | Filter | Options |
@@ -276,6 +314,14 @@ BQ-OCR extracts structured table data from PDF Bill of Quantities documents usin
 | GET    | `/api/users/`            | Admin | List all users         |
 | PUT    | `/api/users/{uid}`       | Admin | Update any user        |
 | POST   | `/api/users/usage/record`| User  | Record OCR usage       |
+| POST   | `/api/users/message`     | User | Send a message to admin |
+| GET    | `/api/users/message`     | User | List own messages      |
+
+### Messages (Admin-only)
+| Method | Path                       | Description |
+|--------|----------------------------|-------------|
+| GET    | `/api/messages/`           | List all user messages (admin) |
+| PUT    | `/api/messages/{id}/reply` | Reply to a message (admin) |
 
 ### Templates (Cloud)
 | Method | Path                       | Auth  | Description          |
@@ -325,6 +371,11 @@ BQ-OCR extracts structured table data from PDF Bill of Quantities documents usin
 - **Default persistence:** IndexedDB autosave (local, automatic)
 - **Cloud button:** "☁ 雲端儲存" — opens CloudProjectsPanel for full JSON+PDF cloud management
 
+### Toolbar & UI adjustments (Phase 10)
+- **Toolbar slimmed:** only Import and Cloud actions remain; export/recognize/template/pdf-export buttons moved into the data table area
+- **Clear Data:** removed entirely (no longer used)
+- **Delete File:** button relocated into PDF tree view header for contextual operations
+
 ### TTL & Permanent Storage
 - New projects default to `permanent: false` with `expires_at: now + 14 days`
 - Each update/load resets the 14-day TTL
@@ -350,6 +401,7 @@ backend/
     users.py                 # User profile, admin, usage tracking
     templates.py             # Cloud template CRUD
     cloud_projects.py        # Cloud project CRUD, upload-full, load-full, TTL
+    messages.py              # User-admin messaging (send/reply), Firestore sync
 
 frontend/
   src/
@@ -367,6 +419,7 @@ frontend/
       LoginPage.tsx          # Google sign-in page
       MyAccountPage.tsx      # Profile editing, usage stats, membership info
       AdminPanel.tsx         # User management table + cloud storage column (admin only)
+      AdminMessagesPanel.tsx # Admin messaging UI (send/reply to users)
       Toolbar.tsx            # Top toolbar (Import, Cloud, Templates, etc.)
       PDFTreeView.tsx        # Left panel — PDF file/page tree
       DataTable.tsx          # Multi-file extraction data table
@@ -410,8 +463,14 @@ gcloud run deploy pdf-backend \
 | `VITE_FIREBASE_APP_ID`           | Frontend | Firebase app ID                |
 | `VITE_API_URL`                   | Frontend | Backend URL (Cloud Run)        |
 | `GOOGLE_APPLICATION_CREDENTIALS` | Backend  | Path to service account JSON   |
+| `GMAIL_USER`                     | Backend  | Gmail sender address           |
+| `GMAIL_APP_PASSWORD`             | Backend  | Gmail App Password (16-char)   |
+| `ADMIN_NOTIFY_EMAIL`             | Backend  | Admin notification recipient   |
 
+*Deployment script:* `deploy.sh` now reads `GMAIL_USER`, `GMAIL_APP_PASSWORD` and optional `ADMIN_NOTIFY_EMAIL` from the shell environment, passes them to `gcloud run deploy` and then reapplies them with `gcloud run services update` to guarantee they persist across revisions.  **The script will now early‑abort with an error if `GMAIL_USER` or `GMAIL_APP_PASSWORD` are not provided**, which forces any automated agent to supply them before running.
 ---
+
+*Note:* the Gmail-related environment variables (`GMAIL_USER`, `GMAIL_APP_PASSWORD`, `ADMIN_NOTIFY_EMAIL`) must be set on the Cloud Run **service configuration** (via `gcloud run services update --update-env-vars` or the Cloud Console). These values do **not** automatically carry forward when a new revision is built from source; starting without them results in disabled email notifications and a warning logged at startup.
 
 ## 9  Testing
 

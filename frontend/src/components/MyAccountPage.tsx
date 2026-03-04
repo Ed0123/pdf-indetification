@@ -39,6 +39,11 @@ export function MyAccountPage({
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [success, setSuccess] = useState(false);
+  const [showContact, setShowContact] = useState(false);
+  const [msgBody, setMsgBody] = useState("");
+  const [msgSending, setMsgSending] = useState(false);
+  const [msgError, setMsgError] = useState<string | null>(null);
+  const [msgSuccess, setMsgSuccess] = useState(false);
 
   useEffect(() => {
     if (!profile) return;
@@ -74,6 +79,24 @@ export function MyAccountPage({
     }
   };
 
+  // handle contact-admin
+  const handleSendMessage = async () => {
+    if (!msgBody.trim()) return;
+    setMsgSending(true);
+    setMsgError(null);
+    setMsgSuccess(false);
+    try {
+      const { sendUserMessage } = await import("../api/client");
+      await sendUserMessage(msgBody.trim());
+      setMsgSuccess(true);
+      setMsgBody("");
+    } catch (err: any) {
+      setMsgError(err?.message || "送出失敗");
+    } finally {
+      setMsgSending(false);
+    }
+  };
+
   // Compute usage display
   const usedPages = profile?.usage_pages ?? 0;
   const limit = usageLimit === -1 ? Infinity : usageLimit;
@@ -98,6 +121,13 @@ export function MyAccountPage({
             )}
             <button style={{ ...linkBtn, color: "#c0392b" }} onClick={onSignOut}>登出</button>
           </div>
+        </div>
+        {/* contact admin button */}
+        <div style={{ marginTop: 8 }}>
+          <button
+            style={{ ...linkBtn, fontSize: 13 }}
+            onClick={() => setShowContact(!showContact)}
+          >聯絡管理員</button>
         </div>
 
         {/* Status banner */}
@@ -152,6 +182,31 @@ export function MyAccountPage({
             {saving ? "儲存中…" : isNewUser ? "完成註冊" : "💾 儲存"}
           </button>
         </div>
+
+        {/* contact admin panel */}
+        {showContact && (
+          <div style={{ marginTop: 20, padding: 14, border: "1px solid #007acc", borderRadius: 6, background: "#f0f8ff" }}>
+            <h3 style={{ margin: "0 0 8px", fontSize: 14 }}>📨 給管理員的訊息</h3>
+            <textarea
+              style={{ width: "100%", height: 80, padding: 8 }}
+              value={msgBody}
+              onChange={(e) => setMsgBody(e.target.value)}
+              placeholder="在此輸入你的訊息"
+            />
+            <p style={{ fontSize: 12, color: "#555", marginTop: 6 }}>
+              備註：系統會在 7 天後自動刪除這些訊息，請儘速查看回覆。
+            </p>
+            <div style={{ marginTop: 8, display: "flex", gap: 8 }}>
+              <button
+                style={primaryBtn}
+                disabled={msgSending || !msgBody.trim()}
+                onClick={handleSendMessage}
+              >{msgSending ? "送出中…" : "送出"}</button>
+              {msgError && <span style={{ color: "#c0392b" }}>{msgError}</span>}
+              {msgSuccess && <span style={{ color: "#27ae60" }}>已送出</span>}
+            </div>
+          </div>
+        )}
 
         {/* Usage / membership info (only show after first save) */}
         {profile && !isNewUser && (

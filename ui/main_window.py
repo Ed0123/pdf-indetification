@@ -232,17 +232,6 @@ class MainWindow(QMainWindow):
         
         toolbar.addSeparator()
         
-        # Clear Extracted Data
-        self.action_clear = QAction("Clear Data", self)
-        self.action_clear.setToolTip("Clear extracted data for selected pages")
-        self.action_clear.triggered.connect(self._on_clear_data)
-        toolbar.addAction(self.action_clear)
-        
-        # Delete PDF Files
-        self.action_delete = QAction("Delete PDFs", self)
-        self.action_delete.setToolTip("Remove selected PDF files from the project")
-        self.action_delete.triggered.connect(self._on_delete_files)
-        toolbar.addAction(self.action_delete)
         
         toolbar.addSeparator()
         
@@ -291,6 +280,8 @@ class MainWindow(QMainWindow):
         """Connect signals between components."""
         # Tree -> show page in viewer and highlight in table
         self.pdf_tree.page_selected.connect(self._on_page_selected)
+        # handle deletion request coming from tree header button
+        self.pdf_tree.file_delete_requested.connect(self._on_delete_files)
         
         # Table cell selected -> highlight box in viewer and set active column
         self.data_table.cell_selected.connect(self._on_table_cell_selected)
@@ -585,43 +576,16 @@ class MainWindow(QMainWindow):
             QMessageBox.critical(self, "Load Error", f"Failed to load: {e}")
             self._update_status("Load failed")
     
-    def _on_clear_data(self) -> None:
-        """Clear extracted data for selected pages."""
-        selected = self.pdf_tree.get_selected_pages()
-        if not selected:
-            QMessageBox.information(self, "Info", "No pages selected.")
-            return
-        
-        reply = QMessageBox.question(
-            self, "Confirm",
-            f"Clear extracted data for {len(selected)} page(s)?",
-            QMessageBox.Yes | QMessageBox.No,
-        )
-        if reply != QMessageBox.Yes:
-            return
-        
-        # C2: Show progress bar for clear operation
-        self._update_status("Clearing extracted data...")
-        total = len(selected)
-        for idx, (file_path, page_num) in enumerate(selected):
-            pdf_file = self._project_data.get_file_by_path(file_path)
-            if pdf_file:
-                page = pdf_file.get_page(page_num)
-                if page:
-                    page.clear_all_data()
-            self._show_progress(idx + 1, total)
-        
-        self._refresh_all()
-        
-        # Refresh viewer boxes if current page was affected
-        if (self._current_file_path, self._current_page_num) in selected:
-            self.pdf_viewer.set_boxes([])
-        
-        self._update_status("Extracted data cleared")
     
-    def _on_delete_files(self) -> None:
-        """Delete selected PDF files from the project."""
-        file_paths = self.pdf_tree.get_selected_file_paths()
+    def _on_delete_files(self, file_paths=None) -> None:
+        """Delete selected PDF files from the project.
+
+        Accepts an optional list of paths when invoked via the tree view's
+        delete button signal. Otherwise queries the tree for the current
+        selection.
+        """
+        if file_paths is None:
+            file_paths = self.pdf_tree.get_selected_file_paths()
         if not file_paths:
             QMessageBox.information(self, "Info", "No files selected.")
             return

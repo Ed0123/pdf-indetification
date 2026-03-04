@@ -1,8 +1,10 @@
 /**
  * IndexedDB-based autosave / restore for project drafts.
  *
- * Stores the full project state (minus heavy PDF bytes which stay on the
- * server) so that a page refresh doesn't lose work.
+ * Stores the full project state.  By default the heavy PDF bytes live only on
+ * the server, but we may optionally cache them here as `pdf_blobs` (stored as
+ * File objects) so that projects can be restored even if the backend temp
+ * files have been cleaned up.
  *
  * Storage layout (IndexedDB):
  *   DB name : "pdf_id_drafts"
@@ -21,6 +23,8 @@ export interface DraftPayload {
   templates: any[];
   last_selected_file: string;
   last_selected_page: number;
+  /** optional map of file_id → File for the original PDF bytes */
+  pdf_blobs?: { [file_id: string]: File };
 }
 
 interface DraftRecord {

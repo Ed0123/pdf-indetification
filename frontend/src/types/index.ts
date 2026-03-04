@@ -53,6 +53,22 @@ export interface Template {
   owner_name?: string;              // Display name: "我" for self, uid prefix for others
 }
 
+// ---------------------------------------------------------------------------
+// User–admin messaging
+
+export interface UserMessage {
+  id: string;
+  user_uid: string;
+  user_email: string;
+  user_name: string;
+  body: string;
+  created_at: string;
+  reply?: string;
+  replied_at?: string;
+  replied_by?: string;
+  status?: string;
+}
+
 /** Full application state (serialised to JSON for Save/Load). */
 export interface ProjectState {
   pdf_files: PDFFileInfo[];
@@ -114,6 +130,7 @@ export interface TextAnnotation {
   y: number;                          // Y position (absolute PDF coordinates)
   font_size?: number;                 // Font size (default 10)
   color?: string;                     // Hex color (default #000000)
+  bold?: boolean;                     // Bold text
   created_at?: string;                // ISO date string
 }
 
@@ -134,6 +151,8 @@ export interface BQPageData {
   };
   // User-added text annotations
   annotations?: TextAnnotation[];      // Text annotations on this page
+  // User-adjusted annotation positions (keyed by annotation ID)
+  annotation_positions?: Record<string, { x: number; y: number }>;
 }
 
 /** BQ Template - saved box configuration for BQ extraction */
@@ -148,6 +167,7 @@ export interface BQTemplate {
   owner_name?: string;
   permission?: string;               // "personal" | "public" | "group"
   group?: string;                    // Group name for group-level sharing
+  page_image_path?: string | null;   // optional storage path returned from API
 }
 
 /** Available BQ OCR engines */

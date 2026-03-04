@@ -3,7 +3,7 @@
  * Supports checkbox per page, Shift-click range, Ctrl-click toggle,
  * and Select All / Deselect All.
  */
-import React, { useState, useRef } from "react";
+import React, { useState, useRef, useEffect } from "react";
 import type { PDFFileInfo } from "../types";
 
 export interface SelectedPage {
@@ -18,6 +18,12 @@ interface PageSelectorModalProps {
   confirmLabel?: string;
   /** Pre-selected pages */
   initialSelected?: { file_id: string; page_number: number }[];
+  /** current usage pages (optional) */
+  usagePages?: number;
+  /** usage limit (-1 = unlimited) */
+  usageLimit?: number;
+  /** maximum pages allowed for this batch */
+  maxPages?: number;
   onConfirm: (pages: SelectedPage[]) => void;
   onCancel: () => void;
 }
@@ -27,6 +33,9 @@ export function PageSelectorModal({
   title,
   confirmLabel = "Apply",
   initialSelected,
+  usagePages,
+  usageLimit,
+  maxPages,
   onConfirm,
   onCancel,
 }: PageSelectorModalProps) {
@@ -44,9 +53,39 @@ export function PageSelectorModal({
   );
 
   const [selected, setSelected] = useState<Set<string>>(initSet);
+  const [rangeText, setRangeText] = useState<string>("");
   const lastClickedIdx = useRef<number | null>(null);
 
   const key = (r: SelectedPage) => `${r.file_id}::${r.page_number}`;
+
+  // parse range string like "1-3,5" and return indices
+  const parseRanges = (text: string): number[] => {
+    const idxs = new Set<number>();
+    text
+      .split(",")
+      .map((t) => t.trim())
+      .forEach((tok) => {
+        if (!tok) return;
+        const dash = tok.indexOf("-");
+        if (dash !== -1) {
+          const a = parseInt(tok.slice(0, dash), 10);
+          const b = parseInt(tok.slice(dash + 1), 10);
+          if (!isNaN(a) && !isNaN(b)) {
+            for (let n = a; n <= b; n++) idxs.add(n - 1);
+          }
+        } else {
+          const n = parseInt(tok, 10);
+          if (!isNaN(n)) idxs.add(n - 1);
+        }
+      });
+    return [...idxs];
+  };
+
+  // helper to lookup page by flattened index
+  const pageAtIndex = (idx: number): SelectedPage | null => {
+    if (idx < 0 || idx >= allRows.length) return null;
+    return allRows[idx];
+  };
 
   const toggle = (idx: number, e: React.MouseEvent) => {
     const row = allRows[idx];
@@ -79,6 +118,21 @@ export function PageSelectorModal({
     lastClickedIdx.current = idx;
   };
 
+  // whenever rangeText changes we recalc selected set
+  useEffect(() => {
+    if (rangeText.trim()) {
+      const indices = parseRanges(rangeText);
+      setSelected(() => {
+        const next = new Set<string>();
+        indices.forEach((i) => {
+          const row = pageAtIndex(i);
+          if (row) next.add(key(row));
+        });
+        return next;
+      });
+    }
+  }, [rangeText]);
+
   const handleConfirm = () => {
     onConfirm(allRows.filter((r) => selected.has(key(r))));
   };
@@ -91,7 +145,16 @@ export function PageSelectorModal({
       <div style={modal}>
         {/* Header */}
         <div style={header}>
-          <span style={{ fontWeight: 700, fontSize: 15 }}>{title}</span>
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
+            <span style={{ fontWeight: 700, fontSize: 15 }}>{title}</span>
+            <input
+              style={{ ...pageSelect, width: 200 }}
+              placeholder="輸入頁碼或範圍 e.g. 1-5,7"
+              value={rangeText}
+              onChange={(e) => setRangeText(e.target.value)}
+              disabled={false}
+            />
+          </div>
           <span style={{ color: "#888", fontSize: 12 }}>
             {selected.size} / {allRows.length} selected
           </span>
@@ -151,10 +214,30 @@ export function PageSelectorModal({
           ))}
         </div>
 
+        {/* Quota / limit messages */}
+        {(usageLimit !== undefined && usagePages !== undefined) && (
+          <div style={{ fontSize: 11, color: "#555", padding: "4px 16px" }}>
+            使用量：{usagePages} / {usageLimit === -1 ? "∞" : usageLimit} 頁；
+            選取 {selected.size} 頁，將消耗 {selected.size} 頁配額。
+            {usageLimit !== -1 && usagePages + selected.size > usageLimit && (
+              <span style={{ color: "#e74c3c" }}>配額不足</span>
+            )}
+          </div>
+        )}
+        {maxPages !== undefined && selected.size > maxPages && (
+          <div style={{ fontSize: 11, color: "#e74c3c", padding: "4px 16px" }}>
+            選取頁數超過上限 {maxPages} 頁
+          </div>
+        )}
+
         {/* Footer */}
         <div style={footer}>
           <button style={btnSecondary} onClick={onCancel}>Cancel</button>
-          <button style={btnPrimary} onClick={handleConfirm} disabled={selected.size === 0}>
+          <button style={btnPrimary} onClick={handleConfirm} disabled={
+            selected.size === 0 ||
+            (usageLimit !== undefined && usagePages !== undefined && usageLimit !== -1 && usagePages + selected.size > usageLimit) ||
+            (maxPages !== undefined && selected.size > maxPages)
+          }>
             {confirmLabel} ({selected.size})
           </button>
         </div>
@@ -190,6 +273,14 @@ const btnBase: React.CSSProperties = {
 };
 const btnSecondary = { ...btnBase, background: "#f5f5f5" };
 const btnPrimary = { ...btnBase, background: "#2980b9", color: "#fff", border: "1px solid #2471a3" };
+const pageSelect: React.CSSProperties = {
+  padding: "4px 8px",
+  fontSize: 12,
+  border: "1px solid #ddd",
+  borderRadius: 4,
+  maxWidth: 200,
+};
+
 const smBtn: React.CSSProperties = {
   padding: "3px 10px", border: "1px solid #ccc", borderRadius: 3,
   background: "#f5f5f5", cursor: "pointer", fontSize: 12,

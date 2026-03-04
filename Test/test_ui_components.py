@@ -141,6 +141,22 @@ class TestPDFTreeView:
         tree.btn_expand_all.click()
         assert file_item.isExpanded() is True
 
+    def test_delete_button_emits_signal(self, project_with_data):
+        """Clicking the delete header button should emit file_delete_requested."""
+        tree = PDFTreeView()
+        tree.populate(project_with_data)
+
+        captured = []
+        tree.file_delete_requested.connect(lambda paths: captured.append(paths))
+
+        # select the file-level item
+        file_item = tree.tree.topLevelItem(0)
+        tree.tree.setCurrentItem(file_item)
+        tree.tree.setItemSelected(file_item, True)
+
+        tree.btn_delete_file.click()
+        assert captured == [[project_with_data.pdf_files[0].file_path]]
+
     def test_double_click_emits_page_selected(self, project_with_data):
         """Double-clicking a page (or file) should emit page_selected for viewing."""
         tree = PDFTreeView()

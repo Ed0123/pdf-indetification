@@ -35,10 +35,10 @@ type Action =
   | { type: "SET_BOX"; file_id: string; page: number; box: BoxInfo }
   | { type: "CLEAR_BOXES"; file_id: string; page: number }
   | { type: "SET_CELL"; file_id: string; page: number; column: string; text: string }
-  | { type: "CLEAR_PAGE_DATA"; file_id: string; page: number }
   | { type: "APPLY_BOXES_TO_PAGES"; source_file_id: string; source_page: number; target_pages: { file_id: string; page: number }[] }
   | { type: "SAVE_TEMPLATES"; templates: Template[] }
   | { type: "SET_APPLIED_TEMPLATE"; file_id: string; page: number; template_name: string }
+  | { type: "REPLACE_FILE"; oldId: string; newInfo: PDFFileInfo }
   | { type: "LOAD_PROJECT"; state: ProjectState };
 
 // --------------------------------------------------------------------------
@@ -148,17 +148,6 @@ function reducer(state: ProjectState, action: Action): ProjectState {
         })),
       };
 
-    case "CLEAR_PAGE_DATA":
-      return {
-        ...state,
-        pdf_files: mutatePage(state.pdf_files, action.file_id, action.page, (p) => ({
-          ...p,
-          extracted_data: Object.fromEntries(
-            Object.keys(p.extracted_data).map((k) => [k, ""])
-          ),
-          boxes: {},
-        })),
-      };
 
     case "APPLY_BOXES_TO_PAGES": {
       const srcFile = state.pdf_files.find((f) => f.file_id === action.source_file_id);
@@ -188,6 +177,28 @@ function reducer(state: ProjectState, action: Action): ProjectState {
         })),
       };
 
+    case "REPLACE_FILE": {
+      // preserve extracted_data and boxes from old file pages while
+      // adopting metadata from newInfo
+      const old = state.pdf_files.find((f) => f.file_id === action.oldId);
+      if (!old) return state;
+      const merged: PDFFileInfo = {
+        ...action.newInfo,
+        pages: action.newInfo.pages.map((p, idx) => {
+          const oldPage = old.pages[idx];
+          if (!oldPage) return p;
+          // keep the old page's extracted data & boxes
+          return { ...p, extracted_data: oldPage.extracted_data, boxes: oldPage.boxes };
+        }),
+      };
+      return {
+        ...state,
+        pdf_files: state.pdf_files.map((f) =>
+          f.file_id === action.oldId ? merged : f
+        ),
+      };
+    }
+
     case "LOAD_PROJECT":
       return { ...action.state, templates: action.state.templates ?? [] };
 
@@ -212,7 +223,6 @@ export function useProject() {
   const setBox = useCallback((file_id: string, page: number, box: BoxInfo) => dispatch({ type: "SET_BOX", file_id, page, box }), []);
   const clearBoxes = useCallback((file_id: string, page: number) => dispatch({ type: "CLEAR_BOXES", file_id, page }), []);
   const setCell = useCallback((file_id: string, page: number, column: string, text: string) => dispatch({ type: "SET_CELL", file_id, page, column, text }), []);
-  const clearPageData = useCallback((file_id: string, page: number) => dispatch({ type: "CLEAR_PAGE_DATA", file_id, page }), []);
   const applyBoxesToPages = useCallback(
     (source_file_id: string, source_page: number, target_pages: { file_id: string; page: number }[]) =>
       dispatch({ type: "APPLY_BOXES_TO_PAGES", source_file_id, source_page, target_pages }),
@@ -223,6 +233,10 @@ export function useProject() {
   const setAppliedTemplate = useCallback(
     (file_id: string, page: number, template_name: string) =>
       dispatch({ type: "SET_APPLIED_TEMPLATE", file_id, page, template_name }),
+    []
+  );
+  const replaceFile = useCallback(
+    (oldId: string, newInfo: PDFFileInfo) => dispatch({ type: "REPLACE_FILE", oldId, newInfo }),
     []
   );
 
@@ -279,11 +293,11 @@ export function useProject() {
     setBox,
     clearBoxes,
     setCell,
-    clearPageData,
     applyBoxesToPages,
     loadProject,
     saveTemplates,
     setAppliedTemplate,
     restoreFromDraft,
+    replaceFile,
   };
 }

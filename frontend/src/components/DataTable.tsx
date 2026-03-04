@@ -12,6 +12,12 @@ interface DataTableProps {
   onAddColumn: (name: string) => void;
   onRemoveColumn: (name: string) => void;
   onToggleColumn: (name: string) => void;
+  // actions formerly in the top toolbar
+  onExportExcel: () => void;
+  onRecognizeText: () => void;
+  onManageTemplates: () => void;
+  onExportPdf: () => void;
+  disabled: boolean;
 }
 
 type SortDir = "asc" | "desc" | null;
@@ -27,6 +33,11 @@ export function DataTable({
   onAddColumn,
   onRemoveColumn,
   onToggleColumn,
+  onExportExcel,
+  onRecognizeText,
+  onManageTemplates,
+  onExportPdf,
+  disabled,
 }: DataTableProps) {
   const [sortKey, setSortKey] = useState<string>("file_name");
   const [sortDir, setSortDir] = useState<SortDir>("asc");
@@ -91,6 +102,22 @@ export function DataTable({
 
   return (
     <div style={{ display: "flex", flexDirection: "column", height: "100%", overflow: "hidden" }}>
+      {/* Action bar moved from top toolbar */}
+      <div style={{ display: "flex", gap: 6, padding: "4px 8px", borderBottom: "1px solid #ddd", background: "#fafafa" }}>
+        <button style={smBtn} onClick={onExportExcel} disabled={disabled} title="Export to Excel">
+          📊 Export Excel
+        </button>
+        <button style={smBtn} onClick={onRecognizeText} disabled={disabled} title="Run text recognition">
+          🔍 Recognize Text
+        </button>
+        <button style={smBtn} onClick={onManageTemplates} title="Manage templates">
+          🗂 Templates
+        </button>
+        <button style={smBtn} onClick={onExportPdf} disabled={disabled} title="Export selected pages as PDFs">
+          📄 Export PDF
+        </button>
+      </div>
+
       {/* Filter bar */}
       <div style={{ display: "flex", gap: 6, padding: "4px 8px", borderBottom: "1px solid #ddd", background: "#fafafa" }}>
         <input

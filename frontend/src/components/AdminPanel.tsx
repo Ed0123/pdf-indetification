@@ -10,6 +10,8 @@ import React, { useState, useMemo } from "react";
 import type { UserProfile, MemberTier, AccountStatus } from "../types/user";
 import { TIER_LABELS, STATUS_LABELS, TIER_FEATURES } from "../types/user";
 import type { GroupItem, TierItem } from "../api/client";
+import { fetchAllMessages, replyToMessage } from "../api/client";
+import { AdminMessagesPanel } from "./AdminMessagesPanel";
 
 interface AdminPanelProps {
   users: UserProfile[];
@@ -43,6 +45,7 @@ export function AdminPanel({
   onDeleteTier,
 }: AdminPanelProps) {
   const [filter, setFilter] = useState("");
+  const [showMessages, setShowMessages] = useState(false);
   const [editingNotes, setEditingNotes] = useState<{ uid: string; value: string } | null>(null);
   const [saving, setSaving] = useState<string | null>(null);
   const [newGroupName, setNewGroupName] = useState("");
@@ -159,11 +162,29 @@ export function AdminPanel({
         {/* Header */}
         <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 16 }}>
           <h2 style={{ margin: 0, fontSize: 18 }}>⚙ 管理員面板</h2>
-          <button style={linkBtn} onClick={onGoHome}>← 回到主頁</button>
+          <div style={{ display: "flex", gap: 8 }}>
+            <button style={linkBtn} onClick={() => setShowMessages(!showMessages)}>
+              {showMessages ? "👥 使用者" : "✉ 訊息"}
+            </button>
+            <button style={linkBtn} onClick={onGoHome}>← 回到主頁</button>
+          </div>
         </div>
 
-        {/* Filter */}
-        <input
+        {showMessages ? (
+          <AdminMessagesPanel
+            fetchAllMessages={fetchAllMessages}
+            replyToMessage={replyToMessage}
+          />
+        ) : (
+          <>
+            {/* existing user management UI continues below */}
+          </>
+        )}
+
+        {!showMessages && (
+          <>
+            {/* Filter */}
+            <input
           style={{ ...inputStyle, width: 280, marginBottom: 14 }}
           placeholder="🔍 搜尋姓名 / 電郵 / WhatsApp"
           value={filter}
@@ -491,8 +512,10 @@ export function AdminPanel({
             </tbody>
           </table>
         </div>
-      </div>
+      </>
+    )}
     </div>
+  </div>
   );
 }
 

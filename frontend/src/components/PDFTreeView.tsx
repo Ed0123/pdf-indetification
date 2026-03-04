@@ -6,6 +6,7 @@ interface PDFTreeViewProps {
   selectedFileId: string | null;
   selectedPage: number;
   onSelectPage: (fileId: string, page: number) => void;
+  onDeleteFile?: (fileId: string) => void;
 }
 
 export function PDFTreeView({
@@ -13,6 +14,7 @@ export function PDFTreeView({
   selectedFileId,
   selectedPage,
   onSelectPage,
+  onDeleteFile,
 }: PDFTreeViewProps) {
   const [expanded, setExpanded] = useState<Record<string, boolean>>({});
 
@@ -70,6 +72,17 @@ export function PDFTreeView({
           title="Collapse all"
         >
           ⊟
+        </button>
+        {/* delete selected file button */}
+        <button
+          style={headerBtn}
+          onClick={() => {
+            if (selectedFileId && onDeleteFile) onDeleteFile(selectedFileId);
+          }}
+          title="Delete selected file"
+          disabled={!selectedFileId}
+        >
+          ✖
         </button>
       </div>
 

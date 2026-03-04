@@ -8,10 +8,9 @@ Provides endpoints for:
 """
 
 import os
-import re
 from datetime import datetime, timezone
 from typing import Optional, Literal
-from fastapi import APIRouter, HTTPException, Depends, Request
+from fastapi import APIRouter, HTTPException, Depends
 from pydantic import BaseModel
 
 from ..auth_middleware import require_auth
@@ -412,11 +411,11 @@ def _parse_bq_rows(
             # ============================================================
             # Step 2a: Group Description words into LINES first
             desc_words = sorted(col_words.get("Description", []), key=lambda w: (w['y'], w['x0']))
-            
+
             # Group words into lines (words with similar Y = same line)
             line_y_tolerance = 5
-            desc_lines: list[dict] = []  # [{texts: [], y_top, y_bottom, y_center}]
-            
+            desc_lines: list[dict] = []  # [{texts: [], y_top, y_bottom, y_center, styles,...}]
+
             for word in desc_words:
                 if not desc_lines:
                     desc_lines.append({
@@ -426,7 +425,9 @@ def _parse_bq_rows(
                         'y_center': word['y'],
                         'x0': word['x0'],
                         'x1': word['x1'],
-                        'word_count': 1
+                        'word_count': 1,
+                        'fontnames': [word.get('fontname')],
+                        'sizes': [word.get('size')]
                     })
                 else:
                     last_line = desc_lines[-1]
@@ -441,6 +442,9 @@ def _parse_bq_rows(
                         old_count = last_line['word_count']
                         last_line['y_center'] = (last_line['y_center'] * old_count + word['y']) / (old_count + 1)
                         last_line['word_count'] = old_count + 1
+                        # accumulate styles
+                        last_line['fontnames'].append(word.get('fontname'))
+                        last_line['sizes'].append(word.get('size'))
                     else:
                         # New line
                         desc_lines.append({
@@ -450,12 +454,23 @@ def _parse_bq_rows(
                             'y_center': word['y'],
                             'x0': word['x0'],
                             'x1': word['x1'],
-                            'word_count': 1
+                            'word_count': 1,
+                            'fontnames': [word.get('fontname')],
+                            'sizes': [word.get('size')]
                         })
-            
-            # Finalize line text
+
+            # Finalize line text and compute a representative style
             for line in desc_lines:
                 line['text'] = ' '.join(line['texts'])
+                # most common fontname and average size
+                if line.get('fontnames'):
+                    line['fontname'] = max(set(line['fontnames']), key=line['fontnames'].count)
+                else:
+                    line['fontname'] = None
+                if line.get('sizes'):
+                    line['size'] = sum([s or 0 for s in line['sizes']]) / len(line['sizes'])
+                else:
+                    line['size'] = None
             
             # Step 2b: Calculate line spacing threshold
             if len(desc_lines) >= 2:
@@ -586,18 +601,30 @@ def _parse_bq_rows(
                         notes_before.append(line)
                         assigned_lines.add(id(line))
                 
-                # Group notes_before by paragraph gaps
+                # Group notes_before by paragraph gaps, but also split on style or indentation changes
                 if notes_before:
                     current_block = {'type': 'notes', 'lines': [notes_before[0]], 'y_start': notes_before[0]['y_top'], 'y_end': notes_before[0]['y_bottom']}
                     for i in range(1, len(notes_before)):
-                        gap = notes_before[i]['y_top'] - current_block['y_end']
-                        if gap > para_threshold:
-                            # New notes block
+                        curr = notes_before[i]
+                        prev = current_block['lines'][-1]
+                        gap = curr['y_top'] - current_block['y_end']
+                        # determine if font/style changed
+                        style_diff = (
+                            prev.get('fontname') != curr.get('fontname') or
+                            abs((prev.get('size') or 0) - (curr.get('size') or 0)) > 0.5
+                        )
+                        # indentation/left-shift check
+                        avg_width = ((prev['x1'] - prev['x0']) + (curr['x1'] - curr['x0'])) / 2
+                        x_threshold2 = max(30, avg_width * 0.2)
+                        x_diff = abs(curr['x0'] - prev['x0'])
+
+                        if style_diff or x_diff > x_threshold2 or gap > para_threshold:
+                            # start a new notes block
                             all_blocks.append(current_block)
-                            current_block = {'type': 'notes', 'lines': [notes_before[i]], 'y_start': notes_before[i]['y_top'], 'y_end': notes_before[i]['y_bottom']}
+                            current_block = {'type': 'notes', 'lines': [curr], 'y_start': curr['y_top'], 'y_end': curr['y_bottom']}
                         else:
-                            current_block['lines'].append(notes_before[i])
-                            current_block['y_end'] = notes_before[i]['y_bottom']
+                            current_block['lines'].append(curr)
+                            current_block['y_end'] = curr['y_bottom']
                     all_blocks.append(current_block)
                 
                 # Now process each Item
@@ -632,24 +659,37 @@ def _parse_bq_rows(
                         else:
                             prev_line = candidate_lines[i-1]
                             y_gap = line['y_top'] - prev_line['y_bottom']
-                            
+
+                            # Style difference should split even without a big gap
+                            style_diff = (
+                                prev_line.get('fontname') != line.get('fontname') or
+                                abs((prev_line.get('size') or 0) - (line.get('size') or 0)) > 0.5
+                            )
+
                             # Calculate X position difference (using left edges)
                             x_diff = abs(line['x0'] - prev_line['x0'])
-                            
+
                             # Paragraph break conditions:
                             # 1. Large Y gap alone
                             if y_gap > para_threshold:
                                 break
-                            
-                            # 2. Significant X difference (>20% of line width or >30 pixels) 
-                            #    combined with any Y gap (>5 pixels)
+
+                            # 1b. Style change always breaks
+                            if style_diff:
+                                break
+
+                            # 2. Significant X difference should break even if gap small
                             avg_line_width = (prev_line['x1'] - prev_line['x0'] + line['x1'] - line['x0']) / 2
                             x_threshold = max(30, avg_line_width * 0.2)  # At least 30px or 20% of line width
-                            
+
+                            if x_diff > x_threshold:
+                                break
+
+                            # previous behavior: require y_gap>5 for x shift notice
                             if x_diff > x_threshold and y_gap > 5:
                                 # Significant X shift with Y gap - likely a new block
                                 break
-                            
+
                             item_desc_lines.append(line)
                     
                     # Mark these lines as assigned
@@ -679,17 +719,27 @@ def _parse_bq_rows(
                 # Check for any unassigned lines and add them as trailing notes
                 unassigned_lines = [l for l in desc_lines if id(l) not in assigned_lines]
                 if unassigned_lines:
-                    # Sort by Y position and group as notes
+                    # Sort by Y position and group as notes, adding style/indent boundary tests
                     unassigned_sorted = sorted(unassigned_lines, key=lambda l: l['y_center'])
                     current_block = {'type': 'notes', 'lines': [unassigned_sorted[0]], 'y_start': unassigned_sorted[0]['y_top'], 'y_end': unassigned_sorted[0]['y_bottom']}
                     for i in range(1, len(unassigned_sorted)):
-                        gap = unassigned_sorted[i]['y_top'] - current_block['y_end']
-                        if gap > para_threshold:
+                        curr = unassigned_sorted[i]
+                        prev = current_block['lines'][-1]
+                        gap = curr['y_top'] - current_block['y_end']
+                        style_diff = (
+                            prev.get('fontname') != curr.get('fontname') or
+                            abs((prev.get('size') or 0) - (curr.get('size') or 0)) > 0.5
+                        )
+                        avg_width = ((prev['x1'] - prev['x0']) + (curr['x1'] - curr['x0'])) / 2
+                        x_threshold2 = max(30, avg_width * 0.2)
+                        x_diff = abs(curr['x0'] - prev['x0'])
+
+                        if style_diff or x_diff > x_threshold2 or gap > para_threshold:
                             all_blocks.append(current_block)
-                            current_block = {'type': 'notes', 'lines': [unassigned_sorted[i]], 'y_start': unassigned_sorted[i]['y_top'], 'y_end': unassigned_sorted[i]['y_bottom']}
+                            current_block = {'type': 'notes', 'lines': [curr], 'y_start': curr['y_top'], 'y_end': curr['y_bottom']}
                         else:
-                            current_block['lines'].append(unassigned_sorted[i])
-                            current_block['y_end'] = unassigned_sorted[i]['y_bottom']
+                            current_block['lines'].append(curr)
+                            current_block['y_end'] = curr['y_bottom']
                     all_blocks.append(current_block)
                 
                 # Sort all blocks by y_start

@@ -50,7 +50,11 @@ interface BQOCRPanelProps {
   onSaveBQTemplate: (name: string, boxes: BoxInfo[]) => void;
   onApplyBQTemplate: (templateId: string) => void;
   onUpdateBQTemplate?: (templateId: string, boxes: BoxInfo[]) => void;
+  // optional OCR quota info (from parent App)
+  usagePages?: number;
+  usageLimit?: number; // -1 = unlimited
 }
+
 
 export function BQOCRPanel({
   files,
@@ -68,6 +72,8 @@ export function BQOCRPanel({
   onSaveBQTemplate,
   onApplyBQTemplate,
   onUpdateBQTemplate,
+  usagePages,
+  usageLimit,
 }: BQOCRPanelProps) {
   // Engine list
   const [engines, setEngines] = useState<BQEngineInfo[]>([]);
@@ -88,6 +94,13 @@ export function BQOCRPanel({
 
   // Page selector for batch extract
   const [showBatchSelector, setShowBatchSelector] = useState(false);
+
+  // Range input + info
+  const [rangeInput, setRangeInput] = useState<string>("");
+  const [rangeCount, setRangeCount] = useState<number>(0);
+
+  // Progress tracking for batch
+  const [batchProgress, setBatchProgress] = useState<{done: number; total: number} | null>(null);
 
   // Inline editing state
   const [editingRowId, setEditingRowId] = useState<number | null>(null);
@@ -143,6 +156,49 @@ export function BQOCRPanel({
       f.pages.map((p) => ({ file_id: f.file_id, page_number: p.page_number, file_name: f.file_name }))
     );
   }, [files]);
+
+  // helper: flatten index -> SelectedPage
+  const pageAtIndex = (idx: number) => {
+    if (idx < 0 || idx >= allPages.length) return null;
+    return allPages[idx];
+  };
+
+  // parse user-entered range string into SelectedPage[]
+  const parseRangeString = (input: string): SelectedPage[] => {
+    const indices = new Set<number>();
+    input
+      .split(",")
+      .map((t) => t.trim())
+      .forEach((tok) => {
+        if (!tok) return;
+        const dash = tok.indexOf("-");
+        if (dash !== -1) {
+          const a = parseInt(tok.slice(0, dash), 10);
+          const b = parseInt(tok.slice(dash + 1), 10);
+          if (!isNaN(a) && !isNaN(b)) {
+            for (let n = a; n <= b; n++) {
+              indices.add(n - 1);
+            }
+          }
+        } else {
+          const n = parseInt(tok, 10);
+          if (!isNaN(n)) indices.add(n - 1);
+        }
+      });
+    return [...indices]
+      .filter((i) => i >= 0 && i < allPages.length)
+      .map((i) => allPages[i]);
+  };
+
+  // update count when rangeInput changes
+  useEffect(() => {
+    if (rangeInput.trim()) {
+      const pages = parseRangeString(rangeInput);
+      setRangeCount(pages.length);
+    } else {
+      setRangeCount(0);
+    }
+  }, [rangeInput]);
 
   const currentIdx = allPages.findIndex(
     (p) => p.file_id === selectedFileId && p.page_number === selectedPage
@@ -347,91 +403,124 @@ export function BQOCRPanel({
       return;
     }
 
+    // additional safety checks: per-batch limit and quota
+    if (selectedPages.length > 200) {
+      setError("一次最多只能處理 200 頁");
+      return;
+    }
+    const usage = usagePages ?? 0;
+    const limit = usageLimit ?? -1;
+    if (limit !== -1 && usage + selectedPages.length > limit) {
+      setError("OCR 配額不足，請減少頁數或升級方案");
+      return;
+    }
+
     setShowBatchSelector(false);
     setExtracting(true);
+    setBatchProgress({ done: 0, total: selectedPages.length });
     setError(null);
     setLastExtractInfo(null);
 
-    try {
-      const boxes = Object.values(currentBoxes).map((box) => ({
-        column_name: box.column_name,
-        x: box.x,
-        y: box.y,
-        width: box.width,
-        height: box.height,
-      }));
+    const boxes = Object.values(currentBoxes).map((box) => ({
+      column_name: box.column_name,
+      x: box.x,
+      y: box.y,
+      width: box.width,
+      height: box.height,
+    }));
 
-      // Process selected pages
-      let totalRows = 0;
-      let totalCost = 0;
-      let failures = 0;
+    // Process selected pages
+    let totalRows = 0;
+    let totalCost = 0;
+    let failures = 0;
 
-      for (const sp of selectedPages) {
-        try {
-          const result = await extractBQ({
-            file_id: sp.file_id,
-            pages: [sp.page_number],
-            boxes,
-            engine: selectedEngine,
-          });
+    for (const sp of selectedPages) {
+      try {
+        const result = await extractBQ({
+          file_id: sp.file_id,
+          pages: [sp.page_number],
+          boxes,
+          engine: selectedEngine,
+        });
 
-          const rows: BQRow[] = result.rows.map((r: BQRowAPI) => ({
-            id: r.id,
-            file_id: r.file_id,
-            page_number: r.page_number,
-            page_label: r.page_label,
-            revision: r.revision,
-            bill_name: r.bill_name,
-            collection: r.collection,
-            type: r.type as "heading1" | "heading2" | "item",
-            item_no: r.item_no,
-            description: r.description,
-            quantity: r.quantity,
-            unit: r.unit,
-            rate: r.rate,
-            total: r.total,
-            // Bbox for UI highlighting
-            bbox_x0: r.bbox_x0,
-            bbox_y0: r.bbox_y0,
-            bbox_x1: r.bbox_x1,
-            bbox_y1: r.bbox_y1,
-            page_width: r.page_width,
-            page_height: r.page_height,
-          }));
+        const rows: BQRow[] = result.rows.map((r: BQRowAPI) => ({
+          id: r.id,
+          file_id: r.file_id,
+          page_number: r.page_number,
+          page_label: r.page_label,
+          revision: r.revision,
+          bill_name: r.bill_name,
+          collection: r.collection,
+          type: r.type as "heading1" | "heading2" | "item",
+          item_no: r.item_no,
+          description: r.description,
+          quantity: r.quantity,
+          unit: r.unit,
+          rate: r.rate,
+          total: r.total,
+          // Bbox for UI highlighting
+          bbox_x0: r.bbox_x0,
+          bbox_y0: r.bbox_y0,
+          bbox_x1: r.bbox_x1,
+          bbox_y1: r.bbox_y1,
+          page_width: r.page_width,
+          page_height: r.page_height,
+        }));
 
-          const key = `${sp.file_id}-${sp.page_number}`;
-          const newPageData: BQPageData = {
-            file_id: sp.file_id,
-            page_number: sp.page_number,
-            boxes: { ...currentBoxes },
-            rows,
-          };
-          onBQDataChange(key, newPageData);
+        const key = `${sp.file_id}-${sp.page_number}`;
+        const newPageData: BQPageData = {
+          file_id: sp.file_id,
+          page_number: sp.page_number,
+          boxes: { ...currentBoxes },
+          rows,
+        };
+        onBQDataChange(key, newPageData);
 
-          totalRows += result.rows.length;
-          totalCost += result.quota_cost;
-        } catch (err) {
-          // Continue processing other pages
-          failures++;
-          console.warn(`Failed to process ${sp.file_name} page ${sp.page_number + 1}:`, err);
-        }
+        totalRows += result.rows.length;
+        totalCost += result.quota_cost;
+      } catch (err) {
+        // Continue processing other pages
+        failures++;
+        console.warn(`Failed to process ${sp.file_name} page ${sp.page_number + 1}:`, err);
       }
-
-      const suffix = failures > 0 ? ` (${failures} failed)` : "";
-      setLastExtractInfo({
-        rows: totalRows,
-        engine: selectedEngine,
-        cost: totalCost,
-      });
-      if (failures > 0) {
-        setError(`Processed ${selectedPages.length - failures} of ${selectedPages.length} pages${suffix}`);
-      }
-    } catch (err: any) {
-      setError(err.message || "Batch extraction failed");
-    } finally {
-      setExtracting(false);
+      setBatchProgress((prev) => prev ? { ...prev, done: prev.done + 1 } : prev);
     }
+
+    const suffix = failures > 0 ? ` (${failures} failed)` : "";
+    setLastExtractInfo({
+      rows: totalRows,
+      engine: selectedEngine,
+      cost: totalCost,
+    });
+    if (failures > 0) {
+      setError(`Processed ${selectedPages.length - failures} of ${selectedPages.length} pages${suffix}`);
+    }
+
+    setExtracting(false);
+    setBatchProgress(null);
   }, [currentBoxes, selectedEngine, onBQDataChange]);
+
+  // Handle range-based batch extract
+  const handleRangeExtract = () => {
+    if (!rangeInput.trim()) return;
+    const pages = parseRangeString(rangeInput);
+    if (pages.length === 0) {
+      setError("範圍格式錯誤或找不到頁面");
+      return;
+    }
+    if (pages.length > 200) {
+      setError("一次最多只能處理 200 頁");
+      return;
+    }
+    const usage = usagePages ?? 0;
+    const limit = usageLimit ?? -1;
+    if (limit !== -1 && usage + pages.length > limit) {
+      setError("OCR 配額不足，請減少頁數或升級方案");
+      return;
+    }
+    setRangeInput("");
+    handleBatchExtract(pages);
+  };
 
   // Handle template save
   const handleSaveTemplate = () => {
@@ -501,6 +590,26 @@ export function BQOCRPanel({
 
   return (
     <div style={container}>
+      {/* overlay to block interaction during a batch run */}
+      {extracting && batchProgress && (
+        <div style={overlayStyle}>
+          <div style={{ textAlign: "center" }}>
+            <div style={{ marginBottom: 6 }}>
+              正在處理 {batchProgress.done} / {batchProgress.total} 頁...
+            </div>
+            <div style={{ width: 240, height: 8, background: "#ddd", borderRadius: 4 }}>
+              <div
+                style={{
+                  width: `${Math.round((batchProgress.done / batchProgress.total) * 100)}%`,
+                  height: "100%",
+                  background: "#2980b9",
+                  transition: "width 0.2s",
+                }}
+              />
+            </div>
+          </div>
+        </div>
+      )}
       {/* Title bar with page navigation */}
       <div style={titleBar}>
         <span style={{ fontWeight: 700, fontSize: 14 }}>📋 BQ OCR</span>
@@ -782,6 +891,26 @@ export function BQOCRPanel({
           >
             {extracting ? "⏳ Extracting..." : "🔍 Extract This Page"}
           </button>
+          {/* Range / batch controls */}
+        <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
+          <input
+            style={{ ...pageSelect, width: 120 }}
+            placeholder="頁碼或範圍 e.g. 1-5,7"
+            value={rangeInput}
+            onChange={(e) => setRangeInput(e.target.value)}
+            onKeyDown={(e) => e.key === "Enter" && handleRangeExtract()}
+            disabled={extracting}
+            title="輸入欲處理之頁碼或範圍，使用逗號分隔"
+          />
+          <button
+            style={{ ...batchExtractBtn, opacity: rangeInput.trim() ? 1 : 0.5 }}
+            disabled={extracting || !rangeInput.trim()}
+            onClick={handleRangeExtract}
+            title="依照上方範圍直接執行 OCR"
+          >
+            {extracting ? "⏳" : "📚 範圍 OCR"}
+          </button>
+
           <button
             style={{
               ...batchExtractBtn,
@@ -795,6 +924,14 @@ export function BQOCRPanel({
             {extracting ? "⏳ Processing..." : `📚 Batch Extract...`}
           </button>
         </div>
+
+        {/* range info message */}
+        {rangeInput.trim() && (
+          <div style={{ fontSize: 11, color: "#555", marginTop: 4 }}>
+            {rangeCount} 頁將被處理，檢查配額後才會執行。
+          </div>
+        )}
+      </div>
         {!hasDataRange && (
           <div style={{ fontSize: 11, color: "#e74c3c", marginTop: 4 }}>
             ⚠️ Draw the Data Range box first to enable extraction
@@ -808,6 +945,9 @@ export function BQOCRPanel({
           files={files}
           title="Batch Extract — Select Pages"
           confirmLabel="Extract Selected Pages"
+          usagePages={usagePages}
+          usageLimit={usageLimit}
+          maxPages={200}
           onConfirm={handleBatchExtract}
           onCancel={() => setShowBatchSelector(false)}
         />
@@ -858,10 +998,16 @@ const emptyState: React.CSSProperties = {
   flex: 1,
   display: "flex",
   flexDirection: "column",
+};
+
+const overlayStyle: React.CSSProperties = {
+  position: "absolute",
+  inset: 0,
+  background: "rgba(255,255,255,0.8)",
+  zIndex: 1000,
+  display: "flex",
   alignItems: "center",
   justifyContent: "center",
-  color: "#aaa",
-  fontSize: 14,
 };
 
 const sectionStyle: React.CSSProperties = {

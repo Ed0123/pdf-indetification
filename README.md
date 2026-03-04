@@ -85,8 +85,9 @@ firebase deploy --only hosting --project YOUR_PROJECT_ID
 | Template Management | Save/apply/update extraction templates across pages |
 | Google Login & Account | Firebase-authenticated login and account profile page |
 | Admin Panel | User status/tier/group management + usage reset + group management |
-| Save / Load | Persist project state as JSON |
 | Export Excel | Download extracted data as `.xlsx` |
+| (toolbar) Save / Load | *removed* – persistence is automatic via IndexedDB |
+| Clear Data | *removed* – no longer available |
 
 ---
 

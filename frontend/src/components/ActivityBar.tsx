@@ -1,12 +1,13 @@
 /**
  * ActivityBar — vertical module navigation sidebar.
  *
- * Provides navigation between different modules:
- * - Page View: Single page data table (default)
- * - BQ OCR: Bill of Quantities extraction
- * - BQ Export: BQ data summary and export
- * - Templates: Template management
- * - Export: Excel/PDF export
+ * Modules are grouped and the order has been adjusted:
+ * 1) Templates
+ * 2) Page View, Excel Export, PDF Export
+ * 3) BQ OCR and BQ Export
+ *
+ * A thin separator line is drawn between the groups. Access tiers and collapse
+ * toggle behavior remain unchanged.
  */
 import React from "react";
 
@@ -18,6 +19,10 @@ export type ModuleId =
   | "exportexcel"
   | "exportpdf";
 
+/**
+ * Modules are grouped into logical clusters; separators shown between groups.
+ * `group` is a simple number that defines ordering and when to draw dividers.
+ */
 interface ModuleConfig {
   id: ModuleId;
   icon: string;
@@ -25,15 +30,21 @@ interface ModuleConfig {
   shortLabel: string;
   description: string;
   tier?: string;  // Required tier for access
+  group?: number; // grouping key for visual separators
 }
 
 const MODULES: ModuleConfig[] = [
-  { id: "singlepage", icon: "📄", label: "Page View", shortLabel: "Page", description: "View and edit data for each page" },
-  { id: "bq_ocr", icon: "📋", label: "BQ OCR", shortLabel: "BQ", description: "Extract Bill of Quantities data", tier: "sponsor" },
-  { id: "bq_export", icon: "📊", label: "BQ Export", shortLabel: "BQ Ex", description: "Review and export BQ data", tier: "sponsor" },
-  { id: "templates", icon: "📝", label: "Templates", shortLabel: "Tmpl", description: "Manage extraction templates" },
-  { id: "exportexcel", icon: "📗", label: "Excel Export", shortLabel: "Excel", description: "Export data to Excel" },
-  { id: "exportpdf", icon: "📕", label: "PDF Export", shortLabel: "PDF", description: "Export selected PDF pages" },
+  // Template management stands alone in its own group (1)
+  { id: "templates", icon: "📝", label: "Templates", shortLabel: "Tmpl", description: "Manage extraction templates", group: 1 },
+
+  // Main editing and export tools share a second group (2)
+  { id: "singlepage", icon: "📄", label: "Page View", shortLabel: "Page", description: "View and edit data for each page", group: 2 },
+  { id: "exportexcel", icon: "📗", label: "Excel Export", shortLabel: "Excel", description: "Export data to Excel", group: 2 },
+  { id: "exportpdf", icon: "📕", label: "PDF Export", shortLabel: "PDF", description: "Export selected PDF pages", group: 2 },
+
+  // BQ tools are a sponsor‑tier group (3)
+  { id: "bq_ocr", icon: "📋", label: "BQ OCR", shortLabel: "BQ", description: "Extract Bill of Quantities data", tier: "sponsor", group: 3 },
+  { id: "bq_export", icon: "📊", label: "BQ Export", shortLabel: "BQ Ex", description: "Review and export BQ data", tier: "sponsor", group: 3 },
 ];
 
 interface ActivityBarProps {
@@ -60,37 +71,51 @@ export function ActivityBar({
     return userIdx >= reqIdx;
   };
 
+  // build elements with separators when group changes
+  const rendered: React.ReactNode[] = [];
+  let lastGroup: number | undefined;
+
+  MODULES.forEach((mod) => {
+    if (lastGroup !== undefined && mod.group !== lastGroup) {
+      rendered.push(
+        <div key={`sep-${mod.id}`} style={separator} />
+      );
+    }
+
+    const isActive = activeModule === mod.id;
+    const isLocked = !hasAccess(mod);
+
+    rendered.push(
+      <button
+        key={mod.id}
+        style={{
+          ...moduleBtn,
+          background: isActive ? "#fff" : "transparent",
+          color: isActive ? "#333" : isLocked ? "#bbb" : "#666",
+          cursor: isLocked ? "not-allowed" : "pointer",
+          borderLeft: isActive ? "3px solid #3498db" : "3px solid transparent",
+        }}
+        onClick={() => !isLocked && onModuleChange(mod.id)}
+        disabled={isLocked}
+        title={isLocked ? `Requires ${mod.tier} tier` : mod.description}
+      >
+        <span style={{ fontSize: collapsed ? 18 : 16 }}>{mod.icon}</span>
+        {!collapsed && (
+          <span style={{ fontSize: 11, marginTop: 2 }}>{mod.shortLabel}</span>
+        )}
+        {isLocked && (
+          <span style={lockIcon}>🔒</span>
+        )}
+      </button>
+    );
+
+    lastGroup = mod.group;
+  });
+
   return (
     <div style={container}>
-      {MODULES.map((mod) => {
-        const isActive = activeModule === mod.id;
-        const isLocked = !hasAccess(mod);
-        
-        return (
-          <button
-            key={mod.id}
-            style={{
-              ...moduleBtn,
-              background: isActive ? "#fff" : "transparent",
-              color: isActive ? "#333" : isLocked ? "#bbb" : "#666",
-              cursor: isLocked ? "not-allowed" : "pointer",
-              borderLeft: isActive ? "3px solid #3498db" : "3px solid transparent",
-            }}
-            onClick={() => !isLocked && onModuleChange(mod.id)}
-            disabled={isLocked}
-            title={isLocked ? `Requires ${mod.tier} tier` : mod.description}
-          >
-            <span style={{ fontSize: collapsed ? 18 : 16 }}>{mod.icon}</span>
-            {!collapsed && (
-              <span style={{ fontSize: 11, marginTop: 2 }}>{mod.shortLabel}</span>
-            )}
-            {isLocked && (
-              <span style={lockIcon}>🔒</span>
-            )}
-          </button>
-        );
-      })}
-      
+      {rendered}
+
       {/* Collapse toggle */}
       {onToggleCollapse && (
         <button
@@ -140,4 +165,11 @@ const lockIcon: React.CSSProperties = {
   top: 4,
   right: 4,
   fontSize: 8,
+};
+
+const separator: React.CSSProperties = {
+  height: 1,
+  background: "#ddd",
+  margin: "4px 0",
+  width: "100%",
 };

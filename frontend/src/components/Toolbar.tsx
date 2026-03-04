@@ -2,8 +2,6 @@ import React from "react";
 
 interface ToolbarProps {
   onImport: () => void;
-  onClearData: () => void;
-  onDeleteFiles: () => void;
   onExportExcel: () => void;
   onRecognizeText: () => void;
   onManageTemplates: () => void;
@@ -52,8 +50,6 @@ function Btn({
 
 export function Toolbar({
   onImport,
-  onClearData,
-  onDeleteFiles,
   onExportExcel,
   onRecognizeText,
   onManageTemplates,
@@ -77,16 +73,6 @@ export function Toolbar({
       {onCloudProjects && (
         <Btn label="☁ 雲端儲存" onClick={onCloudProjects} title="切換到雲端儲存 / 管理雲端專案" />
       )}
-      <div style={{ width: 1, height: 24, background: "#ddd", margin: "0 2px" }} />
-      <Btn label="🗑 Clear Data" onClick={onClearData} disabled={disabled} title="Clear extracted data for selected pages" />
-      <Btn label="✖ Delete Files" onClick={onDeleteFiles} disabled={disabled} title="Remove selected PDF files from project" />
-      <div style={{ width: 1, height: 24, background: "#ddd", margin: "0 2px" }} />
-      <Btn label="📊 Export Excel" onClick={onExportExcel} disabled={disabled} title="Export to Excel" />
-      <div style={{ width: 1, height: 24, background: "#ddd", margin: "0 2px" }} />
-      <Btn label="🔍 Recognize Text" onClick={onRecognizeText} disabled={disabled} title="Run text extraction on selected pages" />
-      <div style={{ width: 1, height: 24, background: "#ddd", margin: "0 2px" }} />
-      <Btn label="🗂 Templates" onClick={onManageTemplates} title="Manage extraction box templates" />
-      <Btn label="📄 Export PDF" onClick={onExportPdf} disabled={disabled} title="Export selected pages as individual PDFs in a ZIP" />
     </div>
   );
 }

@@ -269,11 +269,31 @@ def update_my_profile(body: ProfileUpdate, user: dict = Depends(require_auth)):
 
 @router.get("/")
 def list_all_users(user: dict = Depends(require_auth)):
-    """List all users (admin only)."""
+    """List all users (admin only).
+
+    When returning results we also ensure each profile has its monthly counter
+    reset (same logic as `record_usage`) so that the admin panel always sees
+    up‑to‑date usage even if the user hasn't performed any OCR this month.
+    """
     if not _is_admin(user["uid"]):
         raise HTTPException(403, "Admin access required")
+    current_month = datetime.now(timezone.utc).strftime("%Y-%m")
     docs = get_db().collection(USERS_COLLECTION).stream()
-    return [d.to_dict() for d in docs]
+
+    results = []
+    for d in docs:
+        data = d.to_dict()
+        # reset monthly counter if stale
+        if data.get("usage_month") != current_month:
+            data["usage_month"] = current_month
+            data["usage_pages"] = 0
+            try:
+                d.reference.update({"usage_month": current_month, "usage_pages": 0})
+            except Exception:
+                # best effort; ignore failures
+                pass
+        results.append(data)
+    return results
 
 
 @router.put("/{uid}")

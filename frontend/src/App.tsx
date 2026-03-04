@@ -49,10 +49,12 @@ import {
   deleteTier,
   recordUsage,
   listCloudTemplates,
+  installMissingFileHandler,
   createCloudTemplate,
   updateCloudTemplate,
   deleteCloudTemplate,
   uploadTemplatePageImage,
+  uploadBQTemplatePageImage,
   renderPage,
   listBQTemplates,
   createBQTemplate,
@@ -96,6 +98,13 @@ export default function App() {
   // Profile loading gate
   const [profileLoading, setProfileLoading] = useState(false);
 
+  // reset blob cache when user logs out
+  useEffect(() => {
+    if (!auth.user) {
+      pdfBlobsRef.current = {};
+    }
+  }, [auth.user]);
+
   const [selectedColumn, setSelectedColumn] = useState<string | null>(null);
   const [status, setStatus] = useState<StatusInfo>({ message: "Ready", progress: null, ocr_available: false });
   const [showTemplateModal, setShowTemplateModal] = useState(false);
@@ -122,22 +131,56 @@ export default function App() {
   const [highlightBox, setHighlightBox] = useState<{ x0: number; y0: number; x1: number; y1: number } | null>(null);
   // PDF page dimensions for coordinate conversion
   const [pdfPageSize, setPdfPageSize] = useState<{ width: number; height: number } | null>(null);
-  // Annotation mode for PDF viewer
-  const [annotationMode, setAnnotationMode] = useState(false);
-  // Show/hide annotations toggle
+  // Show/hide BQ text overlays on PDF viewer
   const [showAnnotations, setShowAnnotations] = useState(true);
 
   const fileInputRef = useRef<HTMLInputElement>(null);
+  // map from server file_id → original File (for draft persistence/restore)
+  const pdfBlobsRef = useRef<Record<string, File>>({});
 
   // --------------------------------------------------------------------------
   // Auth flow — consolidated into a single effect to avoid race conditions
   // --------------------------------------------------------------------------
 
-  // Install token providers into API client (once)
+  // Install token providers into API client (once) and register expiry callback
   useEffect(() => {
     if (IS_DEV_MODE) return;
-    installTokenProvider(auth.getToken, auth.getTokenFresh);
-  }, [auth.getToken, auth.getTokenFresh]);
+    const handleAuthExpired = () => {
+      // silent sign‑out on backend session expiry
+      showError("登入已過期，請重新登入。");
+      auth.signOut().catch(() => {});
+      setView("login");
+    };
+    installTokenProvider(auth.getToken, auth.getTokenFresh, handleAuthExpired);
+
+    // missing-file handler will attempt to re-upload using cached blob
+    installMissingFileHandler(async (oldId) => {
+      const blob = pdfBlobsRef.current[oldId];
+      if (!blob) return null;
+      try {
+        const infos = await uploadPDFs([blob]);
+        if (infos && infos[0]) {
+          const newInfo = serverInfoToFileInfo(infos[0]);
+          // merge old page data
+          const oldFile = project.state.pdf_files.find((f) => f.file_id === oldId);
+          if (oldFile) {
+            newInfo.pages = newInfo.pages.map((p, idx) => {
+              const oldPage = oldFile.pages[idx];
+              return oldPage ? { ...p, extracted_data: oldPage.extracted_data, boxes: oldPage.boxes } : p;
+            });
+          }
+          project.replaceFile(oldId, newInfo);
+          // keep blob under new id too
+          pdfBlobsRef.current[infos[0].file_id] = blob;
+          delete pdfBlobsRef.current[oldId];
+          return infos[0].file_id;
+        }
+      } catch (err) {
+        console.warn("reupload failed for", oldId, err);
+      }
+      return null;
+    });
+  }, [auth.getToken, auth.getTokenFresh, auth, showError]);
 
   // After auth state resolves, fetch profile (single consolidated effect)
   useEffect(() => {
@@ -185,6 +228,39 @@ export default function App() {
       });
   }, []);
 
+  // ------------------------------------------------------------------------
+  // Keep‑alive & idle‑logout
+  // ------------------------------------------------------------------------
+  useEffect(() => {
+    if (!auth.user) return;
+
+    // periodic ping to keep Firebase token fresh even if tab is backgrounded
+    const keepalive = setInterval(() => {
+      // use the light recordUsage call so we also refresh quota
+      recordUsage(0).catch(() => {});
+    }, 30 * 60 * 1000); // every 30 minutes
+
+    // idle logout after 6 hours of no interaction
+    let idleTimer: ReturnType<typeof setTimeout> | null = null;
+    const scheduleIdle = () => {
+      if (idleTimer) clearTimeout(idleTimer);
+      idleTimer = setTimeout(() => {
+        showError("閒置超過 6 小時，請重新登入。");
+        auth.signOut().catch(() => {});
+        setView("login");
+      }, 6 * 60 * 60 * 1000); // 6h
+    };
+    const events = ["mousemove", "keydown", "mousedown", "touchstart"];
+    events.forEach((ev) => window.addEventListener(ev, scheduleIdle));
+    scheduleIdle();
+
+    return () => {
+      clearInterval(keepalive);
+      if (idleTimer) clearTimeout(idleTimer);
+      events.forEach((ev) => window.removeEventListener(ev, scheduleIdle));
+    };
+  }, [auth.user, showError, auth]);
+
   // --------------------------------------------------------------------------
   // IndexedDB autosave — debounced, saves every 5 seconds of inactivity
   // --------------------------------------------------------------------------
@@ -209,6 +285,7 @@ export default function App() {
         templates: state.templates,
         last_selected_file: state.selected_file_id ?? "",
         last_selected_page: state.selected_page,
+        pdf_blobs: { ...pdfBlobsRef.current },
       };
       saveDraft(uid, payload).catch(() => {});
     }, 5000);
@@ -231,10 +308,14 @@ export default function App() {
       const minutesAgo = Math.round((Date.now() - draft.savedAt.getTime()) / 60000);
       const label = minutesAgo < 1 ? "不到一分鐘前" : `${minutesAgo} 分鐘前`;
       const ok = window.confirm(
-        `發現自動保存的草稿（${label}，${draft.payload.pdf_files.length} 個檔案）。\n\n要恢復嗎？（注意：PDF 檔案需要重新上傳）`
+        `發現自動保存的草稿（${label}，${draft.payload.pdf_files.length} 個檔案）。\n\n要恢復嗎？（注意：如果伺服器暫存消失，會自動重傳原始 PDF）`
       );
       if (ok) {
         project.restoreFromDraft(draft.payload);
+        // restore pdf blobs so they can be re‑uploaded later if needed
+        if (draft.payload.pdf_blobs) {
+          pdfBlobsRef.current = { ...draft.payload.pdf_blobs };
+        }
         setMsg("已恢復自動保存的草稿（PDF 需重新上傳）");
       } else {
         clearDraft(uid).catch(() => {});
@@ -291,6 +372,9 @@ export default function App() {
     owner_uid: ct.owner_uid,
     permission: ct.permission,
     group: ct.group,
+    // store path even though UI doesn't use it directly
+    // (could be useful for debugging)
+    page_image_path: ct.page_image_path ?? null as any,
   });
 
   /** Convert Cloud → local Template type */
@@ -320,6 +404,17 @@ export default function App() {
       await uploadTemplatePageImage(templateId, b64);
     } catch (err) {
       console.warn("Failed to upload page image for template:", err);
+    }
+  };
+
+  /** Same as above but for BQ templates. */
+  const uploadCurrentPageImageForBQTemplate = async (templateId: string) => {
+    if (!state.selected_file_id) return;
+    try {
+      const b64 = await renderPage(state.selected_file_id, state.selected_page, 1.5);
+      await uploadBQTemplatePageImage(templateId, b64);
+    } catch (err) {
+      console.warn("Failed to upload page image for BQ template:", err);
     }
   };
 
@@ -504,6 +599,10 @@ export default function App() {
       const infos = await uploadPDFs(files);
       const fileInfos = infos.map(serverInfoToFileInfo);
       project.addFiles(fileInfos);
+      // remember the original blobs so we can persist them in drafts
+      infos.forEach((info, idx) => {
+        pdfBlobsRef.current[info.file_id] = files[idx];
+      });
       setMsg(`Imported ${fileInfos.length} file(s)`, null);
     } catch (err) {
       setMsg(`Import error: ${err}`, null);
@@ -511,15 +610,10 @@ export default function App() {
     e.target.value = "";
   };
 
-  const handleClearData = () => {
-    if (!state.selected_file_id) return;
-    project.clearPageData(state.selected_file_id, state.selected_page);
-    setMsg("Cleared extracted data for current page");
-  };
 
-  const handleDeleteFiles = () => {
-    if (!state.selected_file_id) return;
-    project.deleteFiles([state.selected_file_id]);
+  // file deletion is triggered from the PDF tree view now
+  const handleDeleteFile = (fileId: string) => {
+    project.deleteFiles([fileId]);
     setMsg("File deleted");
   };
 
@@ -881,30 +975,9 @@ export default function App() {
     }));
   }, []);
 
-  // Handle adding annotation to current page
-  const handleAddAnnotation = useCallback((annotation: import("./types").TextAnnotation) => {
-    const pageKey = `${state.selected_file_id}-page-${state.selected_page}`;
-    setBqPageData((prev) => {
-      const existing = prev[pageKey] || { 
-        file_id: state.selected_file_id ?? "",
-        page_number: state.selected_page,
-        boxes: {},
-        rows: [],
-        annotations: [],
-      };
-      return {
-        ...prev,
-        [pageKey]: {
-          ...existing,
-          annotations: [...(existing.annotations || []), annotation],
-        },
-      };
-    });
-  }, [state.selected_file_id, state.selected_page]);
-
-  // Handle deleting annotation from current page
-  const handleDeleteAnnotation = useCallback((annotationId: string) => {
-    const pageKey = `${state.selected_file_id}-page-${state.selected_page}`;
+  // Handle moving annotation to a new position (drag & drop)
+  const handleAnnotationMove = useCallback((annotationId: string, newX: number, newY: number) => {
+    const pageKey = `${state.selected_file_id}-${state.selected_page}`;
     setBqPageData((prev) => {
       const existing = prev[pageKey];
       if (!existing) return prev;
@@ -912,31 +985,30 @@ export default function App() {
         ...prev,
         [pageKey]: {
           ...existing,
-          annotations: (existing.annotations || []).filter(a => a.id !== annotationId),
+          annotation_positions: {
+            ...(existing.annotation_positions || {}),
+            [annotationId]: { x: newX, y: newY },
+          },
         },
       };
     });
   }, [state.selected_file_id, state.selected_page]);
 
-  // Get current page annotations (user-drawn + auto-generated from edits)
+  // Get current page annotations (auto-generated from BQ edits, with stored position overrides)
   const currentAnnotations = useMemo(() => {
     if (!showAnnotations) return [];
     
-    const pageKey = `${state.selected_file_id}-page-${state.selected_page}`;
+    const pageKey = `${state.selected_file_id}-${state.selected_page}`;
     const pageData = bqPageData[pageKey];
     if (!pageData) return [];
     
-    // Manual annotations from user drawing
-    const manualAnnotations = pageData.annotations ?? [];
-    
-    // Auto-generated annotations from user-edited BQ values
+    const storedPositions = pageData.annotation_positions || {};
     const autoAnnotations: import("./types").TextAnnotation[] = [];
     
     for (const row of pageData.rows) {
       if (row.type !== "item" || !row.user_edited) continue;
       
       const pageWidth = row.page_width ?? 1;
-      const pageHeight = row.page_height ?? 1;
       
       // Get column boxes for positioning
       const rateBox = pageData.boxes["Rate"];
@@ -945,27 +1017,27 @@ export default function App() {
       
       // Quantity annotation
       if (row.user_edited.quantity && row.quantity !== null && qtyBox) {
-        const x = qtyBox.x * pageWidth + 5;
-        const y = (row.bbox_y0 ?? 0) + 12;
+        const annId = `auto-qty-${row.id}`;
+        const stored = storedPositions[annId];
         autoAnnotations.push({
-          id: `auto-qty-${row.id}`,
+          id: annId,
           text: row.quantity.toString(),
-          x,
-          y,
+          x: stored?.x ?? (qtyBox.x * pageWidth + 5),
+          y: stored?.y ?? ((row.bbox_y0 ?? 0) + 12),
           font_size: 9,
-          color: "#0000FF",  // Blue for viewer
+          color: "#0000FF",
         });
       }
       
       // Rate annotation
       if (row.user_edited.rate && row.rate !== null && rateBox) {
-        const x = rateBox.x * pageWidth + 5;
-        const y = (row.bbox_y0 ?? 0) + 12;
+        const annId = `auto-rate-${row.id}`;
+        const stored = storedPositions[annId];
         autoAnnotations.push({
-          id: `auto-rate-${row.id}`,
+          id: annId,
           text: row.rate.toFixed(2),
-          x,
-          y,
+          x: stored?.x ?? (rateBox.x * pageWidth + 5),
+          y: stored?.y ?? ((row.bbox_y0 ?? 0) + 12),
           font_size: 9,
           color: "#0000FF",
         });
@@ -974,20 +1046,47 @@ export default function App() {
       // Total annotation
       if ((row.user_edited.total || (row.user_edited.rate && row.user_edited.quantity)) && 
           row.total !== null && totalBox) {
-        const x = totalBox.x * pageWidth + 5;
-        const y = (row.bbox_y0 ?? 0) + 12;
+        const annId = `auto-total-${row.id}`;
+        const stored = storedPositions[annId];
         autoAnnotations.push({
-          id: `auto-total-${row.id}`,
+          id: annId,
           text: row.total.toFixed(2),
-          x,
-          y,
+          x: stored?.x ?? (totalBox.x * pageWidth + 5),
+          y: stored?.y ?? ((row.bbox_y0 ?? 0) + 12),
           font_size: 9,
           color: "#0000FF",
         });
       }
     }
     
-    return [...manualAnnotations, ...autoAnnotations];
+    // Page total annotation (shown in Collection box area)
+    if (pageData.rows.length > 0) {
+      const collectionBox = pageData.boxes["Collection"];
+      if (collectionBox) {
+        let pageTotal = 0;
+        for (const row of pageData.rows) {
+          if (row.type === "item" && row.total !== null) pageTotal += row.total;
+        }
+        if (pageTotal > 0) {
+          const firstRow = pageData.rows[0];
+          const pw = firstRow?.page_width ?? 1;
+          const ph = firstRow?.page_height ?? 1;
+          const annId = `auto-pagetotal-${pageKey}`;
+          const stored = storedPositions[annId];
+          autoAnnotations.push({
+            id: annId,
+            text: `$${pageTotal.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`,
+            x: stored?.x ?? (collectionBox.x * pw + 5),
+            y: stored?.y ?? ((collectionBox.y + collectionBox.height * 0.5) * ph),
+            font_size: 10,
+            color: "#008000",
+            bold: true,
+          });
+        }
+      }
+    }
+    
+    return autoAnnotations;
   }, [state.selected_file_id, state.selected_page, bqPageData, showAnnotations]);
 
   // Save BQ template to cloud
@@ -1010,6 +1109,8 @@ export default function App() {
         state.selected_file_id, 
         state.selected_page
       );
+      // upload thumbnail image as well
+      await uploadCurrentPageImageForBQTemplate(created.id);
       const localTemplate = bqCloudToLocal(created);
       setBqTemplates((prev) => [...prev, localTemplate]);
       setMsg(`Saved BQ template "${name}" to cloud`);
@@ -1081,15 +1182,18 @@ export default function App() {
 
   // Save/update all BQ templates (used by TemplateManagerPanel)
   const handleSaveBQTemplates = useCallback(async (templates: BQTemplate[]) => {
-    // For cloud storage, we handle each template individually
-    // This is called when TemplateManagerPanel updates templates (delete, rename)
-    // We sync by comparing with current state
-    const oldIds = new Set(bqTemplates.map(t => t.id));
-    const newIds = new Set(templates.map(t => t.id));
-    
-    // Delete removed templates
-    for (const old of bqTemplates) {
-      if (!newIds.has(old.id)) {
+    if (IS_DEV_MODE) {
+      setBqTemplates(templates);
+      return;
+    }
+
+    const prev = bqTemplates;
+    const prevIds = new Set(prev.map((t) => t.id));
+    const nextIds = new Set(templates.map((t) => t.id));
+
+    // Deletions
+    for (const old of prev) {
+      if (!nextIds.has(old.id)) {
         try {
           await deleteBQTemplate(old.id);
         } catch (err) {
@@ -1097,16 +1201,45 @@ export default function App() {
         }
       }
     }
-    
-    // Update existing templates that may have changed
-    for (const tmpl of templates) {
-      if (oldIds.has(tmpl.id)) {
-        const oldTmpl = bqTemplates.find(t => t.id === tmpl.id);
-        if (oldTmpl && (oldTmpl.name !== tmpl.name || JSON.stringify(oldTmpl.boxes) !== JSON.stringify(tmpl.boxes))) {
+
+    // Additions/updates
+    const finalTemplates = [...templates];
+    for (let i = 0; i < finalTemplates.length; i++) {
+      const t = finalTemplates[i];
+      if (!prevIds.has(t.id)) {
+        // New template: create in cloud and upload image
+        try {
+          const created = await createBQTemplate(
+            t.name,
+            t.boxes.map((b) => ({
+              column_name: b.column_name,
+              x: b.x,
+              y: b.y,
+              width: b.width,
+              height: b.height,
+              color: b.color || "#2980b9",
+            })),
+            "personal",
+            undefined,
+            t.preview_file_id,
+            t.preview_page
+          );
+          finalTemplates[i] = { ...t, id: created.id };
+          await uploadCurrentPageImageForBQTemplate(created.id);
+        } catch (err) {
+          console.warn("Cloud create failed for BQ template:", err);
+        }
+      } else {
+        // existing → update if changed
+        const prevT = prev.find((p) => p.id === t.id);
+        const changed =
+          prevT?.name !== t.name ||
+          JSON.stringify(prevT?.boxes) !== JSON.stringify(t.boxes);
+        if (changed) {
           try {
-            await updateBQTemplate(tmpl.id, {
-              name: tmpl.name,
-              boxes: tmpl.boxes.map(b => ({
+            await updateBQTemplate(t.id, {
+              name: t.name,
+              boxes: t.boxes.map((b) => ({
                 column_name: b.column_name,
                 x: b.x,
                 y: b.y,
@@ -1121,10 +1254,10 @@ export default function App() {
         }
       }
     }
-    
-    setBqTemplates(templates);
+
+    setBqTemplates(finalTemplates);
     setMsg(`Saved ${templates.length} BQ template(s)`);
-  }, [bqTemplates]);
+  }, [bqTemplates, state.selected_file_id, state.selected_page]);
 
   // Edit BQ row
   const handleBQRowEdit = useCallback((pageKey: string, rowId: number, field: keyof BQRow, value: any) => {
@@ -1300,8 +1433,6 @@ export default function App() {
         <div style={{ flex: 1 }}>
           <Toolbar
             onImport={handleImport}
-            onClearData={handleClearData}
-            onDeleteFiles={handleDeleteFiles}
             onExportExcel={handleExportExcel}
             onRecognizeText={handleRecognizeText}
             onManageTemplates={handleManageTemplates}
@@ -1312,7 +1443,7 @@ export default function App() {
         </div>
         {/* User info / My Account button */}
         <div style={{ display: "flex", alignItems: "center", gap: 8, padding: "0 12px", flexShrink: 0 }}>
-          {/* Show/Hide Annotations toggle (only for BQ modules) */}
+          {/* Show/Hide BQ text overlays toggle (only for BQ modules) */}
           {(activeModule === "bq_ocr" || activeModule === "bq_export") && (
             <button
               onClick={() => setShowAnnotations((prev) => !prev)}
@@ -1325,27 +1456,9 @@ export default function App() {
                 fontSize: 12,
                 color: showAnnotations ? "#fff" : "#333",
               }}
-              title="Toggle visibility of user-entered text on PDF"
+              title="Toggle visibility of BQ rate/qty/total text overlays on PDF"
             >
-              {showAnnotations ? "👁 Show Edits" : "👁‍🗨 Hide Edits"}
-            </button>
-          )}
-          {/* Annotation mode toggle (only for BQ modules) */}
-          {(activeModule === "bq_ocr" || activeModule === "bq_export") && (
-            <button
-              onClick={() => setAnnotationMode((prev) => !prev)}
-              style={{
-                background: annotationMode ? "#3498db" : "none",
-                border: "1px solid #ccc",
-                borderRadius: 4,
-                padding: "3px 10px",
-                cursor: "pointer",
-                fontSize: 12,
-                color: annotationMode ? "#fff" : "#333",
-              }}
-              title="Toggle annotation mode - click on PDF to add text"
-            >
-              ✏️ {annotationMode ? "Annotation ON" : "Add Text"}
+              {showAnnotations ? "👁 顯示標價" : "👁‍🗨 隱藏標價"}
             </button>
           )}
           {profile?.photo_url && (
@@ -1450,6 +1563,7 @@ export default function App() {
               selectedFileId={state.selected_file_id}
               selectedPage={state.selected_page}
               onSelectPage={project.selectPage}
+              onDeleteFile={handleDeleteFile}
             />
           )}
         </div>
@@ -1496,6 +1610,11 @@ export default function App() {
                     onAddColumn={project.addColumn}
                     onRemoveColumn={project.removeColumn}
                     onToggleColumn={project.toggleColumn}
+                    onExportExcel={handleExportExcel}
+                    onRecognizeText={handleRecognizeText}
+                    onManageTemplates={handleManageTemplates}
+                    onExportPdf={handleExportPdf}
+                    disabled={state.pdf_files.length === 0}
                   />
                 )}
               </div>
@@ -1572,6 +1691,8 @@ export default function App() {
               onSaveBQTemplate={handleSaveBQTemplate}
               onApplyBQTemplate={handleApplyBQTemplate}
               onUpdateBQTemplate={handleUpdateBQTemplate}
+              usagePages={usagePages}
+              usageLimit={usageLimit}
             />
           )}
 
@@ -1661,14 +1782,12 @@ export default function App() {
             fileId={state.selected_file_id}
             pageNum={state.selected_page}
             boxes={activeModule === "bq_ocr" ? currentBQBoxes : currentBoxes}
-            selectedColumn={annotationMode ? null : selectedColumn}
+            selectedColumn={selectedColumn}
             onDrawBox={activeModule === "bq_ocr" ? handleDrawBoxBQ : handleDrawBox}
             highlightBox={highlightBox}
             pdfPageSize={pdfPageSize}
             annotations={currentAnnotations}
-            onAddAnnotation={handleAddAnnotation}
-            onDeleteAnnotation={handleDeleteAnnotation}
-            annotationMode={annotationMode}
+            onAnnotationMove={handleAnnotationMove}
           />
         </div>
       </div>

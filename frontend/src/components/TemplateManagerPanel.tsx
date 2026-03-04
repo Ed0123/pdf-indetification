@@ -8,7 +8,7 @@ import React, { useState, useEffect, useRef, useCallback } from "react";
 import type { Template, TemplateBox, PDFFileInfo, BQTemplate, BoxInfo } from "../types";
 import { ConfirmDialog } from "./ConfirmDialog";
 import { PageSelectorModal, type SelectedPage } from "./PageSelectorModal";
-import { renderPage, getTemplatePageImageUrl } from "../api/client";
+import { renderPage, getTemplatePageImageUrl, getBQTemplatePageImageUrl } from "../api/client";
 
 // Fixed color palette for boxes
 const BOX_COLORS = [
@@ -142,7 +142,10 @@ export function TemplateManagerPanel({
           .then((res) => res.url ? setThumbSrc(res.url) : setThumbSrc(null))
           .catch(() => setThumbSrc(null));
       } else {
-        setThumbSrc(null);
+        // try BQ template image if available
+        getBQTemplatePageImageUrl(selected!.id)
+          .then((res) => res.url ? setThumbSrc(res.url) : setThumbSrc(null))
+          .catch(() => setThumbSrc(null));
       }
     }
   }, [selected?.id, selected?.preview_file_id, activeTab]);

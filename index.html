@@ -1,0 +1,245 @@
+<!DOCTYPE html>
+<html lang="zh">
+<head>
+    <meta charset="UTF-8" />
+    <title>PDF 文本提取網絡應用 文檔</title>
+    <style>
+        body { font-family: Arial, sans-serif; margin: 2rem; }
+        h1, h2, h3, h4 { color: #333; }
+        pre { background:#f4f4f4; padding:1rem; overflow-x:auto; }
+        nav { margin-bottom:2rem; }
+        nav a { margin-right:1rem; }
+        section { margin-top:3rem; }
+        .endpoint { margin-bottom:2rem; }
+    </style>
+</head>
+<body>
+    <h1>PDF 文本提取網絡應用 – 綜合文檔</h1>
+    <nav>
+        <a href="#overview">概述</a>
+        <a href="#backend-api">後端 API</a>
+        <a href="#function-chains">功能流程</a>
+        <a href="#frontend">前端概覽</a>
+        <a href="#deployment">部署與需求</a>
+    </nav>
+
+    <section id="overview">
+        <h2>概述</h2>
+        <p>此文檔在一頁中說明了整個 <strong>pdf‑identification</strong> 項目。它是通過閱讀
+        Python 和 TypeScript 源碼生成的，總結了每個公開入口的行為。</p>
+        <p>整個架構由託管在 Firebase Hosting 的 <em>React + Vite</em> 前端組成，
+        後端為 FastAPI 應用，部署於 Google Cloud Run。後端負責處理 PDF 上傳、渲染、文字提取、
+        項目狀態保存、模板存儲、導出（Excel/PDF/註釋 PDF）以及通過 Firebase 管理用戶帳戶。
+        系統還包含針對工程量清單的 BQ‑OCR 支持以及基於雲的模板管理功能。</p>
+    </section>
+
+    <section id="backend-api">
+        <h2>後端 API 端點</h2>
+
+        <div class="endpoint">
+            <h3>POST /api/pdf/upload</h3>
+            <p><strong>觸發方式</strong>：multipart HTTP POST，上傳一個或多個 <code>file</code> 字段。</p>
+            <p><strong>用途</strong>：接收 PDF 文件，暫存於磁盤並返回元數據。</p>
+            <p><strong>輸入</strong>：文件列表。每個文件必須擴展名為 <code>.pdf</code> 且大小 ≤200 MB。</p>
+            <p><strong>流程</strong>：
+                <ol>
+                    <li><code>upload_pdfs</code> 驗證並寫入臨時目錄。</li>
+                    <li>使用 PyMuPDF 打開每個文件以計算頁數；無效的 PDF 將被拒絕。</li>
+                    <li>為每個文件生成 UUID 並存儲於內存字典 <code>_STORE</code>。</li>
+                    <li>返回包含 <code>FileInfo</code> 對象的列表。</li>
+                </ol>
+            </p>
+            <p><strong>返回結果</strong>：JSON 數組，包含 <code>file_id</code>、
+            <code>file_name</code>、<code>num_pages</code>、<code>file_size</code> 以及 <code>pages</code>。
+            <code>file_id</code> 用於後續請求。</p>
+        </div>
+
+        <div class="endpoint">
+            <h3>GET /api/pdf/{file_id}/page/{page_num}/render</h3>
+            <p><strong>觸發方式</strong>：HTTP GET，帶路徑參數 <code>file_id</code> 和 <code>page_num</code>，可選查詢 <code>zoom</code>。</p>
+            <p><strong>用途</strong>：將指定頁面渲染為 base64 PNG 用於前端顯示。</p>
+            <p><strong>輸入</strong>：有效的 <code>file_id</code>，0‑基礎 <code>page_num</code>。縮放因子在 0.1–5.0 之間，默認 1.5。</p>
+            <p><strong>流程</strong>：<code>render_page</code>→<code>_get_path</code>→
+            <code>utils.pdf_processing.render_pdf_page</code>（調用 PyMuPDF 並轉為 PNG 字節）→ base64 編碼。</p>
+            <p><strong>返回</strong>：JSON 包含 <code>image</code>（base64 字符串）和 <code>page_num</code>。</p>
+        </div>
+
+        <div class="endpoint">
+            <h3>POST /api/pdf/{file_id}/page/{page_num}/extract</h3>
+            <p><strong>觸發方式</strong>：HTTP POST，JSON 主體含有邊界框座標和標誌。</p>
+            <p><strong>用途</strong>：從矩形區域提取文本；優先矢量提取，必要時回退 OCR。</p>
+            <p><strong>輸入</strong>：<code>x,y,width,height</code> 為相對座標 [0,1]，<code>use_ocr</code> 布爾值。</p>
+            <p><strong>流程</strong>：<code>extract_text</code>→<code>_get_path</code>→
+            <code>utils.pdf_processing.extract_text_from_relative_region</code>→ 返回字符串。</p>
+            <p><strong>返回</strong>：<code>{"text": "..."}</code> 包含提取的文本。</p>
+        </div>
+
+        <div class="endpoint">
+            <h3>GET /api/pdf/{file_id}/page/{page_num}/dimensions</h3>
+            <p><strong>觸發方式</strong>：HTTP GET。</p>
+            <p><strong>用途</strong>：獲取頁面尺寸（PDF 點）以便坐標換算。</p>
+            <p><strong>輸入</strong>：<code>file_id</code>，<code>page_num</code>。</p>
+            <p><strong>流程</strong>：<code>page_dimensions</code>→<code>_get_path</code>→
+            <code>utils.pdf_processing.get_page_dimensions</code>。</p>
+            <p><strong>返回</strong>：<code>{"width": float, "height": float}</code>，若頁面不存在則 404。</p>
+        </div>
+
+        <div class="endpoint">
+            <h3>POST /api/project/save</h3>
+            <p><strong>觸發方式</strong>：HTTP POST，原始 JSON 主體。</p>
+            <p><strong>用途</strong>：將項目狀態流式返回給前端作為下載文件。</p>
+            <p><strong>輸入</strong>：任意 JSON（項目狀態），大小 ≤50 MB。</p>
+            <p><strong>流程</strong>：<code>save_project</code>讀取請求體，驗證大小和語法，返回帶有<code>Content-Disposition</code>的<code>StreamingResponse</code>。</p>
+            <p><strong>返回</strong>：二進制 JSON 文件 <code>project.json</code>。</p>
+        </div>
+
+        <div class="endpoint">
+            <h3>POST /api/project/load</h3>
+            <p><strong>觸發方式</strong>：multipart POST，包含單個 <code>file</code> 字段。</p>
+            <p><strong>用途</strong>：接收之前保存的項目 JSON並返回其解析內容。</p>
+            <p><strong>輸入</strong>：JSON 文件 ≤50 MB。</p>
+            <p><strong>流程</strong>：<code>load_project</code>讀取文件，檢查擴展名和大小，解析 JSON並返回對象。</p>
+            <p><strong>返回</strong>：反序列化的 JSON 或錯誤代碼 422/413。</p>
+        </div>
+
+        <div class="endpoint">
+            <h3>POST /api/export/excel</h3>
+            <p><strong>觸發方式</strong>：HTTP POST，JSON 載荷。</p>
+            <p><strong>用途</strong>：從完整項目狀態生成 Excel 工作簿。</p>
+            <p><strong>輸入</strong>：與 save/load 相同的項目 JSON。</p>
+            <p><strong>流程</strong>：<code>export_excel</code>→通過 <code>models.data_models</code>  重建 <code>ProjectData</code>→<code>utils.excel_export.export_to_excel</code> 寫入臨時文件→流式返回並刪除。</p>
+            <p><strong>返回</strong>：<code>application/vnd.openxmlformats-officedocument.spreadsheetml.sheet</code>，文件名 <code>export.xlsx</code>。</p>
+        </div>
+
+        <div class="endpoint">
+            <h3>PDF 匯出端點</h3>
+            <p>這兩個端點位於 <code>/api/pdf/export-pages</code> 和 <code>/api/pdf/export-annotated</code>。
+            支持將所選頁面匯出為單獨 PDF 或帶註釋的文檔。完整參數模型見源碼。</p>
+        </div>
+
+        <div class="endpoint">
+            <h3>用戶和管理員端點</h3>
+            <p>一組路由在 <code>/api/users</code> 下處理個人資料獲取（<code>GET /me</code>）、更新（<code>PUT /me</code>）、管理員列表與編輯，
+            以及管理群組、等級和記錄使用情況的輔助方法。所有調用均需要 Firebase 令牌，並調用輔助函數確保默認資料和權限。</p>
+        </div>
+
+        <div class="endpoint">
+            <h3>模板管理端點</h3>
+            <p>在 <code>/api/templates</code> 下實現 CRUD 操作，用於在 Firestore 中存儲提取模板。
+            輔助函數計算用戶群、管理員狀態和雲存儲路徑；頁面圖像可以通過 multipart 或 base64 方式上傳，
+            檢索時返回簽署 URL 或內聯 base64 數據。權限（個人/公開/群組）受到強制執行，管理員可覆蓋。</p>
+        </div>
+
+        <div class="endpoint">
+            <h3>GET /api/bq/engines</h3>
+            <p><strong>觸發方式</strong>：HTTP GET。</p>
+            <p><strong>用途</strong>：列出可用的工程量清單 OCR 引擎（pdfplumber、camelot 等），並指示當前環境中哪些可用。</p>
+            <p><strong>返回</strong>：包含 <code>id,name,quota_cost,available,description</code> 的對象數組。</p>
+        </div>
+
+        <div class="endpoint">
+            <h3>POST /api/bq/extract</h3>
+            <p><strong>觸發方式</strong>：HTTP POST，主體為 JSON。</p>
+            <p><strong>用途</strong>：使用提供的框定義和選定引擎對一頁或多頁執行 BQ‑OCR 提取。</p>
+            <p><strong>輸入</strong>：<code>file_id</code>、<code>pages</code> 列表、含 <code>column_name,x,y,width,height</code> 的 <code>boxes</code>  區，及可選 <code>engine</code>。</p>
+            <p><strong>返回</strong>：<code>success</code> 標誌和解析行的 <code>rows</code> 陣列，以及使用成本和任何警告。</p>
+        </div>
+
+        <div class="endpoint">
+            <h3>BQ 模板端點</h3>
+            <p>在 <code>/api/bq/templates</code> 下的 CRUD 操作，用於存儲提取版式。支持通過 base64 或 multipart 上傳頁面圖像，並返回預覽的簽名 URL。
+            權限根據個人/公開/群組作用域及管理員覆蓋。</p>
+        </div>
+
+        <p>所有 API 端點均由 <code>backend/auth_middleware.py</code> 中的 <code>require_auth</code> 保護，
+        驗證 Firebase 令牌。<code>backend/main.py</code> 的 <code>startup</code> 事件初始化 Firebase，並在 <code>/api/health</code> 和 <code>/api/ocr/status</code> 暴露健康與 OCR 狀態端點。</p>
+    </section>
+
+    <section id="function-chains">
+        <h2>功能流程（詳細步驟）</h2>
+        <p>本節描述最常用工作流的內部呼叫順序。</p>
+
+        <h3>PDF 上傳與渲染/提取流程</h3>
+        <ol>
+            <li>前端 <code>uploadPdfs()</code> 將文件發送至 <code>/api/pdf/upload</code>。</li>
+            <li>後端 <code>upload_pdfs</code> 存儲文件並更新 <code>_STORE</code>。</li>
+            <li>渲染頁面時前端使用 <code>render_page</code> 端點，該端點調用
+                <code>utils.pdf_processing.render_pdf_page</code> 回傳 PNG 字節。</li>
+            <li>執行提取請求時觸發 <code>extract_text</code>，其委派給
+                <code>utils.pdf_processing.extract_text_from_relative_region</code>。該輔助函數
+                在 PyMuPDF 打開 PDF 並嘗試文本提取；如果結果為空且 <code>use_ocr</code> 為真，則回退調用 <code>utils.pdf_processing.do_ocr</code>。</li>
+            <li>結果返回前端並填充數據表。</li>
+        </ol>
+
+        <h3>項目保存/加載與導出流程</h3>
+        <ol>
+            <li>用戶在 UI 觸發"保存項目"。前端將完整狀態 POST 到
+                <code>/api/project/save</code>，在那裡 <code>save_project</code> 驗證 JSON 並以
+                適當頭部流式返回。</li>
+            <li>使用"加載項目"時，前端將文件發送到
+                <code>/api/project/load</code>；後端反序列化並返回對象。</li>
+            <li>Excel 導出將相同項目 JSON POST 到 <code>/api/export/excel</code>；後端
+                從 <code>models/data_models.py</code> 重建 <code>ProjectData</code>，然後調用
+                <code>utils.excel_export.export_to_excel</code>，該函數遍歷頁面/模板/數據並使用
+                <code>openpyxl</code> 寫入單元格。生成的工作簿被流式返回。</li>
+        </ol>
+
+        <h3>模板 CRUD 流程</h3>
+        <ol>
+            <li>前端組件如 <code>TemplateManagerPanel</code> 調用相應
+                <code>/api/templates</code> 端點。</li>
+            <li><code>list_templates</code> 查詢 Firestore 並按權限、群組和管理員狀態過濾。</li>
+            <li>創建和更新直接操作 Firestore 文檔，添加時間戳、所有者 UID，並將模型對象轉換為字典。</li>
+            <li>頁面圖像上傳使用雲存儲；multipart 或 base64 均可進行。
+                檢索時嘗試從存儲下載，並在需要時返回內聯 base64。</li>
+        </ol>
+
+        <h3>用戶與管理員管理</h3>
+        <p>身份驗證由 Firebase 處理；請求到達時令牌被驗證，
+        <code>require_auth</code> 返回包含 <code>uid</code>、電子郵件、名稱等的字典。
+        用戶路由確保配置個人資料並緩存等級/群組資訊。管理員路由使用
+        <code>_is_admin</code> 進行守衛並可能通過
+        <code>backend/email_service.py</code> 觸發電子郵件通知。</p>
+    </section>
+
+    <section id="frontend">
+        <h2>前端概覽</h2>
+        <p>客戶端使用 TypeScript + React 編寫；關鍵組件包括：</p>
+        <ul>
+            <li><code>App.tsx</code> – 根組件，處理路由和認證狀態。</li>
+            <li><code>PDFTreeView.tsx</code>、<code>PDFViewer.tsx</code> – 顯示頁面並接受提取框繪製。</li>
+            <li><code>DataTable.tsx</code>/ <code>SinglePageDataTable.tsx</code> – 顯示提取文本並允許編輯。</li>
+            <li><code>Toolbar.tsx</code>、<code>StatusBar.tsx</code> – 用戶操作和進度。</li>
+            <li>API 客戶端 <code>api/client.ts</code> 封裝 `<code>fetch</code>` 並附加
+                Firebase 令牌。鉤子 `<code>useProject.ts</code>` 協調當前 PDF/框/模板/數據的狀態管理。</li>
+        </ul>
+        <p>每個 UI 操作的啟動方法與上述後端路由緊密對應。例如，單擊
+        “識別文字”會觸發對 <code>extract</code> 的調用，成功後最終更新狀態。
+        前端代碼是自包含的；發佈時，轉譯後的資源位於 <code>frontend-dist/</code>。</p>
+
+        <p>所有前端依賴列於 <code>frontend/package.json</code>；開發期間運行
+        <code>npm run dev</code> 可在 <code>http://localhost:5173</code> 啟動 Vite 服務並透過代理
+        連接後端。</p>
+    </section>
+
+    <section id="deployment">
+        <h2>部署與需求</h2>
+        <p>項目提供一條命令腳本（<code>deploy.sh</code>）構建後端和前端，並分別部署到
+        Cloud Run 和 Firebase Hosting。手動步驟記錄在原始的 <code>README.md</code> (<a href="README.md">點此</a>)。</p>
+        <p>後端依賴列於 <code>backend/requirements.txt</code>，包括 FastAPI、
+        PyMuPDF、Tesseract 綁定、Firebase admin SDK 等。使用
+        <code>pip install -r backend/requirements.txt</code> 安裝。</p>
+        <p>前端依賴列於 <code>frontend/package.json</code>，通過
+        <code>npm install</code> 獲取。部署腳本中已涵蓋這些需求。</p>
+        <p><strong>需求檢查</strong>：從導入語句分析，所有 Python 包都出現在
+        <code>requirements.txt</code> 中。沒有缺失依賴。Dockerfile 內安裝了
+        <code>tesseract-ocr</code>。前端 package.json 覆蓋了所有 React/Vite 库。
+        沒有單獨的“邏輯”文件需要包含——業務邏輯完全位於倉庫的路由器和輔助模塊中，
+        因此部署腳本已經打包了所有必要內容。</p>
+    </section>
+
+    <footer>
+        <p>2026-03-04 生成，內容根據當前代碼庫自動整理。</p>
+    </footer>
+</body>
+</html>

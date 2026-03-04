@@ -36,10 +36,13 @@ class PDFTreeView(QWidget):
         page_selected(str, int): Emitted with (file_path, page_number) when
             a page is double-clicked.
         selection_changed(): Emitted when the selection state changes.
+        file_delete_requested(list): Emitted with a list of file paths when the
+            user clicks the delete button in the header.
     """
     
     page_selected = pyqtSignal(str, int)
     selection_changed = pyqtSignal()
+    file_delete_requested = pyqtSignal(list)
     
     def __init__(self, parent: Optional[QWidget] = None):
         super().__init__(parent)
@@ -75,6 +78,13 @@ class PDFTreeView(QWidget):
         self.btn_collapse_all.clicked.connect(self.collapse_all)
         header_layout.addWidget(self.btn_collapse_all)
 
+        # delete button - acts on currently-selected file(s)
+        self.btn_delete_file = QPushButton("Delete")
+        self.btn_delete_file.setFixedWidth(60)
+        self.btn_delete_file.setToolTip("Delete selected PDF file(s)")
+        self.btn_delete_file.clicked.connect(self._on_delete_files)
+        header_layout.addWidget(self.btn_delete_file)
+
         layout.addLayout(header_layout)
         
         # Tree widget
@@ -90,6 +100,12 @@ class PDFTreeView(QWidget):
         self.tree.itemSelectionChanged.connect(self._on_selection_changed)
         
         layout.addWidget(self.tree)
+
+    def _on_delete_files(self):
+        """Emit request for deletion of currently selected file paths."""
+        paths = self.get_selected_file_paths()
+        if paths:
+            self.file_delete_requested.emit(paths)
     
     def populate(self, project_data: ProjectData) -> None:
         """

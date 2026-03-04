@@ -27,6 +27,21 @@ type TokenFreshProvider = () => Promise<string | null>;
 let _getToken: TokenProvider = async () => null;
 let _getTokenFresh: TokenFreshProvider = async () => null;
 
+// optional handler invoked when even a refreshed token yields 401
+// (session expired or revoked).  Installed by App so it can force logout.
+export type AuthExpiredHandler = () => void;
+let _onAuthExpired: AuthExpiredHandler = () => {};
+
+// optional handler invoked when a file_id is missing on the server.  The
+// handler may choose to re-upload the original blob and return a new ID
+// (or return null to indicate no recovery is possible).
+export type MissingFileHandler = (oldFileId: string) => Promise<string | null>;
+let _onFileMissing: MissingFileHandler | null = null;
+
+export function installMissingFileHandler(fn: MissingFileHandler) {
+  _onFileMissing = fn;
+}
+
 /**
  * Install token providers. Called once from App.tsx with useAuth()'s
  * getToken / getTokenFresh callbacks.
@@ -34,9 +49,13 @@ let _getTokenFresh: TokenFreshProvider = async () => null;
 export function installTokenProvider(
   getToken: TokenProvider,
   getTokenFresh: TokenFreshProvider,
+  onAuthExpired?: AuthExpiredHandler,
 ) {
   _getToken = getToken;
   _getTokenFresh = getTokenFresh;
+  if (onAuthExpired) {
+    _onAuthExpired = onAuthExpired;
+  }
 }
 
 /** @deprecated — kept for backward compat; prefer installTokenProvider. */
@@ -86,6 +105,8 @@ async function request<T>(
       res = await doFetch(freshToken);
     }
     if (res.status === 401) {
+      // notify host (App) that the session is dead so it can log out
+      _onAuthExpired();
       throw new Error("登入已過期，請重新登入。");
     }
   }
@@ -140,6 +161,7 @@ async function requestBlob(
       res = await doFetch(freshToken);
     }
     if (res.status === 401) {
+      _onAuthExpired();
       throw new Error("登入已過期，請重新登入。");
     }
   }
@@ -149,6 +171,26 @@ async function requestBlob(
     throw new Error(`API error ${res.status}: ${text}`);
   }
   return res.blob();
+}
+
+// --------------------------------------------------------------------------
+// Messaging
+// --------------------------------------------------------------------------
+
+export async function sendUserMessage(message: string): Promise<void> {
+  await request("/api/users/message", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ message }) });
+}
+
+export async function fetchMyMessages(): Promise<any[]> {
+  return request("/api/users/message");
+}
+
+export async function fetchAllMessages(): Promise<any[]> {
+  return request("/api/messages/");
+}
+
+export async function replyToMessage(id: string, reply: string): Promise<void> {
+  await request(`/api/messages/${id}/reply`, { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ reply }) });
 }
 
 // --------------------------------------------------------------------------
@@ -185,10 +227,22 @@ export async function renderPage(
   pageNum: number,
   zoom = 1.5
 ): Promise<string> {
-  const data = await request<{ image: string }>(
-    `/api/pdf/${fileId}/page/${pageNum}/render?zoom=${zoom}`
-  );
-  return data.image;
+  const path = `/api/pdf/${fileId}/page/${pageNum}/render?zoom=${zoom}`;
+  try {
+    const data = await request<{ image: string }>(path);
+    return data.image;
+  } catch (err: any) {
+    if (_onFileMissing && err.message?.includes("404")) {
+      const newId = await _onFileMissing(fileId);
+      if (newId && newId !== fileId) {
+        const data = await request<{ image: string }>(
+          `/api/pdf/${newId}/page/${pageNum}/render?zoom=${zoom}`
+        );
+        return data.image;
+      }
+    }
+    throw err;
+  }
 }
 
 /** Extract text from a relative bounding box region. */
@@ -198,16 +252,37 @@ export async function extractText(
   box: { x: number; y: number; width: number; height: number },
   useOcr = true
 ): Promise<string> {
-  const data = await request<{ text: string }>(
-    `/api/pdf/${fileId}/page/${pageNum}/extract`,
-    {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ ...box, use_ocr: useOcr }),
-    },
-    LONG_TIMEOUT_MS,
-  );
-  return data.text;
+  const path = `/api/pdf/${fileId}/page/${pageNum}/extract`;
+  const body = { ...box, use_ocr: useOcr };
+  try {
+    const data = await request<{ text: string }>(
+      path,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body),
+      },
+      LONG_TIMEOUT_MS,
+    );
+    return data.text;
+  } catch (err: any) {
+    if (_onFileMissing && err.message?.includes("404")) {
+      const newId = await _onFileMissing(fileId);
+      if (newId && newId !== fileId) {
+        const data = await request<{ text: string }>(
+          `/api/pdf/${newId}/page/${pageNum}/extract`,
+          {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify(body),
+          },
+          LONG_TIMEOUT_MS,
+        );
+        return data.text;
+      }
+    }
+    throw err;
+  }
 }
 
 // --------------------------------------------------------------------------
@@ -792,6 +867,7 @@ export interface BQTemplateAPI {
   group: string;
   preview_file_id?: string | null;
   preview_page?: number;
+  page_image_path?: string | null;
   created_at: string;
   updated_at: string;
 }
@@ -799,6 +875,30 @@ export interface BQTemplateAPI {
 /** List all BQ templates visible to current user. */
 export async function listBQTemplates(): Promise<BQTemplateAPI[]> {
   return request<BQTemplateAPI[]>("/api/bq/templates/");
+}
+
+/** Upload a page image (base64 PNG) for a BQ template to Cloud Storage. */
+export async function uploadBQTemplatePageImage(
+  templateId: string,
+  base64Png: string
+): Promise<{ path: string; template_id: string }> {
+  return request<{ path: string; template_id: string }>(
+    `/api/bq/templates/${templateId}/page-image-b64`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ image: base64Png }),
+    }
+  );
+}
+
+/** Get a (signed) URL for the page image of a BQ template. */
+export async function getBQTemplatePageImageUrl(
+  templateId: string
+): Promise<{ url: string; source: string }> {
+  return request<{ url: string; source: string }>(
+    `/api/bq/templates/${templateId}/page-image`
+  );
 }
 
 /** Create a new BQ template. */
