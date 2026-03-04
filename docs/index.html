@@ -421,8 +421,10 @@
     <a href="#drawing-boxes">✏️ Drawing Boxes</a>
     <a href="#extracting-text">🔍 Extracting Text</a>
     <a href="#managing-columns">📊 Managing Columns</a>
+    <a href="#template-manager">📋 Template Manager</a>
     <a href="#save-load">💾 Save &amp; Load</a>
     <a href="#export-excel">📈 Export to Excel</a>
+    <a href="#single-page-mode">📄 Single Page Mode</a>
     <a href="#keyboard-shortcuts">⌨️ Shortcuts</a>
     
     <div class="section-header">Developer</div>
@@ -565,7 +567,7 @@
     and user-defined data columns. Click a data cell to select it for box drawing — if a drawn box exists for that cell the PDF viewer will be focused and centred on that box so it is immediately visible. Double-click to edit values manually.</p>
     
     <h3>3rd Column: PDF Page Viewer</h3>
-    <p>Renders the selected PDF page with zoom, pan, and interactive box drawing. A <strong>Centre</strong> button in the zoom toolbar resets pan and recentres the page; clicking a data cell in the table will highlight the corresponding box and centre the viewer on it (when present). Boxes are color-coded and labeled with their column names.</p>
+    <p>Renders the selected PDF page with zoom, pan, and interactive box drawing. The zoom toolbar contains a <strong>Centre</strong> button that resets pan, a <strong>Clear Box</strong> control for deleting the selected box, and a <strong>Single Page Mode</strong> checkbox on its left edge. Clicking a data cell in the table will highlight the corresponding box and centre the viewer on it (when present). Boxes are color-coded and labeled with their column names. <strong>Hold <kbd>Ctrl</kbd> and click boxes to select multiple regions, then drag any one of them to move the group or press Delete/Clear Box to remove all selected.</strong></p>
 </section>
 
 <!-- ==================== IMPORTING PDFS ==================== -->
@@ -599,9 +601,9 @@
     
     <h3>Editing a Box</h3>
     <ul>
-        <li><strong>Move:</strong> Click and drag inside the box</li>
+        <li><strong>Move:</strong> Click and drag inside the box.  When multiple boxes are selected (<kbd>Ctrl</kbd>+click), dragging moves them as a group.</li>
         <li><strong>Resize:</strong> Click the box, then drag any resize handle (corners/edges)</li>
-        <li><strong>Delete:</strong> Select the box and press <kbd>Delete</kbd></li>
+        <li><strong>Delete:</strong> Select the box and press <kbd>Delete</kbd> or click the <strong>Clear Box</strong> button.  Multiple selected boxes will all be removed.</li>
     </ul>
     
     <h3>Applying Boxes to Multiple Pages</h3>
@@ -628,6 +630,9 @@
         <li>All drawn boxes on selected pages are processed</li>
         <li>Progress is shown in the status bar</li>
     </ol>
+    <p>The extraction tasks run in parallel using multiple CPU cores for speed.
+    A cancel button appears next to the progress bar; clicking it will abort the
+    operation as soon as possible while allowing already-started tasks to finish.</p>
     
     <h3>Manual Editing</h3>
     <p>Double-click any cell in the data table to manually edit the extracted value.
@@ -657,6 +662,40 @@
     <h3>Showing/Hiding Columns</h3>
     <p>Click <strong>"Show/Hide Columns"</strong> to toggle visibility of any column including 
     File Name, File Path, and custom columns.</p>
+</section>
+
+<!-- ==================== TEMPLATE MANAGER ==================== -->
+<section id="template-manager">
+    <h2>Template Manager</h2>
+    
+    <p>The Template Manager allows you to save the layout of drawn boxes on a page as a template, and apply it to other pages.</p>
+    
+    <h3>Creating a New Template</h3>
+    <ol class="steps">
+        <li>Draw the desired boxes on a PDF page.</li>
+        <li>In the Template Manager zone (above the data table), click <strong>"New"</strong>.</li>
+        <li>Enter a name for the template and click OK.</li>
+    </ol>
+    
+    <h3>Applying a Template to the Current Page</h3>
+    <ol class="steps">
+        <li>Select the target page in the PDF Tree View.</li>
+        <li>Select the desired template from the dropdown menu in the Template Manager zone.</li>
+        <li>Click <strong>"Apply"</strong>. The boxes from the template will be applied to the current page.</li>
+    </ol>
+    
+    <h3>Managing Templates (Pop-up Window)</h3>
+    <p>Click <strong>"Manager"</strong> to open the Template Manager pop-up window.</p>
+    <ul>
+        <li><strong>Delete Templates:</strong> Select a template from the left list and click "Delete".</li>
+        <li><strong>Apply to Multiple Pages:</strong> 
+            <ol>
+                <li>Select a template from the left list.</li>
+                <li>Select one or more pages from the right list (you can use the checkboxes or click and drag to select multiple rows).</li>
+                <li>Click <strong>"Apply to Selected Pages"</strong>.</li>
+            </ol>
+        </li>
+    </ul>
 </section>
 
 <!-- ==================== SAVE & LOAD ==================== -->
@@ -701,6 +740,116 @@
         <tr><td>Page Number</td><td>1-based page number</td></tr>
         <tr><td><em>[Custom Columns]</em></td><td>User-defined extracted data columns</td></tr>
     </table>
+</section>
+
+<!-- ==================== SINGLE PAGE MODE ==================== -->
+<section id="single-page-mode">
+    <h2>Single Page Mode</h2>
+
+    <h3>Introduction</h3>
+    <p>When a project contains many PDF pages, the <strong>Extracted Data</strong> table can become very long
+    and difficult to navigate. <em>Single Page Mode</em> addresses this by showing <strong>only the row for
+    the currently selected page</strong>, together with a compact navigation bar that lets you step through
+    every page one at a time without losing any data.</p>
+
+    <div class="info-box tip">
+        <div>
+            <span class="title">✅ Tip</span>
+            Switching pages in Single Page Mode never discards edits — all cell changes are written
+            directly to the in-memory project data, just as in normal mode.
+        </div>
+    </div>
+
+    <h3>How to Enable</h3>
+    <ol class="steps">
+        <li>
+            <strong>Locate the toggle in the toolbar</strong>
+            <p>The <strong>"Single Page Mode"</strong> checkbox now lives in the PDF viewer's
+            zoom toolbar (the top of the right‑hand panel, next to the zoom/fit
+            controls).  It is still exposed via the Main Window object for
+            automation, but there is no longer a separate "Options" toolbar.</p>
+        </li>
+        <li>
+            <strong>Check the checkbox</strong>
+            <p>The Extracted Data table immediately collapses to show only the currently selected page.
+            A blue navigation bar appears above the table.</p>
+        </li>
+        <li>
+            <strong>Navigate between pages</strong>
+            <p>Use the <strong>← Previous</strong> and <strong>Next →</strong> buttons in the navigation
+            bar to move backward or forward through all pages in the project. The page indicator label
+            shows the current file name, 1-based page number, and your overall position
+            (e.g., <code>report.pdf  |  Page 3  (5 / 42)</code>).</p>
+        </li>
+        <li>
+            <strong>Uncheck the checkbox to return to normal mode</strong>
+            <p>The full table is restored and sorting / interactive resize are re-enabled.</p>
+        </li>
+    </ol>
+
+    <h3>User Interface</h3>
+    <p>When Single Page Mode is active the table area looks like this:</p>
+    <pre><code>┌──────────────────────────────────────────────────────────────────┐
+│ Extracted Data                                                     │
+├──────────────────────────────────────────────────────────────────┤
+│  report.pdf  |  Page 3  (3 / 42)    [← Previous]  [Next →]      │
+├──────────────────────────────────────────────────────────────────┤
+│ Attribute │ Extracted Data                                       │
+│─────────────────────────────────────────────────────────────────│
+│ Column A  │  value                                               │
+│ Column B  │  value                                               │
+│ ...       │  ...                                                 │
+├──────────────────────────────────────────────────────────────────┤
+│  [+ Add Column]  [- Remove Column]  [Show/Hide Columns]          │
+└──────────────────────────────────────────────────────────────────┘</code></pre>
+
+    <ul>
+        <li><strong>Navigation bar</strong> — shows file name, current page number, and overall index
+            (e.g., <em>3 / 42</em>). The <strong>← Previous</strong> button is disabled on the first page;
+            <strong>Next →</strong> is disabled on the last page.</li>
+        <li><strong>Vertical table</strong> — the table is transposed to show <strong>Attribute</strong> (column names) and <strong>Extracted Data</strong> (values) for the active page. If an attribute
+            has no data for that page the cell is empty and can be edited directly.</li>
+        <li><strong>Add / Remove Column buttons</strong> — behave identically to normal mode. A newly
+            added column instantly appears as a new row for the current page (empty) and for every other page.</li>
+        <li><strong>Row highlight</strong> — the selected row (attribute) is highlighted with the standard selection
+            colour so the active field is always easy to identify.</li>
+    </ul>
+
+    <h3>Behaviour</h3>
+    <table>
+        <tr><th>Scenario</th><th>Behaviour</th></tr>
+        <tr>
+            <td>Selecting a page in the tree while SPM is active</td>
+            <td>The navigation bar jumps to that page; the table updates immediately to show the data for that page.</td>
+        </tr>
+        <tr>
+            <td>Clicking ← Previous / Next →</td>
+            <td>The PDF Viewer and the tree selection both update to match the new page.</td>
+        </tr>
+        <tr>
+            <td>Editing a cell in SPM</td>
+            <td>Data is written to the in-memory model; switching pages does not discard the edit.</td>
+        </tr>
+        <tr>
+            <td>Page with no extracted data</td>
+            <td>All data cells are shown as empty and remain fully editable.</td>
+        </tr>
+        <tr>
+            <td>Sorting / interactive column resize</td>
+            <td>Disabled while SPM is active to prevent accidental reordering. Both are restored when SPM is turned off.</td>
+        </tr>
+        <tr>
+            <td>Clicking a row cell</td>
+            <td>Row is highlighted and the matching box in the PDF Viewer gains focus, same as normal
+                mode.</td>
+        </tr>
+    </table>
+
+    <h3>Conclusion</h3>
+    <p>Single Page Mode is ideal for projects with dozens or hundreds of pages where scrolling through
+    the full table is impractical. Because all edits are persisted concurrently to the shared
+    <code>ProjectData</code> object, you can freely navigate between pages, fill in data one page at a
+    time, and then export or save the complete dataset without any data loss.</p>
 </section>
 
 <!-- ==================== KEYBOARD SHORTCUTS ==================== -->

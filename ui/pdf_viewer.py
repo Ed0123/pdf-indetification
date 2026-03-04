@@ -23,6 +23,7 @@ from PyQt5.QtWidgets import (
     QScrollArea,
     QSpinBox,
     QPushButton,
+    QCheckBox,
     QSizePolicy,
     QApplication,
 )
@@ -45,6 +46,9 @@ import math
 
 from models.data_models import BoxInfo
 
+
+from PyQt5 import uic
+import os
 
 class DrawingBox:
     """
@@ -372,10 +376,23 @@ class PDFViewerCanvas(QWidget):
         # Check if clicking on an existing box
         clicked_box = self._find_box_at_point(pos)
         if clicked_box:
-            # Deselect all
-            for b in self._boxes:
-                b.selected = False
-            clicked_box.selected = True
+            # Ctrl+click toggles selection, no move initiated
+            if event.modifiers() & Qt.ControlModifier:
+                clicked_box.selected = not clicked_box.selected
+                # emit selection for the clicked box
+                if clicked_box.selected:
+                    self.box_selected_signal.emit(clicked_box.column_name)
+                self.update()
+                return
+
+            # Without Ctrl, begin move; preserve existing selection when
+            # user clicks one of already-selected boxes (to move group).
+            if not clicked_box.selected:
+                # clear others if the clicked one wasn't already selected
+                for b in self._boxes:
+                    b.selected = False
+                clicked_box.selected = True
+            # mark all currently selected boxes for potential grouped move
             self._moving = True
             self._move_box = clicked_box
             self._move_start = pos
@@ -415,12 +432,13 @@ class PDFViewerCanvas(QWidget):
             if iw > 0 and ih > 0:
                 delta_x = (pos.x() - self._move_start.x()) / iw
                 delta_y = (pos.y() - self._move_start.y()) / ih
-                
-                new_x = max(0, min(1 - self._move_box.rel_w, self._move_box.rel_x + delta_x))
-                new_y = max(0, min(1 - self._move_box.rel_h, self._move_box.rel_y + delta_y))
-                
-                self._move_box.rel_x = new_x
-                self._move_box.rel_y = new_y
+                # shift every selected box while enforcing bounds
+                for box in self._boxes:
+                    if box.selected:
+                        new_x = max(0, min(1 - box.rel_w, box.rel_x + delta_x))
+                        new_y = max(0, min(1 - box.rel_h, box.rel_y + delta_y))
+                        box.rel_x = new_x
+                        box.rel_y = new_y
                 self._move_start = pos
                 self.update()
             return
@@ -558,15 +576,77 @@ class PDFViewerCanvas(QWidget):
             super().wheelEvent(event)
     
     def keyPressEvent(self, event: QKeyEvent):
-        """Handle Delete key to delete selected box."""
+        """Handle Delete key to delete selected box and Arrow keys to move it."""
         if event.key() == Qt.Key_Delete:
+            # delete all selected boxes (not just first)
+            removed = []
+            for box in list(self._boxes):
+                if box.selected:
+                    removed.append(box.column_name)
+                    self._boxes.remove(box)
+            for col in removed:
+                self.box_deleted.emit(col)
+            if removed:
+                self.update()
+            return
+        elif event.key() in (Qt.Key_Up, Qt.Key_Down, Qt.Key_Left, Qt.Key_Right):
+            # if any box is selected we treat arrows as box-move commands
+            selected_box = any(box.selected for box in self._boxes)
+            if selected_box:
+                for box in self._boxes:
+                    if box.selected:
+                        ox, oy, iw, ih = self._get_image_display_params()
+                        if iw > 0 and ih > 0:
+                            # Move by 1 pixel in display coordinates, or 10 pixels if Shift is held
+                            step = 10 if event.modifiers() & Qt.ShiftModifier else 1
+                            delta_x = step / iw
+                            delta_y = step / ih
+                            
+                            if event.key() == Qt.Key_Up:
+                                box.rel_y = max(0.0, box.rel_y - delta_y)
+                            elif event.key() == Qt.Key_Down:
+                                box.rel_y = min(1.0 - box.rel_h, box.rel_y + delta_y)
+                            elif event.key() == Qt.Key_Left:
+                                box.rel_x = max(0.0, box.rel_x - delta_x)
+                            elif event.key() == Qt.Key_Right:
+                                box.rel_x = min(1.0 - box.rel_w, box.rel_x + delta_x)
+                            
+                            self.update()
+                        break
+            else:
+                # no box selected, arrow keys requested navigation
+                if event.key() == Qt.Key_Left:
+                    self.page_requested.emit(-1)
+                    return
+                elif event.key() == Qt.Key_Right:
+                    self.page_requested.emit(1)
+                    return
+        super().keyPressEvent(event)
+
+    def keyReleaseEvent(self, event: QKeyEvent):
+        """Emit box_changed when arrow key is released."""
+        if event.isAutoRepeat():
+            super().keyReleaseEvent(event)
+            return
+            
+        if event.key() in (Qt.Key_Up, Qt.Key_Down, Qt.Key_Left, Qt.Key_Right):
             for box in self._boxes:
                 if box.selected:
-                    self.box_deleted.emit(box.column_name)
-                    self._boxes.remove(box)
-                    self.update()
+                    self.box_changed.emit(box.column_name, box.rel_x, box.rel_y, box.rel_w, box.rel_h)
                     break
-        super().keyPressEvent(event)
+        super().keyReleaseEvent(event)
+
+    def delete_selected_box(self) -> None:
+        """Remove all selected boxes and emit deletion signals individually."""
+        removed = []
+        for box in list(self._boxes):
+            if box.selected:
+                removed.append(box.column_name)
+                self._boxes.remove(box)
+        for col in removed:
+            self.box_deleted.emit(col)
+        if removed:
+            self.update()
 
 
 class PDFViewer(QWidget):
@@ -582,6 +662,7 @@ class PDFViewer(QWidget):
         box_deleted(str): Box deleted.
         box_selected(str): Box selected by clicking.
         zoom_changed(float): Zoom level changed.
+        single_page_mode_toggled(bool): User clicked the toggle in the toolbar.
     """
     
     box_drawn = pyqtSignal(str, float, float, float, float)
@@ -589,70 +670,31 @@ class PDFViewer(QWidget):
     box_deleted = pyqtSignal(str)
     box_selected = pyqtSignal(str)
     zoom_changed = pyqtSignal(float)
+    single_page_mode_toggled = pyqtSignal(bool)
+    # emitted when the user presses left/right while no box is selected; value
+    # is -1 for previous or +1 for next page.  The main window listens and
+    # updates the tree/viewer accordingly.
+    page_requested = pyqtSignal(int)
     
     def __init__(self, parent: Optional[QWidget] = None):
         super().__init__(parent)
-        self._setup_ui()
-    
-    def _setup_ui(self):
-        """Initialize the UI layout with toolbar and scrollable canvas."""
-        layout = QVBoxLayout(self)
-        layout.setContentsMargins(0, 0, 0, 0)
+        ui_path = os.path.join(os.path.dirname(__file__), "pdf_viewer.ui")
+        uic.loadUi(ui_path, self)
         
-        # Header
-        header = QLabel("PDF Page Content")
-        header.setFont(QFont("Segoe UI", 10, QFont.Bold))
-        header.setStyleSheet("padding: 6px; background-color: #f0f0f0; border-bottom: 1px solid #ccc;")
-        layout.addWidget(header)
-        
-        # Zoom toolbar
-        zoom_bar = QHBoxLayout()
-        zoom_bar.setContentsMargins(4, 4, 4, 4)
-        
-        self.btn_zoom_out = QPushButton("-")
-        self.btn_zoom_out.setFixedWidth(30)
-        self.btn_zoom_out.setToolTip("Zoom Out (5%)")
         self.btn_zoom_out.clicked.connect(self._zoom_out)
-        zoom_bar.addWidget(self.btn_zoom_out)
-        
-        self.spin_zoom = QSpinBox()
-        self.spin_zoom.setRange(10, 1000)
-        self.spin_zoom.setValue(100)
-        self.spin_zoom.setSuffix("%")
-        self.spin_zoom.setSingleStep(5)
-        self.spin_zoom.setToolTip("Zoom Percentage")
         self.spin_zoom.valueChanged.connect(self._on_zoom_spin_changed)
-        zoom_bar.addWidget(self.spin_zoom)
-        
-        self.btn_zoom_in = QPushButton("+")
-        self.btn_zoom_in.setFixedWidth(30)
-        self.btn_zoom_in.setToolTip("Zoom In (5%)")
         self.btn_zoom_in.clicked.connect(self._zoom_in)
-        zoom_bar.addWidget(self.btn_zoom_in)
-        
-        self.btn_fit_width = QPushButton("Fit Width")
-        self.btn_fit_width.setToolTip("Fit page to viewer width")
         self.btn_fit_width.clicked.connect(self._fit_width)
-        zoom_bar.addWidget(self.btn_fit_width)
-        
-        self.btn_fit_height = QPushButton("Fit Height")
-        self.btn_fit_height.setToolTip("Fit page to viewer height")
         self.btn_fit_height.clicked.connect(self._fit_height)
-        zoom_bar.addWidget(self.btn_fit_height)
-
-        # Centre the PDF (reset pan) button
-        self.btn_center = QPushButton("Centre")
-        self.btn_center.setToolTip("Centre the PDF (reset pan)")
         self.btn_center.clicked.connect(self.center_image)
-        zoom_bar.addWidget(self.btn_center)
+        self.btn_clear_box.clicked.connect(self._on_clear_box_clicked)
         
-        zoom_bar.addStretch()
-        layout.addLayout(zoom_bar)
-        
-        # Scroll area with canvas
-        self.scroll_area = QScrollArea()
-        self.scroll_area.setWidgetResizable(True)
-        self.scroll_area.setAlignment(Qt.AlignCenter)
+        # maintain a hidden checkbox object for compatibility; it is not
+        # placed in the UI, but we keep the signal and set_single_page_mode
+        # method working for legacy code and tests.
+        self.chk_single_page_mode = QCheckBox()
+        self.chk_single_page_mode.setVisible(False)
+        self.chk_single_page_mode.toggled.connect(self.single_page_mode_toggled)
         
         self.canvas = PDFViewerCanvas()
         self.canvas.box_drawn.connect(self.box_drawn.emit)
@@ -661,11 +703,27 @@ class PDFViewer(QWidget):
         self.canvas.box_selected_signal.connect(self.box_selected.emit)
         
         self.scroll_area.setWidget(self.canvas)
-        layout.addWidget(self.scroll_area)
     
     def set_image(self, image_data: bytes) -> None:
         """Set the PDF page image."""
         self.canvas.set_image(image_data)
+
+    def delete_selected_box(self) -> None:
+        """Delete the currently highlighted box (if any).
+
+        Emits the normal ``box_deleted`` signal so callers can update the
+        model/UI accordingly.
+        """
+        self.canvas.delete_selected_box()
+
+    def set_single_page_mode(self, enabled: bool) -> None:
+        """Update the state of the single–page toggle checkbox.
+
+        Main window will call this when the toolbar checkbox changes; the
+        viewer keeps an internal hidden checkbox so that any existing code
+        which inspects ``viewer.chk_single_page_mode`` continues to work.
+        """
+        self.chk_single_page_mode.setChecked(enabled)
     
     def clear_image(self) -> None:
         """Clear the displayed image."""
@@ -677,6 +735,10 @@ class PDFViewer(QWidget):
         self.spin_zoom.blockSignals(True)
         self.spin_zoom.setValue(zoom_percent)
         self.spin_zoom.blockSignals(False)
+
+    def _on_clear_box_clicked(self) -> None:
+        """Slot for the clear-box toolbar button."""
+        self.delete_selected_box()
     
     def set_active_column(self, column_name: str) -> None:
         """Set the active column for box drawing."""

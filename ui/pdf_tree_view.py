@@ -24,6 +24,9 @@ from typing import List, Tuple, Optional
 from models.data_models import ProjectData, PDFFileInfo
 
 
+from PyQt5 import uic
+import os
+
 class PDFTreeView(QWidget):
     """
     Tree view widget showing the list of imported PDF files and their pages.
@@ -46,66 +49,13 @@ class PDFTreeView(QWidget):
     
     def __init__(self, parent: Optional[QWidget] = None):
         super().__init__(parent)
-        self._setup_ui()
-    
-    def _setup_ui(self):
-        """Initialize the UI layout and tree widget."""
-        layout = QVBoxLayout(self)
-        layout.setContentsMargins(0, 0, 0, 0)
+        ui_path = os.path.join(os.path.dirname(__file__), "pdf_tree_view.ui")
+        uic.loadUi(ui_path, self)
         
-        # Header + action buttons
-        from PyQt5.QtWidgets import QHBoxLayout, QPushButton
-
-        header_layout = QHBoxLayout()
-        header_layout.setContentsMargins(0, 0, 0, 0)
-
-        header = QLabel("PDF Page List")
-        header.setFont(QFont("Segoe UI", 10, QFont.Bold))
-        header.setStyleSheet("padding: 6px; background-color: #f0f0f0; border-bottom: 1px solid #ccc;")
-        header_layout.addWidget(header)
-        header_layout.addStretch()
-
-        # Expand / Collapse buttons
-        self.btn_expand_all = QPushButton("Expand All")
-        self.btn_expand_all.setFixedWidth(90)
-        self.btn_expand_all.setToolTip("Expand all PDF files to show pages")
         self.btn_expand_all.clicked.connect(self.expand_all)
-        header_layout.addWidget(self.btn_expand_all)
-
-        self.btn_collapse_all = QPushButton("Collapse All")
-        self.btn_collapse_all.setFixedWidth(90)
-        self.btn_collapse_all.setToolTip("Collapse all PDF files")
         self.btn_collapse_all.clicked.connect(self.collapse_all)
-        header_layout.addWidget(self.btn_collapse_all)
-
-        # delete button - acts on currently-selected file(s)
-        self.btn_delete_file = QPushButton("Delete")
-        self.btn_delete_file.setFixedWidth(60)
-        self.btn_delete_file.setToolTip("Delete selected PDF file(s)")
-        self.btn_delete_file.clicked.connect(self._on_delete_files)
-        header_layout.addWidget(self.btn_delete_file)
-
-        layout.addLayout(header_layout)
-        
-        # Tree widget
-        self.tree = QTreeWidget()
-        self.tree.setHeaderHidden(True)
-        self.tree.setSelectionMode(QAbstractItemView.ExtendedSelection)
-        self.tree.setAnimated(True)
-        self.tree.setIndentation(20)
-        # Single-click should only change selection so the user can multi-select
-        # without changing the currently displayed page. Viewing happens on double-click.
-        self.tree.itemClicked.connect(self._on_item_clicked)
         self.tree.itemDoubleClicked.connect(self._on_item_double_clicked)
         self.tree.itemSelectionChanged.connect(self._on_selection_changed)
-        
-        layout.addWidget(self.tree)
-
-    def _on_delete_files(self):
-        """Emit request for deletion of currently selected file paths."""
-        paths = self.get_selected_file_paths()
-        if paths:
-            self.file_delete_requested.emit(paths)
     
     def populate(self, project_data: ProjectData) -> None:
         """

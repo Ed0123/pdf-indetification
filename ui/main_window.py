@@ -17,6 +17,8 @@ Implements all toolbar actions:
 import os
 import sys
 import time
+import threading
+from concurrent.futures import ProcessPoolExecutor, as_completed
 
 from PyQt5.QtWidgets import (
     QMainWindow,
@@ -29,12 +31,23 @@ from PyQt5.QtWidgets import (
     QStatusBar,
     QProgressBar,
     QLabel,
+    QPushButton,
     QFileDialog,
     QMessageBox,
     QApplication,
+    QCheckBox,
 )
 from PyQt5.QtCore import Qt, QThread, pyqtSignal, QSize
 from PyQt5.QtGui import QIcon, QFont
+from PyQt5 import uic
+
+# Absolute path to the project root (parent of this ui/ package).
+# Passed to subprocess workers so they can import project modules.
+_PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+# ensure the root directory is on sys.path when the module is executed
+# directly (avoids ModuleNotFoundError for 'models', 'utils', etc.)
+if _PROJECT_ROOT not in sys.path:
+    sys.path.insert(0, _PROJECT_ROOT)
 
 from models.data_models import (
     ProjectData,
@@ -54,6 +67,8 @@ from utils.excel_export import export_to_excel
 from ui.pdf_tree_view import PDFTreeView
 from ui.data_table import DataTable
 from ui.pdf_viewer import PDFViewer
+from ui.template_manager import TemplateManagerDialog
+from PyQt5.QtWidgets import QInputDialog
 
 
 class ImportWorker(QThread):
@@ -98,41 +113,94 @@ class ImportWorker(QThread):
 class RecognizeWorker(QThread):
     """
     Worker thread for text recognition on selected pages.
-    
+
+    Uses a ``ProcessPoolExecutor`` to run box-level extraction jobs in
+    parallel across multiple CPU cores while reporting live progress and
+    supporting mid-run cancellation.
+
     Signals:
-        progress(int, int): (current, total) progress.
+        progress(int, int): (completed_tasks, total_tasks) progress update.
         text_extracted(str, int, str, str): (file_path, page_num, column_name, text).
-        finished_recognize(): Emitted when done.
-        error(str): Emitted on error.
+        finished_recognize(): Emitted when done (including after cancel).
+        error(str): Emitted on per-task errors.
     """
     progress = pyqtSignal(int, int)
     text_extracted = pyqtSignal(str, int, str, str)
     finished_recognize = pyqtSignal()
     error = pyqtSignal(str)
-    
-    def __init__(self, pages_and_boxes, parent=None):
+
+    def __init__(self, pages_and_boxes, project_root: str, parent=None):
         """
         Args:
             pages_and_boxes: List of (file_path, page_number, boxes_list) tuples.
+            project_root: Absolute path to the project root directory so that
+                subprocess workers can add it to sys.path.
         """
         super().__init__(parent)
         self.pages_and_boxes = pages_and_boxes
-    
+        self.project_root = project_root
+        self._cancel_event = threading.Event()
+
+    def cancel(self) -> None:
+        """Request cancellation.  Already-running subprocesses finish normally;
+        queued tasks are discarded and no further signals (except
+        finished_recognize) will be emitted."""
+        self._cancel_event.set()
+
     def run(self):
-        total = len(self.pages_and_boxes)
-        for i, (file_path, page_num, boxes) in enumerate(self.pages_and_boxes):
+        from utils.pdf_processing import _extract_box_task, _init_subprocess
+
+        # Flatten (file_path, page_num, boxes) into individual box tasks.
+        tasks: list = []
+        for file_path, page_num, boxes in self.pages_and_boxes:
             for box in boxes:
-                try:
-                    text = extract_text_from_relative_region(
-                        file_path, page_num,
-                        box.x, box.y, box.width, box.height,
-                    )
-                    self.text_extracted.emit(file_path, page_num, box.column_name, text)
-                except Exception as e:
-                    self.error.emit(f"OCR error on {file_path} p{page_num+1}: {e}")
-            
-            self.progress.emit(i + 1, total)
-        
+                tasks.append((
+                    file_path, page_num, box.column_name,
+                    box.x, box.y, box.width, box.height,
+                ))
+
+        total = len(tasks)
+        if total == 0:
+            self.finished_recognize.emit()
+            return
+
+        completed = 0
+        # Limit workers: at most 4 or the number of CPUs (min with task count).
+        max_workers = min(4, total, max(1, (os.cpu_count() or 2)))
+
+        try:
+            with ProcessPoolExecutor(
+                max_workers=max_workers,
+                initializer=_init_subprocess,
+                initargs=(self.project_root,),
+            ) as executor:
+                futures = {
+                    executor.submit(_extract_box_task, task): task
+                    for task in tasks
+                }
+
+                for future in as_completed(futures):
+                    if self._cancel_event.is_set():
+                        # Cancel all still-pending futures and stop collecting.
+                        for f in futures:
+                            f.cancel()
+                        break
+
+                    try:
+                        fp, pn, col, text = future.result()
+                        self.text_extracted.emit(fp, pn, col, text)
+                    except Exception as exc:
+                        task = futures[future]
+                        self.error.emit(
+                            f"Error on {task[0]} p{task[1] + 1}: {exc}"
+                        )
+
+                    completed += 1
+                    self.progress.emit(completed, total)
+
+        except Exception as exc:
+            self.error.emit(f"Multiprocessing error: {exc}")
+
         self.finished_recognize.emit()
 
 
@@ -153,17 +221,23 @@ class MainWindow(QMainWindow):
     
     def __init__(self, parent=None):
         super().__init__(parent)
-        self.setWindowTitle("PDF Text Extraction Tool")
-        self.setMinimumSize(1200, 700)
+        ui_path = os.path.join(os.path.dirname(__file__), "main_window.ui")
+        uic.loadUi(ui_path, self)
         
         # Data model
         self._project_data = ProjectData()
         self._current_file_path: str = ""
         self._current_page_num: int = -1
         
-        self._setup_ui()
-        self._setup_toolbar()
-        self._setup_statusbar()
+        # expose its checkbox as an alias for backward compatibility/tests
+        # the single‑page checkbox lives in the main toolbar now; Qt
+        # Designer adds it to the UI so loadUi has already created it.  We
+        # expose it on the window for backward compatibility and wire it up
+        # the same way the old viewer checkbox was handled.
+        self.chk_single_page_mode = self.findChild(QCheckBox, "chk_single_page_mode")
+        assert self.chk_single_page_mode is not None, "toolbar checkbox missing"
+        self.chk_single_page_mode.toggled.connect(self._on_single_page_mode_toggled)
+
         self._connect_signals()
         
         self._update_status("Ready")
@@ -259,7 +333,7 @@ class MainWindow(QMainWindow):
         """Set up the bottom status bar with labels and progress bar."""
         self.statusbar = QStatusBar()
         self.setStatusBar(self.statusbar)
-        
+
         self.status_label = QLabel("Ready")
         self.statusbar.addWidget(self.status_label, 1)
         
@@ -270,14 +344,35 @@ class MainWindow(QMainWindow):
         self.ocr_label = QLabel("OCR: unknown")
         self.ocr_label.setToolTip("OCR availability")
         self.statusbar.addPermanentWidget(self.ocr_label)
-        
+
+        # Cancel button — visible only while text recognition is running.
+        self.btn_cancel_recognize = QPushButton("Cancel")
+        self.btn_cancel_recognize.setToolTip("Cancel the running text recognition")
+        self.btn_cancel_recognize.setVisible(False)
+        self.btn_cancel_recognize.clicked.connect(self._on_cancel_recognize)
+        self.statusbar.addPermanentWidget(self.btn_cancel_recognize)
+
         self.progress_bar = QProgressBar()
         self.progress_bar.setMaximumWidth(200)
         self.progress_bar.setVisible(False)
         self.statusbar.addPermanentWidget(self.progress_bar)
+        
+        self._update_status("Ready")
+        # L1/L5: Check OCR availability on startup so the indicator is correct immediately
+        self._update_ocr_status()
     
     def _connect_signals(self):
         """Connect signals between components."""
+        # Toolbar actions
+        self.action_import.triggered.connect(self._on_import)
+        self.action_save.triggered.connect(self._on_save)
+        self.action_load.triggered.connect(self._on_load)
+        self.action_clear.triggered.connect(self._on_clear_data)
+        self.action_delete.triggered.connect(self._on_delete_files)
+        self.action_apply_box.triggered.connect(self._on_apply_box)
+        self.action_recognize.triggered.connect(self._on_recognize_text)
+        self.action_export.triggered.connect(self._on_export_excel)
+        
         # Tree -> show page in viewer and highlight in table
         self.pdf_tree.page_selected.connect(self._on_page_selected)
         # handle deletion request coming from tree header button
@@ -289,11 +384,30 @@ class MainWindow(QMainWindow):
         # Table data edited -> update model
         self.data_table.data_edited.connect(self._on_data_edited)
         
+        # Table SPM navigation -> update viewer and tree selection
+        self.data_table.page_navigated.connect(self._on_spm_page_navigated)
+        # keep toolbar checkbox in sync if table mode changes programmatically
+        self.data_table.single_page_mode_changed.connect(
+            self.chk_single_page_mode.setChecked
+        )
+
         # Viewer box drawn -> update model and table
         self.pdf_viewer.box_drawn.connect(self._on_box_drawn)
         self.pdf_viewer.box_changed.connect(self._on_box_changed)
         self.pdf_viewer.box_deleted.connect(self._on_box_deleted)
+        # also listen to delete requests coming from the data table
+        self.data_table.cell_delete_requested.connect(self._on_table_cell_deleted)
         self.pdf_viewer.box_selected.connect(self._on_box_selected_in_viewer)
+        # page navigation keys from the viewer
+        self.pdf_viewer.page_requested.connect(self._on_viewer_page_requested)
+        
+        # Template Manager
+        self.btn_new_template.clicked.connect(self._on_new_template)
+        self.btn_manage_template.clicked.connect(self._on_manage_template)
+        self.btn_apply_template.clicked.connect(self._on_apply_template)
+
+        # track changes to the template combo so we can remember the choice
+        self.combo_template.currentTextChanged.connect(self._on_template_changed)
     
     def _update_status(self, message: str) -> None:
         """Update the status bar message."""
@@ -337,12 +451,13 @@ class MainWindow(QMainWindow):
         """Refresh all UI components from the project data."""
         self.pdf_tree.populate(self._project_data)
         self.data_table.set_project_data(self._project_data)
+        self._update_template_combo()
         self._update_info()
     
     # ===== Page Selection =====
     
     def _on_page_selected(self, file_path: str, page_number: int) -> None:
-        """Handle page selection from the tree view."""
+        """Handle page selection from the tree view (or other source)."""
         self._current_file_path = file_path
         self._current_page_num = page_number
         
@@ -365,15 +480,186 @@ class MainWindow(QMainWindow):
             if page:
                 self.pdf_viewer.set_boxes(page.boxes)
         
-        # Highlight corresponding row in table
+        # Highlight corresponding row in table (and update SPM navigation)
+        self.data_table.navigate_to_page(file_path, page_number)
         self.data_table.highlight_row_for_page(file_path, page_number)
         
         # Save selection state
         self._project_data.last_selected_file = file_path
         self._project_data.last_selected_page = page_number
+
+    def _on_viewer_page_requested(self, delta: int) -> None:
+        """Slot called when PDFViewer arrow keys request previous/next page.
+
+        ``delta`` is -1 for left arrow (previous) or +1 for right arrow (next).
+        """
+        if not self._current_file_path or self._current_page_num < 0:
+            return
+        pdf_file = self._project_data.get_file_by_path(self._current_file_path)
+        if not pdf_file:
+            return
+        new_index = self._current_page_num + delta
+        if new_index < 0 or new_index >= len(pdf_file.pages):
+            return
+        # navigate to the page and update tree
+        self.pdf_tree.select_page(self._current_file_path, new_index)
+        self._on_page_selected(self._current_file_path, new_index)
         
         self._update_status(f"Viewing: {os.path.basename(file_path)} - Page {page_number + 1}")
     
+    def _update_template_combo(self):
+        """Populate the template dropdown and restore previous selection.
+
+        The project data stores the last template the user selected so that the
+        combo box can retain its choice when the UI is refreshed (for example
+        when a template is applied or the project is reloaded).  If the stored
+        name no longer exists we simply leave the first item selected.
+        """
+        last = getattr(self._project_data, "last_selected_template", "")
+        self.combo_template.clear()
+        for template in self._project_data.templates:
+            self.combo_template.addItem(template.name)
+
+        if last:
+            idx = self.combo_template.findText(last)
+            if idx >= 0:
+                self.combo_template.setCurrentIndex(idx)
+
+    def _on_new_template(self):
+        if not self._current_file_path or self._current_page_num < 0:
+            QMessageBox.warning(self, "Warning", "Please select a page first.")
+            return
+            
+        pdf_file = self._project_data.get_file_by_path(self._current_file_path)
+        if not pdf_file:
+            return
+            
+        page = pdf_file.get_page(self._current_page_num)
+        if not page or not page.boxes:
+            QMessageBox.warning(self, "Warning", "The current page has no boxes to save as a template.")
+            return
+            
+        name, ok = QInputDialog.getText(self, "New Template", "Enter template name:")
+        if ok and name:
+            from models.data_models import Template
+            import copy
+            
+            # Check if name already exists
+            if any(t.name == name for t in self._project_data.templates):
+                QMessageBox.warning(self, "Warning", f"Template '{name}' already exists.")
+                return
+                
+            ref_page = f"{pdf_file.file_name} - Page {self._current_page_num + 1}"
+            
+            # Deep copy boxes and clear extracted text
+            boxes = []
+            for box in page.boxes:
+                new_box = copy.deepcopy(box)
+                new_box.extracted_text = ""
+                boxes.append(new_box)
+                
+            template = Template(name=name, ref_page=ref_page, boxes=boxes)
+            self._project_data.templates.append(template)
+            self._update_template_combo()
+            
+            # Select the newly created template and remember it
+            index = self.combo_template.findText(name)
+            if index >= 0:
+                self.combo_template.setCurrentIndex(index)
+                self._project_data.last_selected_template = name
+                
+            QMessageBox.information(self, "Success", f"Template '{name}' created successfully.")
+
+    def _on_manage_template(self):
+        dialog = TemplateManagerDialog(self._project_data, self)
+        if dialog.exec_():
+            self._update_template_combo()
+            self._refresh_all()
+            # after templates have been edited/applied we may have new boxes
+            # on pages; run recognition on whatever pages are currently
+            # selected so the data table updates automatically.
+            if self.pdf_tree.get_selected_pages():
+                self._on_recognize_text()
+
+    def _on_apply_template(self):
+        if not self._current_file_path or self._current_page_num < 0:
+            QMessageBox.warning(self, "Warning", "Please select a page first.")
+            return
+            
+        template_name = self.combo_template.currentText()
+        if not template_name:
+            QMessageBox.warning(self, "Warning", "Please select a template to apply.")
+            return
+            
+        # remember the choice in project data so the dropdown can be restored
+        self._project_data.last_selected_template = template_name
+
+        template = next((t for t in self._project_data.templates if t.name == template_name), None)
+        if not template:
+            return
+            
+        # skip the operation if the user is trying to apply the template to
+        # the very page it was created from; this would simply clear and
+        # re‑write the same boxes with no benefit (requirement #3).
+        if template.ref_page:
+            parts = template.ref_page.rsplit(" - Page ", 1)
+            if len(parts) == 2:
+                ref_file, ref_page_str = parts
+                try:
+                    ref_page_num = int(ref_page_str) - 1
+                except ValueError:
+                    ref_page_num = None
+                if (
+                    ref_page_num is not None
+                    and os.path.basename(self._current_file_path) == ref_file
+                    and ref_page_num == self._current_page_num
+                ):
+                    QMessageBox.information(
+                        self, "Info",
+                        "Template source page is already selected; nothing to apply."
+                    )
+                    return
+
+        pdf_file = self._project_data.get_file_by_path(self._current_file_path)
+        if not pdf_file:
+            return
+            
+        page = pdf_file.get_page(self._current_page_num)
+        if not page:
+            return
+            
+        import copy
+        # Clear existing boxes first
+        page.boxes.clear()
+        
+        for box in template.boxes:
+            new_box = copy.deepcopy(box)
+            # perform text extraction immediately after placing the box
+            text = extract_text_from_relative_region(
+                self._current_file_path, self._current_page_num,
+                new_box.x, new_box.y, new_box.width, new_box.height,
+            )
+            new_box.extracted_text = text
+            page.set_box_for_column(new_box)
+            page.extracted_data[new_box.column_name] = text
+            # update table cell directly (avoid waiting for selection)
+            self.data_table.update_cell_value(
+                self._current_file_path, self._current_page_num,
+                new_box.column_name, text,
+            )
+        
+        # refresh UI then ensure the page we started on is still active
+        self._refresh_all()
+        # the tree populate call above may clear the selection, so explicitly
+        # re-select the page in both the tree and viewer
+        if self._current_file_path and self._current_page_num >= 0:
+            self.pdf_tree.select_page(self._current_file_path, self._current_page_num)
+            self._on_page_selected(self._current_file_path, self._current_page_num)
+        # after boxes are in place, trigger text recognition so the user sees
+        # extracted results without extra clicks (requirement #2)
+        self._on_recognize_text()
+        QMessageBox.information(self, "Success", f"Template '{template_name}' applied to current page.")
+
     # ===== Table Cell Selection =====
     
     def _on_table_cell_selected(self, file_path: str, page_number: int, column_name: str) -> None:
@@ -475,13 +761,81 @@ class MainWindow(QMainWindow):
                     column_name, "",
                 )
                 self._update_status(f"Box for '{column_name}' deleted")
+
+    def _on_table_cell_deleted(self, file_path: str, page_number: int, column_name: str) -> None:
+        """Handle a delete-key request emitted by ``DataTable``.
+
+        This event is triggered when the user has a cell selected in the
+        table and presses the Delete key.  It should have the same effect as
+        deleting the corresponding box in the PDF viewer.
+        """
+        # delegate to the same logic as if the viewer emitted the signal,
+        # but use the explicit coordinates passed by the table.
+        pdf_file = self._project_data.get_file_by_path(file_path) if self._project_data else None
+        if pdf_file:
+            page = pdf_file.get_page(page_number)
+            if page:
+                page.remove_box_for_column(column_name)
+                page.extracted_data.pop(column_name, None)
+
+                # update the table cell (already cleared by table itself,
+                # but do it again to be safe and to keep highlighting correct)
+                self.data_table.update_cell_value(
+                    file_path, page_number, column_name, "",
+                )
+
+                # refresh the viewer content if the deleted box is on the
+                # currently displayed page.  We already updated the model above
+                # so simply push the new box list to the viewer and clear any
+                # highlight.  This ensures the third-column image stays in sync
+                # with the table.
+                if file_path == self._current_file_path and page_number == self._current_page_num:
+                    self.pdf_viewer.set_boxes(page.boxes)
+                self._update_status(f"Box for '{column_name}' deleted")
     
     def _on_box_selected_in_viewer(self, column_name: str) -> None:
         """Handle box selection in the viewer - highlight in table."""
         self.pdf_viewer.set_active_column(column_name)
-    
+
+    # ===== Single Page Mode =====
+
+    def _on_single_page_mode_toggled(self, enabled: bool) -> None:
+        """Enable or disable Single Page Mode in the data table.
+
+        This slot is connected to the checkbox in the *main window* toolbar.
+        We also allow other parts of the code to call it directly, so keep
+        both the toolbar and the hidden viewer checkbox in sync with any
+        programmatic changes.
+        """
+        self.data_table.set_single_page_mode(enabled)
+        # keep the hidden viewer checkbox consistent as well
+        self.pdf_viewer.set_single_page_mode(enabled)
+
+        # If a page is already selected, make sure the SPM view is in sync
+        if enabled and self._current_file_path and self._current_page_num >= 0:
+            self.data_table.navigate_to_page(self._current_file_path, self._current_page_num)
+
+    def _on_spm_page_navigated(self, file_path: str, page_number: int) -> None:
+        """Handle SPM Previous / Next button navigation from the data table."""
+        # Update tree selection so the highlight stays in sync
+        self.pdf_tree.select_page(file_path, page_number)
+        # Load the page in the viewer (does not re-emit page_selected)
+        self._on_page_selected(file_path, page_number)
+
     # ===== Toolbar Actions =====
     
+    def _on_template_changed(self, template_name: str) -> None:
+        """Slot triggered when the user picks a different template.
+
+        We store the selection on ``ProjectData`` so that subsequent UI refreshes
+        can restore the same item.  The slot is intentionally simple since the
+        combobox text can change when the contents are repopulated; callers
+        should update the field before calling ``_update_template_combo`` when
+        they wish to preserve an existing choice.
+        """
+        if template_name:
+            self._project_data.last_selected_template = template_name
+
     def _on_import(self) -> None:
         """Import PDF files from a selected folder."""
         directory = QFileDialog.getExistingDirectory(
@@ -628,9 +982,22 @@ class MainWindow(QMainWindow):
             QMessageBox.information(self, "Info", "No boxes drawn on the current page.")
             return
         
+        # Exclude the current page from the targets so we never apply to it.  This
+        # also makes reporting and progress calculations easier.
+        targets = [p for p in selected
+                   if not (p[0] == self._current_file_path and p[1] == self._current_page_num)]
+
+        if not targets:
+            # nothing to do; warn the user and exit early
+            QMessageBox.information(
+                self, "Info",
+                "Current page is the only one selected; no pages will be modified."
+            )
+            return
+
         reply = QMessageBox.question(
             self, "Confirm",
-            f"Apply box coordinates from current page to {len(selected)} page(s)?",
+            f"Apply box coordinates from current page to {len(targets)} page(s)?",
             QMessageBox.Yes | QMessageBox.No,
         )
         if reply != QMessageBox.Yes:
@@ -638,20 +1005,19 @@ class MainWindow(QMainWindow):
         
         self._update_status("Applying drawn box to selected pages...")
         count = 0
-        total = len(selected)
+        total = len(targets)
         applied = 0
         
-        for file_path, page_num in selected:
-            # Skip the source page
-            if file_path == self._current_file_path and page_num == self._current_page_num:
-                count += 1
-                self._show_progress(count, total)
-                continue
-            
+        for file_path, page_num in targets:
             pdf_file = self._project_data.get_file_by_path(file_path)
             if pdf_file:
                 page = pdf_file.get_page(page_num)
                 if page:
+                    # clear any existing boxes/data on the target page so we don't
+                    # accumulate duplicates when the user applies multiple times
+                    page.boxes.clear()
+                    page.extracted_data.clear()
+
                     for source_box in source_page.boxes:
                         new_box = BoxInfo(
                             column_name=source_box.column_name,
@@ -669,6 +1035,11 @@ class MainWindow(QMainWindow):
         self.data_table.refresh()
         # L3: Report the number actually modified (excluding source page)
         self._update_status(f"Box coordinates applied to {applied} page(s)")
+
+        # Automatically run recognition on the current selection so the user
+        # sees extracted text straight away (requirement #1).
+        if self.pdf_tree.get_selected_pages():
+            self._on_recognize_text()
     
     def _on_recognize_text(self) -> None:
         """Extract text from drawn boxes for selected pages."""
@@ -677,23 +1048,53 @@ class MainWindow(QMainWindow):
             QMessageBox.information(self, "Info", "No pages selected.")
             return
         
-        # Gather pages with boxes
+        # Gather pages with boxes.  Also clear any existing extracted data
+        # for columns that no longer have a corresponding box on the page.  This
+        # covers two cases:
+        #   * a page previously had extracted values but the user removed the box
+        #     before running recognition again
+        #   * a page has boxes for some columns but not others (e.g. template with
+        #     a subset of defined columns)
+        #
+        # We update the data table as we go so the UI shows blanks immediately.
         pages_and_boxes = []
         for file_path, page_num in selected:
             pdf_file = self._project_data.get_file_by_path(file_path)
-            if pdf_file:
-                page = pdf_file.get_page(page_num)
-                if page and page.boxes:
-                    pages_and_boxes.append((file_path, page_num, page.boxes))
-        
+            if not pdf_file:
+                continue
+            page = pdf_file.get_page(page_num)
+            if not page:
+                continue
+
+            # determine which columns are currently covered by boxes
+            current_cols = {box.column_name for box in page.boxes}
+            # clear any stale data (columns with no box)
+            for col in list(page.extracted_data.keys()):
+                if col not in current_cols:
+                    # wipe the stored value and update the table cell
+                    page.extracted_data[col] = ""
+                    self.data_table.update_cell_value(
+                        file_path, page_num, col, "",
+                    )
+
+            if page.boxes:
+                pages_and_boxes.append((file_path, page_num, page.boxes))
+
+        # If we ended up with no work to do, still refresh the table (cleared
+        # values above) and inform the user.
         if not pages_and_boxes:
+            self.data_table.refresh()
             QMessageBox.information(self, "Info", "No boxes found on selected pages.")
             return
         
         self._update_status("Recognizing text...")
         self.action_recognize.setEnabled(False)
-        
-        self._recognize_worker = RecognizeWorker(pages_and_boxes)
+        self.btn_cancel_recognize.setVisible(True)
+        self.btn_cancel_recognize.setEnabled(True)
+
+        self._recognize_worker = RecognizeWorker(
+            pages_and_boxes, project_root=_PROJECT_ROOT
+        )
         self._recognize_worker.progress.connect(self._show_progress)
         self._recognize_worker.text_extracted.connect(self._on_text_extracted)
         self._recognize_worker.error.connect(lambda msg: self._update_status(msg))
@@ -711,11 +1112,25 @@ class MainWindow(QMainWindow):
                 if box:
                     box.extracted_text = text
     
+    def _on_cancel_recognize(self) -> None:
+        """Handle the Cancel button click during text recognition."""
+        if hasattr(self, "_recognize_worker") and self._recognize_worker.isRunning():
+            self._recognize_worker.cancel()
+            self.btn_cancel_recognize.setEnabled(False)
+            self._update_status("Cancelling text recognition…")
+
     def _on_recognize_finished(self) -> None:
-        """Handle text recognition completion."""
+        """Handle text recognition completion (normal or cancelled)."""
         self.data_table.refresh()
         self.action_recognize.setEnabled(True)
-        self._update_status("Text recognition complete")
+        self.btn_cancel_recognize.setVisible(False)
+        cancelled = (
+            hasattr(self, "_recognize_worker")
+            and self._recognize_worker._cancel_event.is_set()
+        )
+        self._update_status(
+            "Text recognition cancelled" if cancelled else "Text recognition complete"
+        )
         # L2: Refresh the viewer boxes for the currently displayed page so that
         # box labels stay in sync with any newly extracted text.
         if self._current_file_path and self._current_page_num >= 0:
