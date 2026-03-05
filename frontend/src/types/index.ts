@@ -87,8 +87,8 @@ export interface StatusInfo {
 
 // ─── BQ (Bill of Quantities) Types ────────────────────────────────────────────
 
-/** BQ item types for hierarchical classification */
-export type BQItemType = "heading1" | "heading2" | "item" | "sub-item" | "notes"
+/** BQ item types — simplified: item, notes, and collection variants */
+export type BQItemType = "item" | "notes"
   | "collection_entry" | "collection_cf" | "collection_total";
 
 /** A single BQ row extracted from a PDF page */

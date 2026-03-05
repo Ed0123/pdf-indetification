@@ -134,7 +134,7 @@ class BQRowResponse(BaseModel):
     collection: str = ""
     # page-level collection flag (see `_detect_collection_page`)
     page_is_collection: bool = False
-    type: str = "item"  # heading1, heading2, item, sub-item, notes
+    type: str = "item"  # item, notes, collection_entry, collection_cf, collection_total
     item_no: str = ""
     description: str = ""
     quantity: Optional[float] = None
@@ -248,30 +248,10 @@ def _is_bold_font(fontname: str | None) -> bool:
 
 
 def _classify_line_type(line: dict, median_size: float | None = None) -> str:
-    """Classify a single Description line as heading1 / heading2 / sub-item / item.
+    """Classify a single Description line as 'item' or 'notes'.
 
-    Heuristics used:
-    * Bold + underline + short → heading1
-    * Bold OR underline + short → heading2
-    * Sub-item prefix → sub-item
-    * Otherwise → item  (caller may override)
+    Simplified: no heading1/heading2/sub-item categories.
     """
-    text = line.get('text', '')
-    is_bold = _is_bold_font(line.get('fontname'))
-    is_ul = line.get('underline', False)
-    word_count = len(text.split())
-    is_short = word_count <= 5
-    # Larger-than-average font is a heading signal
-    is_large = False
-    if median_size and line.get('size') and line['size'] > median_size * 1.15:
-        is_large = True
-
-    if (is_bold and is_ul) or (is_large and (is_bold or is_ul)):
-        return 'heading1'
-    if (is_bold or is_ul or is_large) and is_short:
-        return 'heading2'
-    if _has_subitem_prefix(text):
-        return 'sub-item'
     return 'item'
 
 
@@ -413,6 +393,7 @@ _PAGE_REF_RE = re.compile(
     r'(?:page\s*(?:no\.?\s*)?)?'       # optional "Page No."
     r'([A-Z]{2,}[\w]*\.[\d]+/[\d]+)'   # e.g. MODBQ.15/1, BQ.4/2
     r'|page\s*(?:no\.?\s*)?(\d+)'      # e.g. "Page 5", "Page No. 3"
+    r'|(\d+(?:\.\d+)+/\d+)'            # bare numeric ref e.g. 4.4/1, 4.5/1
     r')',
     re.IGNORECASE,
 )
@@ -460,7 +441,7 @@ def _parse_collection_entries(
         # Check for page reference patterns
         ref_match = _PAGE_REF_RE.search(text)
         if ref_match:
-            page_ref = ref_match.group(1) or ref_match.group(2)
+            page_ref = ref_match.group(1) or ref_match.group(2) or ref_match.group(3)
             if page_ref:
                 entry['page_ref'] = page_ref
                 entry['entry_type'] = 'page_ref'
@@ -1121,13 +1102,8 @@ def _parse_bq_rows(
                     elif etype == 'grand_total':
                         row_type = 'collection_total'
                     else:
-                        # Classify as heading / notes like normal
-                        if entry['lines']:
-                            row_type = _classify_line_type(entry['lines'][0], median_size)
-                            if row_type not in ('heading1', 'heading2'):
-                                row_type = 'notes'
-                        else:
-                            row_type = 'notes'
+                        # Non-page-ref entries on collection pages → notes
+                        row_type = 'notes'
 
                     rows.append(_make_row(
                         row_type=row_type,
@@ -1140,11 +1116,8 @@ def _parse_bq_rows(
             # ── No items on page → emit headings / notes ──
             elif not item_positions:
                 for line in desc_lines:
-                    ltype = _classify_line_type(line, median_size)
-                    if ltype not in ('heading1', 'heading2'):
-                        ltype = 'notes'
                     rows.append(_make_row(
-                        row_type=ltype, desc=line['text'],
+                        row_type='notes', desc=line['text'],
                         lines_for_bbox=[line],
                     ))
 
@@ -1249,13 +1222,10 @@ def _parse_bq_rows(
                 # ── Create output rows with hierarchy ──
                 for block in all_blocks:
                     if block['type'] == 'notes':
-                        # Classify each line in the notes block
+                        # All notes lines are just 'notes'
                         for line in sorted(block['lines'], key=lambda l: l['y_center']):
-                            ltype = _classify_line_type(line, median_size)
-                            if ltype not in ('heading1', 'heading2'):
-                                ltype = 'notes'
                             rows.append(_make_row(
-                                row_type=ltype,
+                                row_type='notes',
                                 desc=line['text'],
                                 lines_for_bbox=[line],
                             ))
@@ -1285,8 +1255,7 @@ def _parse_bq_rows(
                                 fallback_y_end=block['y_end'],
                             ))
                         else:
-                            # Multiple sub-blocks → parent item + sub-items
-                            # First sub-block is the main description
+                            # Multiple sub-blocks → first is the item, rest are notes
                             first_sub = sub_blocks[0]
                             main_desc = ' ; '.join(l['text'] for l in first_sub)
 
@@ -1301,24 +1270,14 @@ def _parse_bq_rows(
                                 fallback_y_start=block['y_start'],
                                 fallback_y_end=block['y_end'],
                             )
-                            parent_row_id = parent_row.id
                             rows.append(parent_row)
 
-                            # Remaining sub-blocks → sub-items
+                            # Remaining sub-blocks → notes (no item_no copy, no parent_id)
                             for sb in sub_blocks[1:]:
                                 sb_desc = ' ; '.join(l['text'] for l in sb)
-                                # Check if this sub-block is actually a heading
-                                if len(sb) == 1:
-                                    sb_type = _classify_line_type(sb[0], median_size)
-                                else:
-                                    sb_type = 'sub-item'
-                                if sb_type not in ('heading1', 'heading2'):
-                                    sb_type = 'sub-item'
                                 rows.append(_make_row(
-                                    row_type=sb_type,
+                                    row_type='notes',
                                     desc=sb_desc,
-                                    item_no=block['item_no'],
-                                    parent_id_val=parent_row_id,
                                     lines_for_bbox=sb,
                                 ))
     

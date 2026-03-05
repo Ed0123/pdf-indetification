@@ -18,10 +18,7 @@ import { exportAnnotatedPdf, type TextAnnotation } from "../api/client";
 /** Available BQ row types that a user can pick from. */
 const ROW_TYPE_OPTIONS: { value: BQItemType; label: string }[] = [
   { value: "item",  label: "Item" },
-  { value: "sub-item", label: "Sub-Item" },
-  { value: "notes", label: "Note" },
-  { value: "heading1", label: "H1" },
-  { value: "heading2", label: "H2" },
+  { value: "notes", label: "Notes" },
   { value: "collection_entry", label: "Collection Entry" },
   { value: "collection_cf", label: "Carry/Brought Fwd" },
   { value: "collection_total", label: "Collection Total" },
@@ -116,15 +113,12 @@ export function BQExportPanel({
 
   // Statistics
   const stats = useMemo(() => {
-    const heading1Count = allRows.filter(r => r.row.type === "heading1").length;
-    const heading2Count = allRows.filter(r => r.row.type === "heading2").length;
     const itemCount = allRows.filter(r => r.row.type === "item").length;
-    const subItemCount = allRows.filter(r => r.row.type === "sub-item").length;
     const notesCount = allRows.filter(r => r.row.type === "notes").length;
     const collectionEntryCount = allRows.filter(r => r.row.type === "collection_entry" || r.row.type === "collection_cf" || r.row.type === "collection_total").length;
     const pagesWithData = new Set(allRows.map(r => r.pageKey)).size;
     const collectionPages = new Set(allRows.filter(r => r.row.page_is_collection).map(r => r.pageKey)).size;
-    return { heading1Count, heading2Count, itemCount, subItemCount, notesCount, collectionEntryCount, total: allRows.length, pagesWithData, collectionPages };
+    return { itemCount, notesCount, collectionEntryCount, total: allRows.length, pagesWithData, collectionPages };
   }, [allRows]);
 
   // Calculate page totals
@@ -173,6 +167,18 @@ export function BQExportPanel({
     return lookup;
   }, [pageTotals]);
 
+  // Fuzzy page label match: find a matching page label for a given reference string.
+  // Tries exact match first, then checks if ref is contained in any label or vice versa.
+  const findPageLabel = useCallback((ref: string): string | null => {
+    if (!ref) return null;
+    if (pageLabelLookup[ref]) return ref;
+    // Try substring match: e.g. ref="4.5/1" matches label="Page No.4.5/1"
+    for (const label of Object.keys(pageLabelLookup)) {
+      if (label.includes(ref) || ref.includes(label)) return label;
+    }
+    return null;
+  }, [pageLabelLookup]);
+
   // Available page labels for collection entry dropdown
   const availablePageLabels = useMemo(() => {
     return Object.values(pageTotals)
@@ -198,11 +204,16 @@ export function BQExportPanel({
       }
     }
 
-    // Step 2: For collection_entry rows, map referenced page total
+    // Step 2: For collection_entry rows, map referenced page total (with fuzzy matching)
     for (const { pageKey, row } of allRows) {
       if (row.type === "collection_entry" && row.item_no) {
-        const refData = pageLabelLookup[row.item_no];
+        const matchedLabel = findPageLabel(row.item_no);
+        const refData = matchedLabel ? pageLabelLookup[matchedLabel] : null;
         if (refData) {
+          // Auto-fix item_no to the matched label if different
+          if (matchedLabel !== row.item_no) {
+            onRowEdit(pageKey, row.id, "item_no", matchedLabel);
+          }
           // Use the page total of the referenced page
           // (recalculated page total, not the OCR one)
           let recalcPageTotal = 0;
@@ -232,7 +243,7 @@ export function BQExportPanel({
         onRowEdit(pageKey, rowId, "user_edited" as keyof BQRow, { total: true });
       }
     }
-  }, [allRows, pageLabelLookup, bqPageData, onBatchRecalculate, onRowEdit]);
+  }, [allRows, pageLabelLookup, findPageLabel, bqPageData, onBatchRecalculate, onRowEdit]);
 
   // Listen for external recalculate trigger (from toolbar button)
   useEffect(() => {
@@ -587,12 +598,11 @@ export function BQExportPanel({
     return getFilteredExportRows().map(({ row }, idx) => {
       const { bill, page } = parseBillPage(row.page_label || "");
       const ref = buildRef(row);
-      const hasQty = row.type === "item" || row.type === "sub-item";
-      const typeLabel = row.type === "item" ? "Item" : row.type === "sub-item" ? "Sub-Item" : row.type === "notes" ? "Notes" : row.type;
+      const hasQty = row.type === "item";
+      const typeLabel = row.type === "item" ? "Item" : row.type === "notes" ? "Notes" : row.type;
       return {
         id: idx + 1, project_id: pid,
         Type: typeLabel,
-        parent_id: row.parent_id ?? null,
         bill, page, item: row.item_no, revision: row.revision, ref,
         data_detail: row.description,
         data_X1: row.bbox_x0?.toString() ?? "", data_X2: row.bbox_x1?.toString() ?? "",
@@ -645,24 +655,29 @@ export function BQExportPanel({
       const totalBox = pageData.boxes["Total"];
       const collectionBox = pageData.boxes["Collection"];
       for (const row of pageData.rows) {
-        if ((row.type !== "item" && row.type !== "sub-item") || !row.user_edited) continue;
+        if (row.type === "item" && row.user_edited) {
         const pw = row.page_width ?? 1;
         if (row.user_edited.quantity && row.quantity !== null && qtyBox) {
           const annId = `auto-qty-${row.id}`;
           const stored = storedPositions[annId];
-          // Right-align: place at right edge of Qty box
           allAnnotations.push({ page_key: pageKey, file_id: pageData.file_id, page_number: pageData.page_number, id: annId, text: row.quantity.toString(), x: stored?.x ?? ((qtyBox.x + qtyBox.width) * pw), y: stored?.y ?? ((row.bbox_y0 ?? 0) + 12), font_size: 9, color: "#0000FF", align: "right" });
         }
         if (row.user_edited.rate && row.rate !== null && rateBox) {
           const annId = `auto-rate-${row.id}`;
           const stored = storedPositions[annId];
-          // Right-align: place at right edge of Rate box
           allAnnotations.push({ page_key: pageKey, file_id: pageData.file_id, page_number: pageData.page_number, id: annId, text: row.rate.toFixed(2), x: stored?.x ?? ((rateBox.x + rateBox.width) * pw), y: stored?.y ?? ((row.bbox_y0 ?? 0) + 12), font_size: 9, color: "#0000FF", align: "right" });
         }
         if ((row.user_edited.total || (row.user_edited.rate && row.user_edited.quantity)) && row.total !== null && totalBox) {
           const annId = `auto-total-${row.id}`;
           const stored = storedPositions[annId];
-          // Right-align: place at right edge of Total box
+          allAnnotations.push({ page_key: pageKey, file_id: pageData.file_id, page_number: pageData.page_number, id: annId, text: row.total.toFixed(2), x: stored?.x ?? ((totalBox.x + totalBox.width) * pw), y: stored?.y ?? ((row.bbox_y0 ?? 0) + 12), font_size: 9, color: "#0000FF", align: "right" });
+        }
+        }
+        // Collection entry totals
+        if (row.type === "collection_entry" && row.total != null && row.total > 0 && totalBox) {
+          const pw = row.page_width ?? 1;
+          const annId = `auto-coll-total-${row.id}`;
+          const stored = storedPositions[annId];
           allAnnotations.push({ page_key: pageKey, file_id: pageData.file_id, page_number: pageData.page_number, id: annId, text: row.total.toFixed(2), x: stored?.x ?? ((totalBox.x + totalBox.width) * pw), y: stored?.y ?? ((row.bbox_y0 ?? 0) + 12), font_size: 9, color: "#0000FF", align: "right" });
         }
       }
@@ -748,24 +763,32 @@ export function BQExportPanel({
       const annotations: TextAnnotation[] = [];
       if (includeAnnotations) {
         for (const { row, pageKey } of filteredForExport) {
-          if ((row.type === "item" || row.type === "sub-item") && row.user_edited) {
+          if (row.type === "item" && row.user_edited) {
             const pageData = bqPageData[pageKey]; if (!pageData) continue;
             const sp = pageData.annotation_positions || {};
             const pw = row.page_width ?? 1;
             const rateBox = pageData.boxes["Rate"], qtyBox = pageData.boxes["Qty"], totalBox = pageData.boxes["Total"];
             if (row.user_edited.quantity && row.quantity !== null && qtyBox) {
               const id = `auto-qty-${row.id}`; const s = sp[id];
-              // Right-align at right edge of Qty box
               annotations.push({ file_id: row.file_id, page_number: row.page_number, text: row.quantity.toString(), x: s?.x ?? ((qtyBox.x + qtyBox.width) * pw), y: s?.y ?? ((row.bbox_y0 ?? 0) + 12), font_size: 9, color: "#0000FF", align: "right" as const });
             }
             if (row.user_edited.rate && row.rate !== null && rateBox) {
               const id = `auto-rate-${row.id}`; const s = sp[id];
-              // Right-align at right edge of Rate box
               annotations.push({ file_id: row.file_id, page_number: row.page_number, text: row.rate.toFixed(2), x: s?.x ?? ((rateBox.x + rateBox.width) * pw), y: s?.y ?? ((row.bbox_y0 ?? 0) + 12), font_size: 9, color: "#0000FF", align: "right" as const });
             }
             if ((row.user_edited.total || (row.user_edited.rate && row.user_edited.quantity)) && row.total !== null && totalBox) {
               const id = `auto-total-${row.id}`; const s = sp[id];
-              // Right-align at right edge of Total box
+              annotations.push({ file_id: row.file_id, page_number: row.page_number, text: row.total.toFixed(2), x: s?.x ?? ((totalBox.x + totalBox.width) * pw), y: s?.y ?? ((row.bbox_y0 ?? 0) + 12), font_size: 9, color: "#0000FF", align: "right" as const });
+            }
+          }
+          // Collection entry rows: stamp total next to the row on the collection page
+          if (row.type === "collection_entry" && row.total != null && row.total > 0) {
+            const pageData = bqPageData[pageKey]; if (!pageData) continue;
+            const sp = pageData.annotation_positions || {};
+            const totalBox = pageData.boxes["Total"];
+            const pw = row.page_width ?? 1;
+            if (totalBox) {
+              const id = `auto-coll-total-${row.id}`; const s = sp[id];
               annotations.push({ file_id: row.file_id, page_number: row.page_number, text: row.total.toFixed(2), x: s?.x ?? ((totalBox.x + totalBox.width) * pw), y: s?.y ?? ((row.bbox_y0 ?? 0) + 12), font_size: 9, color: "#0000FF", align: "right" as const });
             }
           }
@@ -814,10 +837,7 @@ export function BQExportPanel({
           <select style={filterSelect} value={filterType} onChange={(e) => setFilterType(e.target.value)}>
             <option value="all">All Types ({stats.total})</option>
             <option value="item">Items ({stats.itemCount})</option>
-            <option value="sub-item">Sub-items ({stats.subItemCount})</option>
             <option value="notes">Notes ({stats.notesCount})</option>
-            <option value="heading1">Heading 1 ({stats.heading1Count})</option>
-            <option value="heading2">Heading 2 ({stats.heading2Count})</option>
             <option value="collection">Collection pages ({stats.collectionPages})</option>
             {stats.collectionEntryCount > 0 && <option value="collection_entry">Collection entries ({stats.collectionEntryCount})</option>}
           </select>
@@ -840,10 +860,7 @@ export function BQExportPanel({
         <span style={statItem}>📄 {stats.pagesWithData} pages</span>
         <span style={statItem}>📋 {stats.total} rows</span>
         <span style={statItem}>🟢 {stats.itemCount} items</span>
-        {stats.subItemCount > 0 && <span style={statItem}>🟣 {stats.subItemCount} sub-items</span>}
         <span style={statItem}>📝 {stats.notesCount} notes</span>
-        <span style={statItem}>🔵 {stats.heading1Count} H1</span>
-        <span style={statItem}>🟡 {stats.heading2Count} H2</span>
         <span style={statItem}>📦 {stats.collectionPages} coll.pages</span>
         {grandTotal > 0 && (
           <span style={{ ...statItem, fontWeight: 700, color: "#27ae60" }} title="Excludes collection pages to avoid double-counting">
@@ -908,7 +925,7 @@ export function BQExportPanel({
                   {uniqueRevisions.map(r => <option key={r} value={r}>{r}</option>)}
                 </select>
                 <select value={exportFilterType} onChange={(e) => setExportFilterType(e.target.value)} style={{ padding: "4px 8px", border: "1px solid #ddd", borderRadius: 4, fontSize: 12 }}>
-                  <option value="all">All Types</option><option value="item">Items</option><option value="sub-item">Sub-items</option><option value="notes">Notes</option><option value="heading1">Heading 1</option><option value="heading2">Heading 2</option>
+                  <option value="all">All Types</option><option value="item">Items</option><option value="notes">Notes</option>
                 </select>
               </div>
               <div style={{ fontSize: 11, color: "#888", marginTop: 6 }}>{getFilteredExportRows().length} of {allRows.length} rows will be exported</div>
@@ -986,14 +1003,11 @@ export function BQExportPanel({
             {filteredRows.map(({ pageKey, row }, rowIdx) => {
               const isEditing = editingCell?.pageKey === pageKey && editingCell?.rowId === row.id;
               const isCollectionRow = row.type === "collection_entry" || row.type === "collection_cf" || row.type === "collection_total";
-              const rowBg = row.type === "heading1" ? "#fef5f5" : row.type === "heading2" ? "#fef8e7" : row.type === "notes" ? "#f5f5f5" : row.type === "sub-item" ? "#f5f0ff" : isCollectionRow ? "#f0f5ff" : "#fff";
+              const rowBg = row.type === "notes" ? "#f5f5f5" : isCollectionRow ? "#f0f5ff" : "#fff";
 
               const getTypeColor = () => {
                 switch (row.type) {
-                  case "heading1": return "#e74c3c";
-                  case "heading2": return "#f39c12";
                   case "notes": return "#95a5a6";
-                  case "sub-item": return "#9b59b6";
                   case "collection_entry": return "#3498db";
                   case "collection_cf": return "#8e44ad";
                   case "collection_total": return "#2c3e50";
@@ -1002,7 +1016,7 @@ export function BQExportPanel({
               };
 
               return (
-                <tr key={`${pageKey}-${row.id}`} style={{ background: rowBg, fontWeight: row.type === "heading1" ? 600 : row.type === "heading2" ? 500 : 400, fontStyle: row.type === "notes" ? "italic" : "normal", paddingLeft: row.type === "sub-item" ? 16 : 0 }}>
+                <tr key={`${pageKey}-${row.id}`} style={{ background: rowBg, fontStyle: row.type === "notes" ? "italic" : "normal" }}>
                   <td style={{ ...td, color: "#aaa", fontSize: 9, textAlign: "center", width: 28 }}>{rowIdx + 1}</td>
                   <td style={td}>{row.page_label || `P${row.page_number + 1}`}</td>
                   <td style={td} title={row.revision}>{row.revision?.slice(0, 10) || ""}</td>
@@ -1065,6 +1079,8 @@ export function BQExportPanel({
                             <select
                               value={row.item_no || ""}
                               onChange={(e) => handleCollectionRefChange(pageKey, row.id, e.target.value)}
+                              onClick={(e) => e.stopPropagation()}
+                              onMouseDown={(e) => e.stopPropagation()}
                               style={{
                                 flex: 1,
                                 padding: "2px 4px",

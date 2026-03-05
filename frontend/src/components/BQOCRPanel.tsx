@@ -776,7 +776,7 @@ export function BQOCRPanel({
                         <td style={tdStyle}>
                           <span style={{
                             ...typeTag,
-                            background: row.type === "heading1" ? "#e74c3c" : row.type === "heading2" ? "#f39c12" : "#2ecc71"
+                            background: row.type === "notes" ? "#95a5a6" : row.type.startsWith("collection") ? "#3498db" : "#2ecc71"
                           }}>
                             {row.type}
                           </span>

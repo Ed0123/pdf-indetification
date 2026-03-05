@@ -5,8 +5,8 @@ import backend.email_service as email_service
 
 
 def test_is_configured_false(monkeypatch):
-    monkeypatch.delenv("GMAIL_USER", raising=False)
-    monkeypatch.delenv("GMAIL_APP_PASSWORD", raising=False)
+    monkeypatch.setattr(email_service, "GMAIL_USER", "")
+    monkeypatch.setattr(email_service, "GMAIL_APP_PASSWORD", "")
     assert not email_service._is_configured()
 
 
@@ -19,8 +19,8 @@ def test_is_configured_true(monkeypatch):
 
 def test_notify_admin_new_user_not_configured(monkeypatch):
     # when not configured, function should return False but not raise
-    monkeypatch.delenv("GMAIL_USER", raising=False)
-    monkeypatch.delenv("GMAIL_APP_PASSWORD", raising=False)
+    monkeypatch.setattr(email_service, "GMAIL_USER", "")
+    monkeypatch.setattr(email_service, "GMAIL_APP_PASSWORD", "")
     ok = email_service.notify_admin_new_user("a@b.com", "Name", "uid123")
     assert ok is False
 

@@ -439,6 +439,7 @@ class TestIsBoldFont:
 # ── _classify_line_type ──────────────────────────────────────────────
 
 class TestClassifyLineType:
+    """After simplification, _classify_line_type always returns 'item'."""
     def _line(self, *, text="Some text", bold=False, underline=False, size=10):
         return {
             'text': text,
@@ -452,34 +453,32 @@ class TestClassifyLineType:
 
     def test_heading1_bold_underline(self):
         line = self._line(bold=True, underline=True, size=10)
-        assert _classify_line_type(line, median_size=10) == 'heading1'
+        assert _classify_line_type(line, median_size=10) == 'item'
 
     def test_heading1_large_bold(self):
         line = self._line(bold=True, size=16)
-        assert _classify_line_type(line, median_size=10) == 'heading1'
+        assert _classify_line_type(line, median_size=10) == 'item'
 
     def test_heading2_bold_short(self):
         line = self._line(bold=True, text="SHORT")
-        assert _classify_line_type(line, median_size=10) == 'heading2'
+        assert _classify_line_type(line, median_size=10) == 'item'
 
     def test_heading2_underline_short(self):
         line = self._line(underline=True, text="Title")
-        assert _classify_line_type(line, median_size=10) == 'heading2'
+        assert _classify_line_type(line, median_size=10) == 'item'
 
     def test_subitem_prefix(self):
         line = self._line(text="* bullet point here")
-        assert _classify_line_type(line, median_size=10) == 'sub-item'
+        assert _classify_line_type(line, median_size=10) == 'item'
 
     def test_normal_item(self):
         line = self._line(text="Normal description text that is long enough")
         assert _classify_line_type(line, median_size=10) == 'item'
 
     def test_no_median_size(self):
-        # When median_size is None, large-font heading detection is skipped
         line = self._line(bold=True, size=16)
-        # Still heading2 because bold + relatively short
         result = _classify_line_type(line, median_size=None)
-        assert result in ('heading1', 'heading2')
+        assert result == 'item'
 
 
 # ── _should_split_block: subitem / sub_indent reasons ─────────────
