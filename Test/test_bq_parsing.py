@@ -1,6 +1,11 @@
 """Unit tests for BQ text-block splitting helpers."""
 import pytest
-from backend.routers.bq import _normalize_fontname, _should_split_block
+from backend.routers.bq import (
+    _normalize_fontname,
+    _should_split_block,
+    _detect_underlines,
+    _is_word_underlined,
+)
 
 
 # ── _normalize_fontname ────────────────────────────────────────────────
@@ -29,11 +34,12 @@ class TestNormalizeFontname:
 # ── _should_split_block ───────────────────────────────────────────────
 
 def _make_line(*, x0=100, x1=300, y_top=0, y_bottom=10,
-               fontname="Arial", size=12.0):
+               fontname="Arial", size=12.0, underline=False):
     return {
         'x0': x0, 'x1': x1,
         'y_top': y_top, 'y_bottom': y_bottom,
         'fontname': fontname, 'size': size,
+        'underline': underline,
     }
 
 
@@ -133,3 +139,64 @@ class TestShouldSplitBlock:
         b = _make_line(x0=200, x1=400, y_top=50)
         _, reason = _should_split_block(a, b, self.para)
         assert reason == 'indent'
+
+    # ── underline splits ──────────────────────────────────────────────
+
+    def test_underline_mismatch_splits(self):
+        a = _make_line(underline=True, y_bottom=10)
+        b = _make_line(underline=False, y_top=12)
+        split, reason = _should_split_block(a, b, self.para)
+        assert split
+        assert reason == 'style'
+
+    def test_underline_match_no_split(self):
+        a = _make_line(underline=True, y_bottom=10)
+        b = _make_line(underline=True, y_top=12)
+        split, _ = _should_split_block(a, b, self.para)
+        assert not split
+
+    def test_both_not_underlined_no_split(self):
+        a = _make_line(underline=False, y_bottom=10)
+        b = _make_line(underline=False, y_top=12)
+        split, _ = _should_split_block(a, b, self.para)
+        assert not split
+
+
+# ── _is_word_underlined ───────────────────────────────────────────────
+
+class TestIsWordUnderlined:
+    def test_word_with_underline_below(self):
+        word = {'x0': 100, 'x1': 200, 'bottom': 50}
+        underlines = [{'x0': 100, 'x1': 200, 'y': 51}]
+        assert _is_word_underlined(word, underlines)
+
+    def test_word_without_underline(self):
+        word = {'x0': 100, 'x1': 200, 'bottom': 50}
+        underlines = [{'x0': 400, 'x1': 500, 'y': 51}]  # far away
+        assert not _is_word_underlined(word, underlines)
+
+    def test_underline_too_far_below(self):
+        word = {'x0': 100, 'x1': 200, 'bottom': 50}
+        underlines = [{'x0': 100, 'x1': 200, 'y': 60}]  # 10pt below
+        assert not _is_word_underlined(word, underlines)
+
+    def test_partial_overlap_sufficient(self):
+        word = {'x0': 100, 'x1': 200, 'bottom': 50}
+        # Underline covers 60% of word width
+        underlines = [{'x0': 100, 'x1': 160, 'y': 51}]
+        assert _is_word_underlined(word, underlines)
+
+    def test_partial_overlap_insufficient(self):
+        word = {'x0': 100, 'x1': 200, 'bottom': 50}
+        # Underline covers only 40% of word width
+        underlines = [{'x0': 100, 'x1': 140, 'y': 51}]
+        assert not _is_word_underlined(word, underlines)
+
+    def test_empty_underlines(self):
+        word = {'x0': 100, 'x1': 200, 'bottom': 50}
+        assert not _is_word_underlined(word, [])
+
+    def test_zero_width_word(self):
+        word = {'x0': 100, 'x1': 100, 'bottom': 50}
+        underlines = [{'x0': 100, 'x1': 200, 'y': 51}]
+        assert not _is_word_underlined(word, underlines)

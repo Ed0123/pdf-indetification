@@ -25,6 +25,10 @@ export interface DraftPayload {
   last_selected_page: number;
   /** optional map of file_id → File for the original PDF bytes */
   pdf_blobs?: { [file_id: string]: File };
+  /** BQ OCR page data (boxes + extracted rows per page) */
+  bq_page_data?: Record<string, any>;
+  /** BQ templates */
+  bq_templates?: any[];
 }
 
 interface DraftRecord {

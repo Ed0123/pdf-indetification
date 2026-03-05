@@ -18,6 +18,7 @@ import { BQExportPanel } from "./components/BQExportPanel";
 import { TemplateManagerPanel } from "./components/TemplateManagerPanel";
 import { ExcelExportPanel } from "./components/ExcelExportPanel";
 import { PDFExportPanel } from "./components/PDFExportPanel";
+import { FeedbackButton } from "./components/FeedbackButton";
 import type { SelectedPage } from "./components/PageSelectorModal";
 import { useProject } from "./hooks/useProject";
 import { useAuth } from "./hooks/useAuth";
@@ -121,7 +122,13 @@ export default function App() {
   const [contentWidth, setContentWidth] = useState(48); // percentage
 
   // Activity bar module selection
-  const [activeModule, setActiveModule] = useState<ModuleId>("singlepage");
+  const [activeModule, setActiveModuleRaw] = useState<ModuleId>("singlepage");
+  // Reset drawing state when switching modules
+  const setActiveModule = useCallback((m: ModuleId) => {
+    setActiveModuleRaw(m);
+    setSelectedColumn(null);
+    setHighlightBox(null);
+  }, []);
 
   // BQ (Bill of Quantities) state
   const [bqPageData, setBqPageData] = useState<Record<string, BQPageData>>({});
@@ -286,6 +293,8 @@ export default function App() {
         last_selected_file: state.selected_file_id ?? "",
         last_selected_page: state.selected_page,
         pdf_blobs: { ...pdfBlobsRef.current },
+        bq_page_data: bqPageData,
+        bq_templates: bqTemplates,
       };
       saveDraft(uid, payload).catch(() => {});
     }, 5000);
@@ -293,7 +302,7 @@ export default function App() {
     return () => {
       if (autosaveTimer.current) clearTimeout(autosaveTimer.current);
     };
-  }, [state.pdf_files, state.columns, state.templates, state.selected_file_id, state.selected_page, auth.user]);
+  }, [state.pdf_files, state.columns, state.templates, state.selected_file_id, state.selected_page, auth.user, bqPageData, bqTemplates]);
 
   // Offer to restore draft on login
   const draftRestoreAttempted = useRef(false);
@@ -316,6 +325,9 @@ export default function App() {
         if (draft.payload.pdf_blobs) {
           pdfBlobsRef.current = { ...draft.payload.pdf_blobs };
         }
+        // restore BQ OCR state
+        if (draft.payload.bq_page_data) setBqPageData(draft.payload.bq_page_data);
+        if (draft.payload.bq_templates) setBqTemplates(draft.payload.bq_templates);
         setMsg("已恢復自動保存的草稿（PDF 需重新上傳）");
       } else {
         clearDraft(uid).catch(() => {});
@@ -569,6 +581,9 @@ export default function App() {
     templates: state.templates,
     last_selected_file: state.selected_file_id ?? "",
     last_selected_page: state.selected_page,
+    // BQ OCR state — persisted for cloud restore
+    bq_page_data: bqPageData,
+    bq_templates: bqTemplates,
   });
 
   const serverInfoToFileInfo = (info: ServerFileInfo): PDFFileInfo => ({
@@ -1478,6 +1493,7 @@ export default function App() {
           {profile?.photo_url && (
             <img src={profile.photo_url} alt="" style={{ width: 24, height: 24, borderRadius: 12 }} />
           )}
+          <FeedbackButton />
           <button
             onClick={() => setView("account")}
             style={{
@@ -1532,6 +1548,9 @@ export default function App() {
           projectPayload={buildProjectPayload}
           onLoad={(data) => {
             project.loadProject(data);
+            // Restore BQ OCR state if present
+            if (data.bq_page_data) setBqPageData(data.bq_page_data);
+            if (data.bq_templates) setBqTemplates(data.bq_templates);
             setMsg("已載入雲端專案");
           }}
           onClose={() => setShowCloudProjects(false)}

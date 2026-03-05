@@ -206,18 +206,84 @@ def _normalize_fontname(name: str | None) -> str | None:
     return name
 
 
+def _detect_underlines(page, bbox: tuple) -> list[dict]:
+    """Return horizontal graphic elements (lines/thin rects) within *bbox* that
+    likely represent text underlines.
+
+    Each returned dict has keys ``x0, x1, y`` (the vertical centre of the stroke).
+
+    Strategy: collect ``page.lines`` (explicit strokes) and ``page.rects`` whose
+    height ≤ 2 pt (drawn-as-rect underlines).  Only elements that are roughly
+    horizontal (height ≤ 2 pt) and fall inside *bbox* are kept.
+    """
+    x0b, y0b, x1b, y1b = bbox
+    result: list[dict] = []
+
+    for line in (page.lines or []):
+        lx0, ly0, lx1, ly1 = line['x0'], line['top'], line['x1'], line['bottom']
+        height = abs(ly1 - ly0)
+        if height > 2:
+            continue
+        mid_y = (ly0 + ly1) / 2
+        if mid_y < y0b or mid_y > y1b:
+            continue
+        if lx1 < x0b or lx0 > x1b:
+            continue
+        result.append({'x0': lx0, 'x1': lx1, 'y': mid_y})
+
+    for rect in (page.rects or []):
+        rx0, ry0, rx1, ry1 = rect['x0'], rect['top'], rect['x1'], rect['bottom']
+        height = abs(ry1 - ry0)
+        if height > 2:
+            continue
+        mid_y = (ry0 + ry1) / 2
+        if mid_y < y0b or mid_y > y1b:
+            continue
+        if rx1 < x0b or rx0 > x1b:
+            continue
+        result.append({'x0': rx0, 'x1': rx1, 'y': mid_y})
+
+    return result
+
+
+def _is_word_underlined(word: dict, underlines: list[dict], tolerance: float = 3.0) -> bool:
+    """Check whether *word* is underlined by any element in *underlines*.
+
+    An underline must be within *tolerance* pt below the word's bottom edge
+    and its horizontal extent must overlap the word's x-range by ≥ 50 %.
+    """
+    wx0, wx1, wbottom = word['x0'], word['x1'], word['bottom']
+    word_width = wx1 - wx0
+    if word_width <= 0:
+        return False
+    for ul in underlines:
+        # Vertical check: underline y should be near or just below the word bottom
+        if ul['y'] < wbottom - tolerance or ul['y'] > wbottom + tolerance:
+            continue
+        # Horizontal overlap check
+        overlap = max(0, min(wx1, ul['x1']) - max(wx0, ul['x0']))
+        if overlap >= word_width * 0.5:
+            return True
+    return False
+
+
 def _should_split_block(prev_line: dict, curr_line: dict, para_threshold: float) -> tuple[bool, str]:
     """Decide whether two consecutive lines should be in separate blocks.
 
     Returns (should_split, reason) where reason is '' or one of
     'style', 'indent', 'gap'.
     """
-    # 1. Font / size change
+    # 1. Font / size change (includes underline difference)
     prev_font = _normalize_fontname(prev_line.get('fontname'))
     curr_font = _normalize_fontname(curr_line.get('fontname'))
     if prev_font is not None and curr_font is not None and prev_font != curr_font:
         return True, 'style'
     if abs((prev_line.get('size') or 0) - (curr_line.get('size') or 0)) > 0.5:
+        return True, 'style'
+    # Underline mismatch
+    prev_ul = prev_line.get('underline', False)
+    curr_ul = curr_line.get('underline', False)
+    if prev_ul != curr_ul:
         return True, 'style'
 
     # 2. Indentation / left-edge shift
@@ -390,6 +456,10 @@ def _parse_bq_rows(
                 keep_blank_chars=True, y_tolerance=3, x_tolerance=3,
                 extra_attrs=['fontname', 'size'],
             )
+
+            # Detect underline graphic elements inside the DataRange
+            underlines = _detect_underlines(page, dr_bbox)
+            parse_debug["underline_elements"] = len(underlines)
             
             parse_debug["words_extracted"] = len(words)
             
@@ -423,6 +493,7 @@ def _parse_bq_rows(
                     'x1': w['x1'],
                     'fontname': w.get('fontname'),
                     'size': w.get('size'),
+                    'underline': _is_word_underlined(w, underlines),
                 }
                 
                 assigned = False
@@ -466,7 +537,8 @@ def _parse_bq_rows(
                         'x1': word['x1'],
                         'word_count': 1,
                         'fontnames': [word.get('fontname')],
-                        'sizes': [word.get('size')]
+                        'sizes': [word.get('size')],
+                        'underlines': [word.get('underline', False)],
                     })
                 else:
                     last_line = desc_lines[-1]
@@ -484,6 +556,7 @@ def _parse_bq_rows(
                         # accumulate styles
                         last_line['fontnames'].append(word.get('fontname'))
                         last_line['sizes'].append(word.get('size'))
+                        last_line['underlines'].append(word.get('underline', False))
                     else:
                         # New line
                         desc_lines.append({
@@ -495,7 +568,8 @@ def _parse_bq_rows(
                             'x1': word['x1'],
                             'word_count': 1,
                             'fontnames': [word.get('fontname')],
-                            'sizes': [word.get('size')]
+                            'sizes': [word.get('size')],
+                            'underlines': [word.get('underline', False)],
                         })
 
             # Finalize line text and compute a representative style
@@ -510,6 +584,9 @@ def _parse_bq_rows(
                     line['size'] = sum([s or 0 for s in line['sizes']]) / len(line['sizes'])
                 else:
                     line['size'] = None
+                # majority-vote underline status for the line
+                uls = line.get('underlines', [])
+                line['underline'] = sum(uls) > len(uls) / 2 if uls else False
             
             # Step 2b: Calculate line spacing threshold
             if len(desc_lines) >= 2:
