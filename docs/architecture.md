@@ -1,6 +1,6 @@
 # Architecture & Feature Documentation
 
-> Last updated after Phase 10 (BQ Rate/Total Annotation Fixes).
+> Last updated after Phase 11 (BQ Row Editing, Insert & Sub-item Hierarchy).
 
 ---
 
@@ -122,9 +122,13 @@ and finally the BQ features. Vertical separators appear between these groups.
 └─────────────────────────────────────────────────────────────┘
 ```
 
-### Collapsible Panels
+### Collapsible & Resizable Panels
 - **PDF Tree (left):** Toggle button collapses to a 28px-wide strip.
 - **Data Table (top of column 2):** Toggle button collapses, leaving SinglePageDataTable full-height.
+- **Resizable handles:**
+  * Vertical drag between DataTable and SinglePageDataTable adjusts their relative heights.
+  * Horizontal drag between the left-hand content area and the PDF viewer resizes the two columns.
+  * Sizes are stored in state (`dataTableHeight` and `contentWidth` as percentages) so layout persists during the session.
 
 ### SinglePageDataTable
 - Below the main DataTable (always visible).
@@ -201,6 +205,12 @@ Text extraction follows a two-stage fallback approach per region:
 ### Overview
 BQ-OCR extracts structured table data from PDF Bill of Quantities documents using pdfplumber. It handles multi-column layouts with intelligent row merging.
 
+> **New (phase 2026‑03):** a special `page_ocr` engine option is available
+> for cases where the underlying PDF has no vector text.  This uses
+> PyMuPDF's full-page OCR API and clips/strips the resulting text before
+> further analysis, preventing leading or trailing whitespace from polluting
+> table cells.
+
 ### Feature Access by Tier
 | Tier    | `bq_ocr` | `bq_export` | Quota          |
 |---------|:--------:|:-----------:|----------------|
@@ -227,6 +237,7 @@ BQ-OCR extracts structured table data from PDF Bill of Quantities documents usin
 | 1. Zone Detection | User defines boxes for: `DataRange`, `PageNo`, `Revision`, `BillName`, `Collection` |
 | 2. Column Headers | User defines boxes for columns: `Item`, `Description`, `Qty`, `Unit`, `Rate`, `Total` |
 | 3. Text Extraction | `pdfplumber` extracts all text with coordinates and font attributes (`fontname`, `size`) inside DataRange |
+| 4. Collection Page Detection | A rule-based classifier inspects raw words to decide whether the page is a "collection" (summary) page; result stored in `debug_info` and each row object. |
 | 4. Column Assignment | Each word assigned to column based on X-midpoint overlap with header boxes; font info carried through |
 | 5. Line Grouping | Words grouped into lines by Y-coordinate proximity (tolerance: 5pt) |
 | 6. Block Splitting | Consecutive lines split into separate blocks when: (a) font name/size changes, (b) left-edge X shifts by >max(30px, 20% of line width), or (c) vertical gap exceeds 2.5× median line gap. Font names are normalized by stripping PDF subset prefixes (e.g. `BCDEEE+Arial` → `Arial`). |
@@ -238,7 +249,7 @@ BQ-OCR extracts structured table data from PDF Bill of Quantities documents usin
 |------|-----------|
 | `heading1` | Only Description column has text (spans full width) |
 | `heading2` | 2+ columns have text but no Qty/Rate/Total values |
-| `item` | Item column OR Qty/Rate/Total has numeric value |
+| `item` | Item column text **and** (quantity is not null **or** unit text present) *(previously also accepted Qty/Rate/Total numeric values, tightened in March 2026)* |
 | `notes` | All other rows (typically footnotes, continuation text) |
 
 ### Response Schema (`BQRowResponse`)
@@ -248,7 +259,9 @@ BQ-OCR extracts structured table data from PDF Bill of Quantities documents usin
 | `page_number` | int | 0-indexed PDF page number |
 | `page_label` | str | Zone-defined label (e.g., "B/1/2") |
 | `revision` | str | Zone-defined revision text |
-| `type` | str | `heading1` \| `heading2` \| `item` \| `notes` |
+| `page_is_collection` | bool | True if page was auto‑classified as a collection/summary page |
+| `type` | str | `heading1` \| `heading2` \| `item` \| `sub-item` \| `notes` \| `collection_entry` \| `collection_cf` \| `collection_total` |
+| `parent_id` | int? | Parent row ID for sub-items (links sub-item to its parent item row) |
 | `item_no` | str | Extracted Item column text |
 | `description` | str | Merged Description text |
 | `quantity` | float? | Parsed Qty value |
@@ -270,7 +283,7 @@ BQ-OCR extracts structured table data from PDF Bill of Quantities documents usin
 |--------|---------|
 | Page   | All pages / specific page label |
 | Revision | All revisions / specific revision |
-| Type   | All / Items / Notes / Heading1 / Heading2 |
+| Type   | All / Items / Sub-items / Notes / Heading1 / Heading2 |
 
 ### API Endpoints
 | Method | Path | Auth | Description |
@@ -374,6 +387,7 @@ BQ-OCR extracts structured table data from PDF Bill of Quantities documents usin
 
 ### Toolbar & UI adjustments (Phase 10)
 - **Toolbar slimmed:** only Import and Cloud actions remain; export/recognize/template/pdf-export buttons moved into the data table area
+- **Toolbar "Templates" button:** now switches the main content column to the Templates module, which displays both Page‑templates and BQ‑templates depending on context.
 - **Clear Data:** removed entirely (no longer used)
 - **Delete File:** button relocated into PDF tree view header for contextual operations
 
@@ -506,3 +520,44 @@ cd frontend && npm run build
 4. **Bug fix — Ctrl+V paste doesn't auto-calculate (Bug 4):** `handlePaste` now tracks pasted `rate`/`qty` per row and auto-calculates total with `user_edited.total = true` when both values are present.
 5. **Bug fix — arrow keys scroll page (Bug 5):** Added `tableRef.current?.focus()` calls in `focusCell`, `handleSaveEdit`, and `handleCancelEdit` to keep keyboard focus on the table div; prevents browser scrolling on ↑↓ key press.
 6. **TypeScript:** Added `align?: "left" | "center" | "right"` field to `TextAnnotation` interface.
+
+### Phase 11 — BQ Row Editing, Insert & Sub-item Hierarchy
+
+#### 11.1 Row Insert (Insert key)
+- **BQExportPanel:** Pressing `Insert` key while a row is focused inserts a new empty `notes` row directly below the selected row.
+- **App.tsx `handleBQRowInsert`:** Copies metadata (file_id, page_number, page_label, revision, bill_name) from the reference row; auto-assigns `maxId + 1`; splices into the rows array at position `idx + 1`.
+- Cursor auto-moves to the new row's Description cell for immediate editing.
+
+#### 11.2 Row Type Editing (dropdown)
+- The **Type** column in BQExportPanel is now a `<select>` dropdown instead of a static badge.
+- Users can change any row's type between: Item, Sub-Item, Note, H1, H2, and collection types.
+- Type changes are tracked via `user_edited.type = true`.
+- Type color-coding: Item (green), Sub-Item (purple), Notes (grey), H1 (red), H2 (orange), Collection (blue).
+
+#### 11.3 Sub-item Support
+- **Backend (`bq.py`):** `_classify_line_type()` detects sub-item prefixes (`*`, `-`, `A.`, `1.`, `(a)`) and heading patterns.
+- **`_should_split_block()`** splits on `subitem` (prefix match) and `sub_indent` (indent > 1.0× line height).
+- **`_merge_short_continuation()`** merges short continuation lines (≤3 words, no prefix) back into the previous sub-block.
+- **`BQRowResponse.parent_id`:** Optional field linking sub-items to their parent item row.
+- **Frontend:** `BQItemType` now includes `"sub-item"`; `BQRow.parent_id` added; `BQRowAPI` interface updated.
+
+#### 11.4 Hierarchy in Block Building
+- Items with multiple sub-blocks emit a parent `item` row + child `sub-item` rows with `parent_id` linkage.
+- Single-block items remain as one `item` row (backward compatible).
+- Notes blocks classify lines as `heading1`/`heading2`/`notes` using `_classify_line_type()`.
+
+#### 11.5 Post-processing
+- `_clean_description()` strips stray `;` artifacts from OCR line-joining.
+- Export JSON includes `parent_id` field for hierarchy tracking.
+
+#### 11.6 Cleanup & Audit Fixes
+- Removed unused `setAuthToken` import from App.tsx.
+- Fixed `BQOCRPanel` type cast to support all 8 row types (was truncating to 3).
+- Added `parent_id` to `BQRowAPI` interface in `client.ts`.
+- Fixed bbox_y0 bug in `handleBQRowInsert` (was using bbox_y1 for top coordinate).
+- `user_edited` type expanded to track `type`, `description`, `item_no`, `unit` edits.
+
+#### 11.7 Test Infrastructure Fixes
+- **conftest.py:** Added `os.environ.setdefault("DEV_MODE", "1")` so all tests automatically use the in-memory fake Firestore without needing the env var set externally.
+- **test_bq_templates_api.py:** Rewrote `make_doc` / `DummyColl` mocks to properly separate Firestore document references (`_DocRef` with `.get()` / `.update()`) from snapshots (`DocSnap` with `.exists` / `.to_dict()`), matching the real Firestore API pattern used by `bq_templates.py`.
+- Test suite: **157 tests passing** (0 failures, 0 errors) — up from 152 passed + 2 failed + 3 errors.

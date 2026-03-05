@@ -8,6 +8,9 @@ import json
 import tempfile
 import pytest
 
+# Ensure DEV_MODE so backend uses in-memory fake Firestore
+os.environ.setdefault("DEV_MODE", "1")
+
 # Add project root to path
 project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if project_root not in sys.path:

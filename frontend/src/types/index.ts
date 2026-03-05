@@ -88,7 +88,8 @@ export interface StatusInfo {
 // ─── BQ (Bill of Quantities) Types ────────────────────────────────────────────
 
 /** BQ item types for hierarchical classification */
-export type BQItemType = "heading1" | "heading2" | "item" | "notes";
+export type BQItemType = "heading1" | "heading2" | "item" | "sub-item" | "notes"
+  | "collection_entry" | "collection_cf" | "collection_total";
 
 /** A single BQ row extracted from a PDF page */
 export interface BQRow {
@@ -99,13 +100,15 @@ export interface BQRow {
   revision: string;             // e.g. "Addendum No. 2" from Revision zone
   bill_name: string;            // e.g. "BILL NO. 4 - BASEMENT" from BillName zone
   collection: string;           // e.g. "CARRIED TO COLLECTION $" from Collection zone
-  type: BQItemType;             // heading1, heading2, item, or notes
-  item_no: string;              // Item number (e.g. "1", "2", etc.)
+  page_is_collection?: boolean; // automatically detected collection page
+  type: BQItemType;             // heading1, heading2, item, notes, or collection_*
+  item_no: string;              // Item number; for collection_entry: referenced page label
   description: string;          // Item description
   quantity: number | null;      // Quantity
   unit: string;                 // Unit (e.g. "Set", "Nr", etc.)
   rate: number | null;          // Unit rate
   total: number | null;         // Total amount
+  parent_id?: number | null;     // Parent row ID for sub-items
   // Bounding box for UI highlighting (absolute PDF coordinates)
   bbox_x0?: number;
   bbox_y0?: number;
@@ -119,6 +122,10 @@ export interface BQRow {
     quantity?: boolean;
     rate?: boolean;
     total?: boolean;
+    type?: boolean;
+    description?: boolean;
+    item_no?: boolean;
+    unit?: boolean;
   };
 }
 
@@ -144,6 +151,7 @@ export interface BQPageData {
   applied_template?: string;           // Last applied BQ template name
   // Page totals for collection calculation
   page_total?: number;                 // Sum of all item totals on this page
+  page_is_collection?: boolean;         // auto-detected page type
   collection_box?: {                   // Collection zone box coordinates
     x0: number;
     y0: number;

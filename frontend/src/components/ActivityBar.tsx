@@ -68,6 +68,10 @@ export function ActivityBar({
 }: ActivityBarProps) {
   // Check if user has access to a module
   const hasAccess = (module: ModuleConfig): boolean => {
+    // BQ Export panel should always be reachable; the export permission is
+    // enforced inside the panel itself (JSON‑only mode when denied).
+    if (module.id === "bq_export") return true;
+
     // If the module has a feature key AND we have feature flags, use them
     if (module.feature && userFeatures) {
       return userFeatures[module.feature] === true;

@@ -1,12 +1,71 @@
-# PDF Text Extraction Tool — Web App
+# 📄 PDF Text Extraction Tool — Web App
 
-A browser-based PDF text extraction tool that lets you import PDFs, draw extraction boxes, run OCR, and export results to Excel.
+A **browser-based application** for extracting text from PDFs. Users can upload documents, draw regions to capture text, perform OCR, and export results as Excel files.
 
-Built with **React + Vite** (frontend) and **FastAPI + PyMuPDF** (backend), deployable to **Firebase Hosting** (frontend) + **Google Cloud Run** (backend).
+This repository hosts a **full-stack project**:
+- **Frontend**: React + Vite (TypeScript)
+- **Backend**: FastAPI + PyMuPDF (with Tesseract OCR fallback)
+- **Deployment**: Firebase Hosting for frontend and Google Cloud Run for backend
 
 ---
 
-## Architecture
+## 🚀 Quick Start
+
+### Local development
+1. **Backend**
+   ```bash
+   pip install -r backend/requirements.txt
+   python -m uvicorn backend.main:app --reload --port 8000
+   ```
+
+2. **Frontend**
+   ```bash
+   cd frontend
+   npm install
+   npm run dev         # opens http://localhost:5173
+   ```
+   > Vite automatically proxies `/api/*` to `http://localhost:8000` in development.
+
+### Running tests
+```bash
+QT_QPA_PLATFORM=offscreen python -m pytest -q
+```
+
+---
+
+## ⚙️ Deployment
+
+### Prerequisites
+```bash
+npm install -g firebase-tools
+# and install the Google Cloud SDK:
+# https://cloud.google.com/sdk/docs/install
+```
+
+### One‑command deploy
+```bash
+chmod +x deploy.sh
+./deploy.sh YOUR_GCP_PROJECT_ID asia-east1
+```
+
+### Manual steps
+1. **Backend (Cloud Run)**
+   ```bash
+   gcloud run deploy pdf-backend --source . \
+     --region asia-east1 --allow-unauthenticated
+   ```
+
+2. **Frontend (Firebase hosting)**
+   ```bash
+   cd frontend
+   VITE_API_URL=https://pdf-backend-xxxx-xx.a.run.app npm run build
+   cd ..
+   firebase deploy --only hosting --project YOUR_PROJECT_ID
+   ```
+
+---
+
+## 🏗️ Architecture
 
 ```
 ┌──────────────────────────────┐        ┌────────────────────────────────┐
@@ -16,82 +75,27 @@ Built with **React + Vite** (frontend) and **FastAPI + PyMuPDF** (backend), depl
 └──────────────────────────────┘        └────────────────────────────────┘
 ```
 
----
-
-## Local Development
-
-### 1. Start the backend
-
-```bash
-pip install -r backend/requirements.txt
-python -m uvicorn backend.main:app --reload --port 8000
-```
-
-### 2. Start the frontend
-
-```bash
-cd frontend
-npm install
-npm run dev   # opens http://localhost:5173
-```
-
-Vite proxies `/api/*` → `http://localhost:8000` automatically during dev.
 
 ---
 
-## Deploy to Firebase + Cloud Run
+## ✅ Key Features
 
-### Prerequisites
+* **PDF import** – drag/drop or select files in-browser
+* **Tree view** – navigate document/page hierarchy
+* **Extraction boxes** – draw regions to capture text
+* **Data table** – edit, sort, filter, and customize columns
+* **Single‑page mode** – quick edit per page with template navigation
+* **Text recognition** – PyMuPDF vector extraction + Tesseract OCR fallback
+* **Template management** – save and apply region templates across pages
+* **Google login & account** – Firebase authentication and profile page
+* **Admin panel** – manage users, tiers, groups, and usage resets
+* **Excel export** – download `.xlsx` exports of extracted data
 
-```bash
-npm install -g firebase-tools
-# Install Google Cloud SDK: https://cloud.google.com/sdk/docs/install
-```
-
-### One-command deploy
-
-```bash
-chmod +x deploy.sh
-./deploy.sh YOUR_GCP_PROJECT_ID asia-east1
-```
-
-### Manual steps
-
-```bash
-# 1. Deploy backend to Cloud Run
-gcloud run deploy pdf-backend --source . --region asia-east1 --allow-unauthenticated
-
-# 2. Build frontend with Cloud Run URL
-cd frontend
-VITE_API_URL=https://pdf-backend-xxxx-xx.a.run.app npm run build
-cd ..
-
-# 3. Set your Firebase project ID in .firebaserc, then deploy frontend
-firebase deploy --only hosting --project YOUR_PROJECT_ID
-```
+> ⚠️ **Removed features**: toolbar Save/Load (automatic IndexedDB persistence) and Clear Data.
 
 ---
 
-## Features
-
-| Feature | Description |
-|---|---|
-| Import PDFs | Upload PDF files from your browser |
-| PDF Tree View | Collapsible file/page tree with Expand All / Collapse All |
-| Extraction Boxes | Draw boxes on PDF pages to define extraction regions |
-| Data Table | View/edit extracted text; sortable, filterable, custom columns |
-| Single Page Data Table | Per-page quick editor with page/template navigation |
-| Recognize Text | PyMuPDF vector extraction + Tesseract OCR fallback |
-| Template Management | Save/apply/update extraction templates across pages |
-| Google Login & Account | Firebase-authenticated login and account profile page |
-| Admin Panel | User status/tier/group management + usage reset + group management |
-| Export Excel | Download extracted data as `.xlsx` |
-| (toolbar) Save / Load | *removed* – persistence is automatic via IndexedDB |
-| Clear Data | *removed* – no longer available |
-
----
-
-## Project Structure
+## 📁 Project Structure
 
 ```
 ├── backend/                 FastAPI backend
@@ -117,17 +121,19 @@ firebase deploy --only hosting --project YOUR_PROJECT_ID
 
 ---
 
-## Running Tests
+## 🔧 Environment Variables
 
-```bash
-QT_QPA_PLATFORM=offscreen python -m pytest -q
-```
+| Variable      | Usage            | Description |
+|---------------|------------------|-------------|
+| `VITE_API_URL`| Frontend build   | Cloud Run URL (empty = dev proxy)
+| `PORT`        | Backend runtime  | Server port (Cloud Run sets to 8080)
 
 ---
 
-## Environment Variables
+## 📚 Documentation & Notes
+* See **docs/** for architecture diagrams, specifications and review notes.
+* Frontend output lives in `frontend-dist/` (ignored by git).
 
-| Variable | Where | Description |
-|---|---|---|
-| `VITE_API_URL` | Frontend build | Cloud Run URL (empty = Vite proxy in dev) |
-| `PORT` | Backend | Listen port (Cloud Run sets this automatically to 8080) |
+---
+
+> 📌 *This README is maintained by the development team. Please update it as features evolve.*

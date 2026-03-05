@@ -116,7 +116,11 @@ class BQExtractRequest(BaseModel):
     file_id: str
     pages: list[int]  # 0-based page indices
     boxes: list[BoxDefinition]
-    engine: Literal["pdfplumber", "camelot-lattice", "camelot-stream"] = "pdfplumber"
+    # Engine selection for OCR/analysis.  "page_ocr" is a special option that
+    # instructs the backend to perform PyMuPDF full-page OCR and then clip the
+    # result; this path is trimmed of whitespace.  Other engines (pdfplumber or
+    # camelot) are unaffected by this field.
+    engine: Literal["pdfplumber", "camelot-lattice", "camelot-stream", "page_ocr"] = "pdfplumber"
 
 
 class BQRowResponse(BaseModel):
@@ -128,13 +132,17 @@ class BQRowResponse(BaseModel):
     revision: str = ""
     bill_name: str = ""
     collection: str = ""
-    type: str = "item"  # heading1, heading2, item
+    # page-level collection flag (see `_detect_collection_page`)
+    page_is_collection: bool = False
+    type: str = "item"  # heading1, heading2, item, sub-item, notes
     item_no: str = ""
     description: str = ""
     quantity: Optional[float] = None
     unit: str = ""
     rate: Optional[float] = None
     total: Optional[float] = None
+    # Parent row id for hierarchy (sub-items point to their parent item)
+    parent_id: Optional[int] = None
     # Bounding box for UI highlighting (PDF coordinates)
     bbox_x0: Optional[float] = None
     bbox_y0: Optional[float] = None
@@ -146,7 +154,12 @@ class BQRowResponse(BaseModel):
 
 
 class BQExtractResponse(BaseModel):
-    """Response body for BQ extraction."""
+    """Response body for BQ extraction.
+
+    The returned ``rows`` list now has a ``page_is_collection`` flag on each
+    row; debug_info may contain ``parse_debug.collection_page`` with a
+    confidence score from the automatic page‑type classifier.
+    """
     success: bool
     rows: list[BQRowResponse] = []
     warnings: list[str] = []
@@ -204,6 +217,277 @@ def _normalize_fontname(name: str | None) -> str | None:
     if len(name) > 7 and name[6] == '+' and name[:6].isalpha():
         return name[7:]
     return name
+
+
+# Regex that matches common sub-item prefixes at the start of a line.
+# Examples: "* thick", "- allow", "A ", "B. ", "1. ", "(a)", "(i)"
+_SUBITEM_PREFIX_RE = re.compile(
+    r'^(?:'
+    r'\*\s'            # asterisk:   "* thick"
+    r'|\-\s'           # dash:       "- allow"
+    r'|[A-Z]\.?\s'     # letter:     "A ", "B. "
+    r'|[0-9]+\.\s'     # number:     "1. ", "12. "
+    r'|\([a-z0-9]+\)'  # paren:      "(a)", "(i)", "(1)"
+    r')'
+)
+
+
+def _has_subitem_prefix(text: str) -> bool:
+    """Return True if *text* starts with a sub-item prefix pattern."""
+    return bool(_SUBITEM_PREFIX_RE.match(text))
+
+
+def _is_bold_font(fontname: str | None) -> bool:
+    """Heuristic: does the normalised font name suggest bold weight?"""
+    if not fontname:
+        return False
+    norm = _normalize_fontname(fontname)
+    if not norm:
+        return False
+    return 'bold' in norm.lower()
+
+
+def _classify_line_type(line: dict, median_size: float | None = None) -> str:
+    """Classify a single Description line as heading1 / heading2 / sub-item / item.
+
+    Heuristics used:
+    * Bold + underline + short → heading1
+    * Bold OR underline + short → heading2
+    * Sub-item prefix → sub-item
+    * Otherwise → item  (caller may override)
+    """
+    text = line.get('text', '')
+    is_bold = _is_bold_font(line.get('fontname'))
+    is_ul = line.get('underline', False)
+    word_count = len(text.split())
+    is_short = word_count <= 5
+    # Larger-than-average font is a heading signal
+    is_large = False
+    if median_size and line.get('size') and line['size'] > median_size * 1.15:
+        is_large = True
+
+    if (is_bold and is_ul) or (is_large and (is_bold or is_ul)):
+        return 'heading1'
+    if (is_bold or is_ul or is_large) and is_short:
+        return 'heading2'
+    if _has_subitem_prefix(text):
+        return 'sub-item'
+    return 'item'
+
+
+# ---------------------------------------------------------------------------
+# Collection page detection helpers
+# ---------------------------------------------------------------------------
+
+# keyword lists used by _is_collection_page; kept outside function for coverage
+_POSITIVE_COLLECTION_KEYWORDS = [
+    "summary",
+    "collection",
+    "total",
+    "grand total",
+    "subtotal",
+    "aggregation",
+    "recap",
+    "bill summary",
+    "carried to summary",
+    "collection of bill",
+    "collection from page",
+]
+_NEGATIVE_ITEM_KEYWORDS = [
+    "item",
+    "description",
+    "unit",
+    "qty",
+    "quantity",
+    "rate",
+    "amount",
+    "provisional sum",
+]
+
+
+def _is_collection_page(words: list[dict], page_width: float | None = None, page_height: float | None = None) -> tuple[bool, float]:
+    """Simple rule-based classifier for BQ "collection" (summary) pages.
+
+    *words* should be the raw OCR output from ``pdfplumber`` (see
+    :func:`_parse_bq_rows`).  Only the ``'text'`` attribute is required, but
+    ``x0``/``x1``/``'top``/``'bottom`` are used for a couple of geometric
+    heuristics.
+
+    Returns ``(is_collection, confidence)`` where confidence is a float in
+    ``[0,1]``.  The implementation follows the feature spec provided in the
+    engineering task: keyword matching, numeric density, layout sparsity, and
+    crude header/footer detection.  The scoring weights are arbitrary but
+    intended to prefer pages containing obvious summary keywords and relatively
+    few descriptive words.
+    """
+    import re
+    from difflib import SequenceMatcher
+
+    score = 0.0
+    total = len(words)
+    if total == 0:
+        return False, 0.0
+
+    lower_texts = [w.get("text", "").strip().lower() for w in words]
+
+    # keyword counts
+    pos_count = 0
+    neg_count = 0
+    for t in lower_texts:
+        for kw in _POSITIVE_COLLECTION_KEYWORDS:
+            if kw in t:
+                pos_count += 1
+            else:
+                # fuzzy match: simple ratio threshold
+                if SequenceMatcher(None, t, kw).ratio() > 0.8:
+                    pos_count += 1
+        for kw in _NEGATIVE_ITEM_KEYWORDS:
+            if kw in t:
+                neg_count += 1
+            else:
+                if SequenceMatcher(None, t, kw).ratio() > 0.8:
+                    neg_count += 1
+
+    has_pos = pos_count > 0
+    has_neg = neg_count > 0
+
+    # numeric ratio
+    num_re = re.compile(r"^[\d,.]+$")
+    numeric_count = sum(1 for t in lower_texts if num_re.match(t.replace(" ", "")))
+    numeric_ratio = numeric_count / total
+
+    # layout density (texts per unit area)
+    layout_density = 0.0
+    if page_width and page_height and page_width > 0 and page_height > 0:
+        layout_density = total / (page_width * page_height)
+
+    # header/footer heuristics
+    has_header_kw = False
+    has_footer_kw = False
+    if page_height and page_height > 0:
+        for w in words:
+            y_center = (w.get("top", 0) + w.get("bottom", 0)) / 2
+            t = w.get("text", "").strip().lower()
+            if y_center < page_height * 0.2 and any(kw in t for kw in _POSITIVE_COLLECTION_KEYWORDS):
+                has_header_kw = True
+            if y_center > page_height * 0.8 and any(kw in t for kw in _POSITIVE_COLLECTION_KEYWORDS):
+                has_footer_kw = True
+
+    # scoring rules (weights loosely based on spec)
+    # presence of any positive keyword is the strongest single indicator
+    if pos_count >= 1:
+        score += 0.5
+    elif pos_count > 1:
+        score += 0.4
+    if has_header_kw or has_footer_kw:
+        score += 0.2
+    if numeric_ratio > 0.3:
+        score += 0.1
+    if layout_density < 0.0001:
+        score += 0.1
+    # ensure we still penalise obvious non-summary pages
+    if has_neg:
+        score -= 0.3
+
+    confidence = max(0.0, min(1.0, score))
+    return confidence > 0.6, confidence
+
+
+# ---------------------------------------------------------------------------
+# Collection page entry parsing
+# ---------------------------------------------------------------------------
+
+# Regex patterns for carry-forward / brought-forward keywords
+_CARRY_FORWARD_RE = re.compile(
+    r'(?:carried?\s+forward|carry\s+forward|c/?f|to\s+next\s+page|carried\s+to)',
+    re.IGNORECASE,
+)
+_BROUGHT_FORWARD_RE = re.compile(
+    r'(?:brought?\s+forward|bring\s+forward|b/?f|from\s+previous|from\s+last)',
+    re.IGNORECASE,
+)
+
+# Regex for page reference patterns like "MODBQ.15/1", "BQ.4/2", "Page 5", etc.
+_PAGE_REF_RE = re.compile(
+    r'(?:'
+    r'(?:page\s*(?:no\.?\s*)?)?'       # optional "Page No."
+    r'([A-Z]{2,}[\w]*\.[\d]+/[\d]+)'   # e.g. MODBQ.15/1, BQ.4/2
+    r'|page\s*(?:no\.?\s*)?(\d+)'      # e.g. "Page 5", "Page No. 3"
+    r')',
+    re.IGNORECASE,
+)
+
+# Regex for currency/number extraction
+_CURRENCY_NUM_RE = re.compile(
+    r'[\$]?\s*(\d{1,3}(?:,\d{3})*(?:\.\d+)?)'
+)
+
+
+def _parse_collection_entries(
+    desc_lines: list[dict],
+    total_lines: list[dict],
+) -> list[dict]:
+    """Parse collection page lines to extract page reference entries.
+
+    Returns a list of dicts:
+      { 'description': str, 'page_ref': str, 'total': float|None,
+        'entry_type': 'page_ref'|'carry_forward'|'brought_forward'|'grand_total'|'other',
+        'lines': list[dict] }
+    """
+    entries: list[dict] = []
+
+    def _find_total_at_y(y: float, tolerance: float = 15) -> float | None:
+        for t in total_lines:
+            if abs(t['y'] - y) <= tolerance:
+                text = t['text'].replace(",", "").replace("$", "").strip()
+                try:
+                    return float(text)
+                except ValueError:
+                    return None
+        return None
+
+    for line in desc_lines:
+        text = line['text']
+        y = line['y_center']
+        entry: dict = {
+            'description': text,
+            'page_ref': '',
+            'total': _find_total_at_y(y),
+            'entry_type': 'other',
+            'lines': [line],
+        }
+
+        # Check for page reference patterns
+        ref_match = _PAGE_REF_RE.search(text)
+        if ref_match:
+            page_ref = ref_match.group(1) or ref_match.group(2)
+            if page_ref:
+                entry['page_ref'] = page_ref
+                entry['entry_type'] = 'page_ref'
+
+        # Check for carry-forward
+        if _CARRY_FORWARD_RE.search(text):
+            entry['entry_type'] = 'carry_forward'
+        # Check for brought-forward
+        elif _BROUGHT_FORWARD_RE.search(text):
+            entry['entry_type'] = 'brought_forward'
+        # Check for grand total
+        elif re.search(r'grand\s*total', text, re.IGNORECASE):
+            entry['entry_type'] = 'grand_total'
+
+        # If no total found from total column, try extracting from the line itself
+        if entry['total'] is None:
+            # Look for trailing number in the description (common in collection pages)
+            num_match = _CURRENCY_NUM_RE.findall(text)
+            if num_match:
+                try:
+                    entry['total'] = float(num_match[-1].replace(",", ""))
+                except ValueError:
+                    pass
+
+        entries.append(entry)
+
+    return entries
 
 
 def _detect_underlines(page, bbox: tuple) -> list[dict]:
@@ -271,7 +555,10 @@ def _should_split_block(prev_line: dict, curr_line: dict, para_threshold: float)
     """Decide whether two consecutive lines should be in separate blocks.
 
     Returns (should_split, reason) where reason is '' or one of
-    'style', 'indent', 'gap'.
+    'style', 'indent', 'gap', 'subitem', 'sub_indent'.
+
+    Priority order:
+      style > subitem > indent / sub_indent > gap
     """
     # 1. Font / size change (includes underline difference)
     prev_font = _normalize_fontname(prev_line.get('fontname'))
@@ -286,40 +573,87 @@ def _should_split_block(prev_line: dict, curr_line: dict, para_threshold: float)
     if prev_ul != curr_ul:
         return True, 'style'
 
-    # 2. Indentation / left-edge shift
-    avg_width = ((prev_line['x1'] - prev_line['x0']) + (curr_line['x1'] - curr_line['x0'])) / 2
-    x_threshold = max(30, avg_width * 0.2)
+    # 2. Sub-item prefix detection — even without a gap, a recognised prefix
+    #    (*, -, A., 1., etc.) at the start of the current line triggers a split.
+    curr_text = curr_line.get('text', '')
+    if _has_subitem_prefix(curr_text):
+        return True, 'subitem'
+
+    # 3. Indentation / left-edge shift
+    prev_height = prev_line['y_bottom'] - prev_line['y_top']
+    curr_height = curr_line['y_bottom'] - curr_line['y_top']
     x_diff = abs(curr_line['x0'] - prev_line['x0'])
-    if x_diff > x_threshold:
+
+    if prev_height <= 0 or curr_height <= 0:
+        # revert to legacy heuristics
+        avg_width = ((prev_line['x1'] - prev_line['x0']) + (curr_line['x1'] - curr_line['x0'])) / 2
+        x_threshold = max(30, avg_width * 0.2)
+        if x_diff > x_threshold:
+            return True, 'indent'
+        gap = curr_line['y_top'] - prev_line['y_bottom']
+        if gap > para_threshold:
+            return True, 'gap'
+        return False, ''
+
+    # Full paragraph indent: 1.5×height
+    if x_diff > prev_height * 1.5:
         return True, 'indent'
 
-    # 3. Large vertical gap
+    # Sub-indent: smaller shift (1.0×height) combined with the current line
+    # being indented *further right* than the previous line.
+    if curr_line['x0'] > prev_line['x0'] and x_diff > prev_height * 1.0:
+        return True, 'sub_indent'
+
+    # 4. Vertical gap: half the average line height
     gap = curr_line['y_top'] - prev_line['y_bottom']
-    if gap > para_threshold:
+    height_avg = (prev_height + curr_height) / 2
+    gap_threshold = height_avg * 0.5
+    if gap > gap_threshold:
         return True, 'gap'
 
     return False, ''
 
 
 def _extract_text_from_box(pdf_path: str, page_num: int, box: BoxDefinition, engine: str = "pdfplumber") -> str:
-    """Extract text from a specific box region on a PDF page."""
+    """Extract text from a specific box region on a PDF page.
+
+    The *engine* parameter currently controls which backend is used for
+    BQ parsing; most values (``pdfplumber``, ``camelot-*``) ignore this and
+    simply let the caller decide later.  We add a special ``"page_ocr"``
+    value which performs OCR on the whole page using PyMuPDF's
+    ``get_textpage_ocr`` API, then clips and returns the portion inside the
+    requested box.  Whitespace is always trimmed from the result.
+    """
     import fitz  # PyMuPDF
-    
+
     doc = fitz.open(pdf_path)
     if page_num < 0 or page_num >= len(doc):
         doc.close()
         return ""
-    
+
     page = doc[page_num]
     rect = page.rect
-    
+
     # Convert relative coords (0-1) to absolute
     x0 = rect.x0 + box.x * rect.width
     y0 = rect.y0 + box.y * rect.height
     x1 = x0 + box.width * rect.width
     y1 = y0 + box.height * rect.height
-    
+
     clip_rect = fitz.Rect(x0, y0, x1, y1)
+
+    # page OCR path
+    if engine == "page_ocr":
+        try:
+            if hasattr(page, "get_textpage_ocr"):
+                tp = page.get_textpage_ocr(flags=0, full=False)
+                text = page.get_text("text", clip=clip_rect, textpage=tp)
+                doc.close()
+                return text.strip()
+        except Exception:
+            # If OCR fails for any reason fall back to normal extraction below
+            pass
+
     text = page.get_text("text", clip=clip_rect).strip()
     
     doc.close()
@@ -462,6 +796,13 @@ def _parse_bq_rows(
             parse_debug["underline_elements"] = len(underlines)
             
             parse_debug["words_extracted"] = len(words)
+            
+            # Collection page detection (new feature)
+            is_coll, coll_conf = _is_collection_page(words, page_width, page_height)
+            parse_debug["collection_page"] = {
+                "is_collection": is_coll,
+                "confidence": coll_conf,
+            }
             
             # Log first few words for debugging
             if words:
@@ -656,8 +997,13 @@ def _parse_bq_rows(
             parse_debug["qty_values"] = [{"text": v['text'], "y": v['y']} for v in qty_lines]
             
             # Step 3: Build output rows based on Item positions and Description lines
-            # Strategy: Each Item marks a new "item" row. Description lines between items belong to that item.
-            # Description lines before any item, or with large gaps AND no item, are "notes"
+            # Strategy:
+            #   • Each Item column value marks a new "item" row.
+            #   • Description lines between items are split further into
+            #     sub-items (prefix / indent), headings (bold/underline),
+            #     or continuation lines.
+            #   • Lines before the first item are notes/headings.
+            #   • parent_id links sub-items back to their parent item row.
             
             def find_value_at_y(values: list[dict], y: float, tolerance: float = 15) -> dict | None:
                 """Find a value whose Y is close to y"""
@@ -672,55 +1018,147 @@ def _parse_bq_rows(
                     return float(s)
                 except ValueError:
                     return None
-            
+
+            def _clean_description(text: str) -> str:
+                """Post-process a joined description string."""
+                # Remove stray semicolons left from OCR line-break joining
+                text = re.sub(r'\s*;\s*$', '', text)
+                text = re.sub(r'^\s*;\s*', '', text)
+                return text.strip()
+
+            def _merge_short_continuation(lines: list[dict], threshold_words: int = 3) -> list[list[dict]]:
+                """Group *lines* into sub-blocks, merging short continuation
+                lines (≤ *threshold_words* words without a sub-item prefix and
+                with a small gap) into the preceding sub-block.
+
+                Returns a list of sub-block groups (each a list of lines).
+                """
+                if not lines:
+                    return []
+                groups: list[list[dict]] = [[lines[0]]]
+                for i in range(1, len(lines)):
+                    prev = lines[i - 1]
+                    curr = lines[i]
+                    split, reason = _should_split_block(prev, curr, para_threshold)
+                    if split:
+                        groups.append([curr])
+                    else:
+                        groups[-1].append(curr)
+                # Second pass: merge tiny groups (≤ threshold_words total,
+                # no prefix) back into the *previous* group.
+                merged: list[list[dict]] = [groups[0]]
+                for g in groups[1:]:
+                    combined_text = ' '.join(l['text'] for l in g)
+                    if (len(combined_text.split()) <= threshold_words
+                            and not _has_subitem_prefix(combined_text)):
+                        merged[-1].extend(g)
+                    else:
+                        merged.append(g)
+                return merged
+
+            # Compute median font size across all desc lines for heading detection
+            all_sizes = [l.get('size') for l in desc_lines if l.get('size')]
+            median_size = sorted(all_sizes)[len(all_sizes) // 2] if all_sizes else None
+
             # Sort item positions
             item_positions = sorted([(v['y'], v) for v in item_lines], key=lambda x: x[0])
             
-            # If no items, everything is notes
-            if not item_positions:
-                # All description lines are notes
-                for line in desc_lines:
-                    rows.append(BQRowResponse(
-                        id=row_id,
-                        file_id=file_id,
-                        page_number=page_num,
-                        page_label=page_label,
-                        revision=revision,
-                        bill_name=bill_name,
-                        collection=collection,
-                        type="notes",
-                        item_no="",
-                        description=line['text'],
-                        quantity=None,
-                        unit="",
-                        rate=None,
-                        total=None,
-                        bbox_x0=line['x0'],
-                        bbox_y0=line['y_top'],
-                        bbox_x1=line['x1'],
-                        bbox_y1=line['y_bottom'],
-                        page_width=page_width,
-                        page_height=page_height
+            # Helper: create a BQRowResponse with common fields filled in
+            def _make_row(*, row_type: str, desc: str, item_no: str = "",
+                          qty=None, unit="", rate=None, total=None,
+                          parent_id_val=None,
+                          lines_for_bbox: list[dict] | None = None,
+                          item_x0: float = 0, item_x1: float = 0,
+                          fallback_y_start: float = 0, fallback_y_end: float = 0) -> BQRowResponse:
+                nonlocal row_id
+                if lines_for_bbox:
+                    bx0 = min(l['x0'] for l in lines_for_bbox)
+                    bx1 = max(l['x1'] for l in lines_for_bbox)
+                    by0 = min(l['y_top'] for l in lines_for_bbox)
+                    by1 = max(l['y_bottom'] for l in lines_for_bbox)
+                    if item_x0 > 0:
+                        bx0 = min(bx0, item_x0)
+                else:
+                    bx0 = item_x0
+                    bx1 = item_x1
+                    by0 = fallback_y_start
+                    by1 = fallback_y_end
+                r = BQRowResponse(
+                    id=row_id,
+                    file_id=file_id,
+                    page_number=page_num,
+                    page_label=page_label,
+                    revision=revision,
+                    bill_name=bill_name,
+                    collection=collection,
+                    page_is_collection=is_coll,
+                    type=row_type,
+                    item_no=item_no,
+                    description=_clean_description(desc),
+                    quantity=qty,
+                    unit=unit,
+                    rate=rate,
+                    total=total,
+                    parent_id=parent_id_val,
+                    bbox_x0=bx0, bbox_y0=by0, bbox_x1=bx1, bbox_y1=by1,
+                    page_width=page_width, page_height=page_height,
+                )
+                row_id += 1
+                return r
+
+            # ── Collection page → parse as collection entries ──
+            if is_coll:
+                coll_entries = _parse_collection_entries(desc_lines, total_lines)
+                parse_debug["collection_entries"] = len(coll_entries)
+
+                for entry in coll_entries:
+                    etype = entry['entry_type']
+                    # Map entry_type to row type
+                    if etype == 'page_ref':
+                        row_type = 'collection_entry'
+                    elif etype in ('carry_forward', 'brought_forward'):
+                        row_type = 'collection_cf'
+                    elif etype == 'grand_total':
+                        row_type = 'collection_total'
+                    else:
+                        # Classify as heading / notes like normal
+                        if entry['lines']:
+                            row_type = _classify_line_type(entry['lines'][0], median_size)
+                            if row_type not in ('heading1', 'heading2'):
+                                row_type = 'notes'
+                        else:
+                            row_type = 'notes'
+
+                    rows.append(_make_row(
+                        row_type=row_type,
+                        desc=entry['description'],
+                        item_no=entry.get('page_ref', ''),
+                        total=entry.get('total'),
+                        lines_for_bbox=entry.get('lines') or None,
                     ))
-                    row_id += 1
-            else:
-                # Build description blocks based on Item positions
-                # For each Item, collect description lines that are:
-                # 1. Within a Y range slightly above to next Item's Y (or page end)
-                # 2. Don't have a large paragraph gap
-                
-                all_blocks = []
-                assigned_lines = set()  # Track which lines have been assigned to avoid duplicates
-                
-                # First, any Description lines BEFORE the first Item are notes
-                first_item_y = item_positions[0][0]
-                notes_before = []
+
+            # ── No items on page → emit headings / notes ──
+            elif not item_positions:
                 for line in desc_lines:
-                    if line['y_center'] < first_item_y - 10:  # Lines clearly above first item
-                        notes_before.append(line)
-                        assigned_lines.add(id(line))
-                
-                # Group notes_before by paragraph gaps, style or indentation changes
+                    ltype = _classify_line_type(line, median_size)
+                    if ltype not in ('heading1', 'heading2'):
+                        ltype = 'notes'
+                    rows.append(_make_row(
+                        row_type=ltype, desc=line['text'],
+                        lines_for_bbox=[line],
+                    ))
+
+            else:
+                # ── Build blocks from description lines ──
+                all_blocks: list[dict] = []
+                assigned_lines: set[int] = set()
+
+                # Lines BEFORE the first item → notes/headings
+                first_item_y = item_positions[0][0]
+                notes_before = [l for l in desc_lines if l['y_center'] < first_item_y - 10]
+                for l in notes_before:
+                    assigned_lines.add(id(l))
+
                 if notes_before:
                     current_block = {'type': 'notes', 'lines': [notes_before[0]], 'y_start': notes_before[0]['y_top'], 'y_end': notes_before[0]['y_bottom']}
                     for i in range(1, len(notes_before)):
@@ -736,59 +1174,42 @@ def _parse_bq_rows(
                             current_block['lines'].append(curr)
                             current_block['y_end'] = curr['y_bottom']
                     all_blocks.append(current_block)
-                
-                # Now process each Item
+
+                # ── Process each Item ──
                 for idx, (item_y, item_val) in enumerate(item_positions):
-                    # Find the Y range for this item's description
-                    # Start from item's Y position (not above it to avoid overlaps)
-                    y_start = item_y - 5  # Small margin for same-line description
-                    
+                    y_start = item_y - 5
                     if idx < len(item_positions) - 1:
-                        next_item_y = item_positions[idx + 1][0]
-                        y_end = next_item_y - 5  # Up to next item
+                        y_end = item_positions[idx + 1][0] - 5
                     else:
-                        y_end = dr_y1 + 100  # To page end
-                    
-                    # Collect description lines in this range that haven't been assigned yet
-                    candidate_lines = [
-                        l for l in desc_lines 
-                        if y_start <= l['y_center'] <= y_end and id(l) not in assigned_lines
-                    ]
-                    
-                    # Sort candidate lines by Y
-                    candidate_lines.sort(key=lambda l: l['y_center'])
-                    
-                    # Only take the FIRST continuous paragraph
-                    # Stop at:
-                    # 1. Large Y gap (paragraph break)
-                    # 2. Significant X position change combined with ANY Y gap (indicates new block/column)
-                    item_desc_lines = []
+                        y_end = dr_y1 + 100
+
+                    candidate_lines = sorted(
+                        [l for l in desc_lines
+                         if y_start <= l['y_center'] <= y_end and id(l) not in assigned_lines],
+                        key=lambda l: l['y_center'],
+                    )
+
+                    # Collect ALL lines for this item (don't break early),
+                    # then split them into sub-blocks.
+                    item_all_lines: list[dict] = []
                     for i, line in enumerate(candidate_lines):
-                        if i == 0:
-                            item_desc_lines.append(line)
-                        else:
-                            prev_line = candidate_lines[i-1]
-                            split, reason = _should_split_block(prev_line, line, para_threshold)
-                            if reason == 'style': style_splits += 1
-                            if reason == 'indent': indent_splits += 1
-                            if split:
-                                break
-                            item_desc_lines.append(line)
-                    
-                    # Mark these lines as assigned
-                    for l in item_desc_lines:
-                        assigned_lines.add(id(l))
-                    
+                        item_all_lines.append(line)
+                        assigned_lines.add(id(line))
+
+                    # Build sub-blocks using _should_split_block
+                    sub_blocks = _merge_short_continuation(item_all_lines)
+
                     # Find Qty, Unit, Rate, Total for this item
                     qty_val = find_value_at_y(qty_lines, item_y, 20)
                     unit_val = find_value_at_y(unit_lines, item_y, 20)
                     rate_val = find_value_at_y(rate_lines, item_y, 20)
                     total_val = find_value_at_y(total_lines, item_y, 20)
-                    
+
                     all_blocks.append({
                         'type': 'item',
                         'item_no': item_val['text'],
-                        'lines': item_desc_lines,
+                        'sub_blocks': sub_blocks,
+                        'lines': item_all_lines,
                         'y_start': item_y,
                         'y_end': y_end,
                         'qty': qty_val,
@@ -798,15 +1219,14 @@ def _parse_bq_rows(
                         'item_x0': item_val.get('x0', 0),
                         'item_x1': item_val.get('x1', 0),
                     })
-                
-                # Check for any unassigned lines and add them as trailing notes
-                unassigned_lines = [l for l in desc_lines if id(l) not in assigned_lines]
-                if unassigned_lines:
-                    # Sort by Y and group as notes, splitting on style/indent changes
-                    unassigned_sorted = sorted(unassigned_lines, key=lambda l: l['y_center'])
-                    current_block = {'type': 'notes', 'lines': [unassigned_sorted[0]], 'y_start': unassigned_sorted[0]['y_top'], 'y_end': unassigned_sorted[0]['y_bottom']}
-                    for i in range(1, len(unassigned_sorted)):
-                        curr = unassigned_sorted[i]
+
+                # Unassigned lines → trailing notes
+                unassigned = [l for l in desc_lines if id(l) not in assigned_lines]
+                if unassigned:
+                    unassigned.sort(key=lambda l: l['y_center'])
+                    current_block = {'type': 'notes', 'lines': [unassigned[0]], 'y_start': unassigned[0]['y_top'], 'y_end': unassigned[0]['y_bottom']}
+                    for i in range(1, len(unassigned)):
+                        curr = unassigned[i]
                         prev = current_block['lines'][-1]
                         split, reason = _should_split_block(prev, curr, para_threshold)
                         if reason == 'style': style_splits += 1
@@ -818,100 +1238,89 @@ def _parse_bq_rows(
                             current_block['lines'].append(curr)
                             current_block['y_end'] = curr['y_bottom']
                     all_blocks.append(current_block)
-                
+
                 # Sort all blocks by y_start
                 all_blocks.sort(key=lambda b: b['y_start'])
-                
+
                 parse_debug["blocks_count"] = len(all_blocks)
                 parse_debug["style_splits"] = style_splits
                 parse_debug["indent_splits"] = indent_splits
-                
-                # Create output rows
+
+                # ── Create output rows with hierarchy ──
                 for block in all_blocks:
                     if block['type'] == 'notes':
-                        # Sort lines by Y position to ensure correct top-to-bottom order
-                        sorted_lines = sorted(block['lines'], key=lambda l: l['y_center'])
-                        desc_text = ' ; '.join(l['text'] for l in sorted_lines)
-                        # Calculate bounding box using actual line boundaries
-                        if block['lines']:
-                            bbox_x0 = min(l['x0'] for l in block['lines'])
-                            bbox_x1 = max(l['x1'] for l in block['lines'])
-                            bbox_y0 = min(l['y_top'] for l in block['lines'])
-                            bbox_y1 = max(l['y_bottom'] for l in block['lines'])
-                        else:
-                            bbox_x0 = bbox_x1 = bbox_y0 = bbox_y1 = 0
-                        
-                        rows.append(BQRowResponse(
-                            id=row_id,
-                            file_id=file_id,
-                            page_number=page_num,
-                            page_label=page_label,
-                            revision=revision,
-                            bill_name=bill_name,
-                            collection=collection,
-                            type="notes",
-                            item_no="",
-                            description=desc_text,
-                            quantity=None,
-                            unit="",
-                            rate=None,
-                            total=None,
-                            bbox_x0=bbox_x0,
-                            bbox_y0=bbox_y0,
-                            bbox_x1=bbox_x1,
-                            bbox_y1=bbox_y1,
-                            page_width=page_width,
-                            page_height=page_height
-                        ))
-                        row_id += 1
+                        # Classify each line in the notes block
+                        for line in sorted(block['lines'], key=lambda l: l['y_center']):
+                            ltype = _classify_line_type(line, median_size)
+                            if ltype not in ('heading1', 'heading2'):
+                                ltype = 'notes'
+                            rows.append(_make_row(
+                                row_type=ltype,
+                                desc=line['text'],
+                                lines_for_bbox=[line],
+                            ))
                     else:
-                        # Item block
-                        # Sort lines by Y position to ensure correct top-to-bottom order
-                        sorted_lines = sorted(block['lines'], key=lambda l: l['y_center'])
-                        desc_text = ' ; '.join(l['text'] for l in sorted_lines)
+                        # Item block with sub-blocks
                         qty = parse_number(block['qty']['text']) if block['qty'] else None
                         unit = block['unit']['text'] if block['unit'] else ""
                         rate = parse_number(block['rate']['text']) if block['rate'] else None
                         total = parse_number(block['total']['text']) if block['total'] else None
-                        
-                        # Calculate bounding box (include Item column for full row coverage)
-                        if block['lines']:
-                            # Use Item column's x0 as left boundary for full row coverage
-                            item_x0 = block.get('item_x0', 0)
-                            lines_x0 = min(l['x0'] for l in block['lines'])
-                            bbox_x0 = min(item_x0, lines_x0) if item_x0 > 0 else lines_x0
-                            bbox_x1 = max(l['x1'] for l in block['lines'])
-                            bbox_y0 = min(l['y_top'] for l in block['lines'])
-                            bbox_y1 = max(l['y_bottom'] for l in block['lines'])
+
+                        sub_blocks = block.get('sub_blocks', [])
+                        has_sub_items = len(sub_blocks) > 1
+
+                        if not has_sub_items:
+                            # Single block → emit one "item" row (same as before)
+                            sorted_lines = sorted(block['lines'], key=lambda l: l['y_center'])
+                            desc_text = ' ; '.join(l['text'] for l in sorted_lines)
+                            rows.append(_make_row(
+                                row_type='item',
+                                desc=desc_text,
+                                item_no=block['item_no'],
+                                qty=qty, unit=unit, rate=rate, total=total,
+                                lines_for_bbox=block['lines'] or None,
+                                item_x0=block.get('item_x0', 0),
+                                item_x1=block.get('item_x1', 0),
+                                fallback_y_start=block['y_start'],
+                                fallback_y_end=block['y_end'],
+                            ))
                         else:
-                            bbox_x0 = block.get('item_x0', 0)
-                            bbox_x1 = block.get('item_x1', 0)
-                            bbox_y0 = block['y_start']
-                            bbox_y1 = block['y_end']
-                        
-                        rows.append(BQRowResponse(
-                            id=row_id,
-                            file_id=file_id,
-                            page_number=page_num,
-                            page_label=page_label,
-                            revision=revision,
-                            bill_name=bill_name,
-                            collection=collection,
-                            type="item",
-                            item_no=block['item_no'],
-                            description=desc_text,
-                            quantity=qty,
-                            unit=unit,
-                            rate=rate,
-                            total=total,
-                            bbox_x0=bbox_x0,
-                            bbox_y0=bbox_y0,
-                            bbox_x1=bbox_x1,
-                            bbox_y1=bbox_y1,
-                            page_width=page_width,
-                            page_height=page_height
-                        ))
-                        row_id += 1
+                            # Multiple sub-blocks → parent item + sub-items
+                            # First sub-block is the main description
+                            first_sub = sub_blocks[0]
+                            main_desc = ' ; '.join(l['text'] for l in first_sub)
+
+                            parent_row = _make_row(
+                                row_type='item',
+                                desc=main_desc,
+                                item_no=block['item_no'],
+                                qty=qty, unit=unit, rate=rate, total=total,
+                                lines_for_bbox=block['lines'] or None,
+                                item_x0=block.get('item_x0', 0),
+                                item_x1=block.get('item_x1', 0),
+                                fallback_y_start=block['y_start'],
+                                fallback_y_end=block['y_end'],
+                            )
+                            parent_row_id = parent_row.id
+                            rows.append(parent_row)
+
+                            # Remaining sub-blocks → sub-items
+                            for sb in sub_blocks[1:]:
+                                sb_desc = ' ; '.join(l['text'] for l in sb)
+                                # Check if this sub-block is actually a heading
+                                if len(sb) == 1:
+                                    sb_type = _classify_line_type(sb[0], median_size)
+                                else:
+                                    sb_type = 'sub-item'
+                                if sb_type not in ('heading1', 'heading2'):
+                                    sb_type = 'sub-item'
+                                rows.append(_make_row(
+                                    row_type=sb_type,
+                                    desc=sb_desc,
+                                    item_no=block['item_no'],
+                                    parent_id_val=parent_row_id,
+                                    lines_for_bbox=sb,
+                                ))
     
     except ImportError as e:
         parse_debug["error"] = f"ImportError: {str(e)}"
@@ -932,6 +1341,7 @@ def _parse_bq_rows(
                 revision=revision,
                 bill_name=bill_name,
                 collection=collection,
+                page_is_collection=is_coll,
                 type="notes",
                 item_no="",
                 description=line,
@@ -957,6 +1367,8 @@ def _parse_bq_rows(
 @router.get("/engines", response_model=list[BQEngineInfo])
 async def list_bq_engines():
     """List available BQ OCR engines."""
+    from utils.pdf_processing import is_ocr_available
+
     engines = [
         BQEngineInfo(
             id="pdfplumber",
@@ -978,6 +1390,13 @@ async def list_bq_engines():
             quota_cost=3,
             available=False,  # Requires cv2
             description="Detects tables using whitespace (for borderless tables)"
+        ),
+        BQEngineInfo(
+            id="page_ocr",
+            name="Page OCR (PyMuPDF)",
+            quota_cost=1,
+            available=is_ocr_available(),
+            description="OCR the entire page and clip results; useful when no vector text exists."
         ),
     ]
     return engines
@@ -1079,4 +1498,99 @@ async def extract_bq(
         pages_processed=pages_processed,
         quota_cost=quota_cost,
         debug_info=debug_info
+    )
+
+
+# ─── Collection Integration ───────────────────────────────────────────────────
+
+class PageTotalEntry(BaseModel):
+    """Page total data for collection integration."""
+    page_key: str           # e.g. "file123-5"
+    page_label: str         # e.g. "MODBQ.15/1"
+    page_number: int
+    file_id: str
+    page_total: float
+    item_count: int
+    is_collection: bool = False
+
+
+class CollectionIntegrateRequest(BaseModel):
+    """Request to integrate page totals into collection pages."""
+    page_totals: list[PageTotalEntry]
+
+
+class CollectionRow(BaseModel):
+    """A row in the integrated collection output."""
+    page_key: str
+    row_id: int
+    entry_type: str         # 'page_ref', 'carry_forward', 'brought_forward', 'grand_total', 'heading', 'notes'
+    description: str
+    page_ref: str = ""      # Referenced page label (e.g. "MODBQ.15/1")
+    matched_page_key: str = ""  # Key of the matched page
+    total: Optional[float] = None
+    original_total: Optional[float] = None  # OCR-extracted total (for validation)
+    mismatch_warning: str = ""
+
+
+class CollectionIntegrateResponse(BaseModel):
+    """Response with integrated collection data."""
+    success: bool
+    collection_rows: list[CollectionRow] = []
+    grand_total: float = 0.0
+    non_collection_total: float = 0.0
+    warnings: list[str] = []
+
+
+@router.post("/integrate-collection", response_model=CollectionIntegrateResponse)
+async def integrate_collection(
+    request: CollectionIntegrateRequest,
+    user: dict = Depends(require_auth),
+):
+    """Integrate page totals into collection pages.
+
+    Takes page totals from all pages, computes the grand total from
+    non-collection pages only, and returns mapping info for collection
+    page rows to reference the correct page totals.
+    """
+    _check_bq_permission(user)
+
+    warnings: list[str] = []
+    collection_rows: list[CollectionRow] = []
+
+    # Build lookup: page_label -> PageTotalEntry
+    label_lookup: dict[str, PageTotalEntry] = {}
+    for pt in request.page_totals:
+        if pt.page_label:
+            label_lookup[pt.page_label] = pt
+
+    # Calculate non-collection total
+    non_collection_total = sum(
+        pt.page_total for pt in request.page_totals if not pt.is_collection
+    )
+
+    # For collection pages, try to match entries to page totals
+    # This is returned so the frontend can reconstruct the collection table
+    row_id = 1
+    for pt in request.page_totals:
+        if not pt.is_collection:
+            continue
+
+        # This collection page will have its rows handled by the frontend
+        # We just provide the mapping data
+        collection_rows.append(CollectionRow(
+            page_key=pt.page_key,
+            row_id=row_id,
+            entry_type="collection_page",
+            description=f"Collection Page: {pt.page_label}",
+            page_ref=pt.page_label,
+            total=pt.page_total,
+        ))
+        row_id += 1
+
+    return CollectionIntegrateResponse(
+        success=True,
+        collection_rows=collection_rows,
+        grand_total=non_collection_total,
+        non_collection_total=non_collection_total,
+        warnings=warnings,
     )

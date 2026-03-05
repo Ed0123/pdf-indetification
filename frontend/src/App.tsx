@@ -34,7 +34,6 @@ import {
   extractText,
   getOcrStatus,
   installTokenProvider,
-  setAuthToken,
   getMyProfile,
   updateMyProfile,
   listAllUsers,
@@ -1320,6 +1319,69 @@ export default function App() {
     });
   }, []);
 
+  // Batch recalculate totals (for the recalculate button)
+  const handleBQBatchRecalculate = useCallback((updates: Array<{ pageKey: string; rowId: number; total: number }>) => {
+    setBqPageData((prev) => {
+      const next = { ...prev };
+      for (const { pageKey, rowId, total } of updates) {
+        const pageData = next[pageKey];
+        if (!pageData) continue;
+        next[pageKey] = {
+          ...pageData,
+          rows: pageData.rows.map((row) =>
+            row.id === rowId
+              ? { ...row, total, user_edited: { ...(row.user_edited || {}), total: true } }
+              : row
+          ),
+        };
+      }
+      return next;
+    });
+  }, []);
+
+  // Insert a new BQ row after a given row
+  const handleBQRowInsert = useCallback((pageKey: string, afterRowId: number) => {
+    setBqPageData((prev) => {
+      const pageData = prev[pageKey];
+      if (!pageData) return prev;
+      const idx = pageData.rows.findIndex((r) => r.id === afterRowId);
+      if (idx === -1) return prev;
+      const refRow = pageData.rows[idx];
+      const maxId = pageData.rows.reduce((m, r) => Math.max(m, r.id), 0);
+      const newRow: BQRow = {
+        id: maxId + 1,
+        file_id: refRow.file_id,
+        page_number: refRow.page_number,
+        page_label: refRow.page_label,
+        revision: refRow.revision,
+        bill_name: refRow.bill_name,
+        collection: refRow.collection,
+        page_is_collection: refRow.page_is_collection,
+        type: "notes",
+        item_no: "",
+        description: "",
+        quantity: null,
+        unit: "",
+        rate: null,
+        total: null,
+        parent_id: null,
+        bbox_x0: refRow.bbox_x0,
+        bbox_y0: refRow.bbox_y0,
+        bbox_x1: refRow.bbox_x1,
+        bbox_y1: refRow.bbox_y1,
+        page_width: refRow.page_width,
+        page_height: refRow.page_height,
+        user_edited: {},
+      };
+      const newRows = [...pageData.rows];
+      newRows.splice(idx + 1, 0, newRow);
+      return {
+        ...prev,
+        [pageKey]: { ...pageData, rows: newRows },
+      };
+    });
+  }, []);
+
   // Navigate to PDF page and highlight BQ row
   const handleNavigateToRow = useCallback((
     fileId: string, 
@@ -1474,21 +1536,43 @@ export default function App() {
         <div style={{ display: "flex", alignItems: "center", gap: 8, padding: "0 12px", flexShrink: 0 }}>
           {/* Show/Hide BQ text overlays toggle (only for BQ modules) */}
           {(activeModule === "bq_ocr" || activeModule === "bq_export") && (
-            <button
-              onClick={() => setShowAnnotations((prev) => !prev)}
-              style={{
-                background: showAnnotations ? "#27ae60" : "none",
-                border: "1px solid #ccc",
-                borderRadius: 4,
-                padding: "3px 10px",
-                cursor: "pointer",
-                fontSize: 12,
-                color: showAnnotations ? "#fff" : "#333",
-              }}
-              title="Toggle visibility of BQ rate/qty/total text overlays on PDF"
-            >
-              {showAnnotations ? "👁 顯示標價" : "👁‍🗨 隱藏標價"}
-            </button>
+            <>
+              <button
+                onClick={() => setShowAnnotations((prev) => !prev)}
+                style={{
+                  background: showAnnotations ? "#27ae60" : "none",
+                  border: "1px solid #ccc",
+                  borderRadius: 4,
+                  padding: "3px 10px",
+                  cursor: "pointer",
+                  fontSize: 12,
+                  color: showAnnotations ? "#fff" : "#333",
+                }}
+                title="Toggle visibility of BQ rate/qty/total text overlays on PDF"
+              >
+                {showAnnotations ? "👁 顯示標價" : "👁‍🗨 隱藏標價"}
+              </button>
+              {activeModule === "bq_export" && Object.keys(bqPageData).length > 0 && (
+                <button
+                  onClick={() => {
+                    // Trigger recalculate via a custom event that BQExportPanel listens to
+                    window.dispatchEvent(new CustomEvent("bq-recalculate"));
+                  }}
+                  style={{
+                    background: "none",
+                    border: "1px solid #f39c12",
+                    borderRadius: 4,
+                    padding: "3px 10px",
+                    cursor: "pointer",
+                    fontSize: 12,
+                    color: "#f39c12",
+                  }}
+                  title="重新計算所有 rate×qty→total、page totals、collection totals"
+                >
+                  🔄 重新計算
+                </button>
+              )}
+            </>
           )}
           {profile?.photo_url && (
             <img src={profile.photo_url} alt="" style={{ width: 24, height: 24, borderRadius: 12 }} />
@@ -1735,7 +1819,9 @@ export default function App() {
               bqPageData={bqPageData}
               onRowEdit={handleBQRowEdit}
               onDeleteRow={handleBQRowDelete}
+              onInsertRow={handleBQRowInsert}
               onNavigateToRow={handleNavigateToRow}
+              onBatchRecalculate={handleBQBatchRecalculate}
               canExport={profile?.tier_features?.bq_export !== false}
             />
           )}

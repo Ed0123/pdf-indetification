@@ -11,21 +11,44 @@
  * - Inline editing with auto-calculate total from rate × qty
  * - Export to Excel, JSON, PDF
  */
-import React, { useState, useMemo, useCallback, useRef } from "react";
-import type { BQRow, BQPageData } from "../types";
+import React, { useState, useMemo, useCallback, useRef, useEffect } from "react";
+import type { BQRow, BQPageData, BQItemType } from "../types";
 import { exportAnnotatedPdf, type TextAnnotation } from "../api/client";
+
+/** Available BQ row types that a user can pick from. */
+const ROW_TYPE_OPTIONS: { value: BQItemType; label: string }[] = [
+  { value: "item",  label: "Item" },
+  { value: "sub-item", label: "Sub-Item" },
+  { value: "notes", label: "Note" },
+  { value: "heading1", label: "H1" },
+  { value: "heading2", label: "H2" },
+  { value: "collection_entry", label: "Collection Entry" },
+  { value: "collection_cf", label: "Carry/Brought Fwd" },
+  { value: "collection_total", label: "Collection Total" },
+];
 
 interface BQExportPanelProps {
   bqPageData: Record<string, BQPageData>;
   onRowEdit: (pageKey: string, rowId: number, field: keyof BQRow, value: any) => void;
   onDeleteRow: (pageKey: string, rowId: number) => void;
+  onInsertRow: (pageKey: string, afterRowId: number) => void;
   onNavigateToRow?: (
     fileId: string,
     pageNum: number,
     bbox: { x0: number; y0: number; x1: number; y1: number } | null,
     pageSize?: { width: number; height: number } | null
   ) => void;
-  /** Whether the user can actually export files (JSON/CSV/Excel/PDF). When false the export button is hidden. */
+  /**
+   * Callback to batch-update multiple rows' totals (for recalculate).
+   * If not provided, recalculate will use onRowEdit in a loop.
+   */
+  onBatchRecalculate?: (updates: Array<{ pageKey: string; rowId: number; total: number }>) => void;
+  /**
+   * When true the user is permitted to download/export in all formats.
+   * When false we still show the panel and allow the JSON export, but the
+   * other buttons (Excel/CSV/PDF/etc.) will be disabled and a warning shown
+   * so the user understands their tier doesn't include full export access.
+   */
   canExport?: boolean;
 }
 
@@ -33,9 +56,15 @@ export function BQExportPanel({
   bqPageData,
   onRowEdit,
   onDeleteRow,
+  onInsertRow,
   onNavigateToRow,
+  onBatchRecalculate,
   canExport = true,
 }: BQExportPanelProps) {
+  // `canExport` really means "can export formats beyond JSON"; when false we
+  // still show the panel and let JSON work, but every other export button will
+  // be disabled and the user will see a warning message.
+  const limitedExport = !canExport;
   const [filterType, setFilterType] = useState<string>("all");
   const [exporting, setExporting] = useState(false);
   const [exportError, setExportError] = useState<string | null>(null);
@@ -55,20 +84,33 @@ export function BQExportPanel({
   const [exportFilterRev, setExportFilterRev] = useState<string>("all");
   const [exportFilterType, setExportFilterType] = useState<string>("all");
 
-  // Flatten all rows from all pages
+  // Flatten all rows from all pages, always kept in page order
   const allRows = useMemo(() => {
     const rows: Array<{ pageKey: string; row: BQRow }> = [];
-    for (const [pageKey, pageData] of Object.entries(bqPageData)) {
+    for (const pageData of Object.values(bqPageData)) {
       for (const row of pageData.rows) {
+        const pageKey = `${pageData.file_id}-${pageData.page_number}`;
         rows.push({ pageKey, row });
       }
     }
+    // sort by file_id then page number then row id to ensure stable page order
+    rows.sort((a, b) => {
+      if (a.row.file_id !== b.row.file_id) return a.row.file_id.localeCompare(b.row.file_id);
+      if (a.row.page_number !== b.row.page_number) return a.row.page_number - b.row.page_number;
+      return a.row.id - b.row.id;
+    });
     return rows;
   }, [bqPageData]);
 
   // Apply filter
   const filteredRows = useMemo(() => {
     if (filterType === "all") return allRows;
+    if (filterType === "collection") {
+      return allRows.filter(({ row }) => row.page_is_collection);
+    }
+    if (filterType === "collection_entry") {
+      return allRows.filter(({ row }) => row.type === "collection_entry" || row.type === "collection_cf" || row.type === "collection_total");
+    }
     return allRows.filter(({ row }) => row.type === filterType);
   }, [allRows, filterType]);
 
@@ -77,21 +119,25 @@ export function BQExportPanel({
     const heading1Count = allRows.filter(r => r.row.type === "heading1").length;
     const heading2Count = allRows.filter(r => r.row.type === "heading2").length;
     const itemCount = allRows.filter(r => r.row.type === "item").length;
+    const subItemCount = allRows.filter(r => r.row.type === "sub-item").length;
     const notesCount = allRows.filter(r => r.row.type === "notes").length;
+    const collectionEntryCount = allRows.filter(r => r.row.type === "collection_entry" || r.row.type === "collection_cf" || r.row.type === "collection_total").length;
     const pagesWithData = new Set(allRows.map(r => r.pageKey)).size;
-    return { heading1Count, heading2Count, itemCount, notesCount, total: allRows.length, pagesWithData };
+    const collectionPages = new Set(allRows.filter(r => r.row.page_is_collection).map(r => r.pageKey)).size;
+    return { heading1Count, heading2Count, itemCount, subItemCount, notesCount, collectionEntryCount, total: allRows.length, pagesWithData, collectionPages };
   }, [allRows]);
 
   // Calculate page totals
   const pageTotals = useMemo(() => {
     const totals: Record<string, {
       pageKey: string; pageLabel: string; pageNumber: number; fileId: string;
-      total: number; itemCount: number;
+      total: number; itemCount: number; isCollection: boolean;
       collectionBox?: { x0: number; y0: number; x1: number; y1: number };
       pageWidth?: number; pageHeight?: number;
     }> = {};
     for (const [pageKey, pageData] of Object.entries(bqPageData)) {
       let pageTotal = 0, itemCount = 0, pageLabel = "";
+      const isCollection = pageData.page_is_collection || pageData.rows.some(r => r.page_is_collection);
       for (const row of pageData.rows) {
         if (row.type === "item" && row.total !== null) { pageTotal += row.total; itemCount++; }
         if (!pageLabel && row.page_label) pageLabel = row.page_label;
@@ -100,7 +146,7 @@ export function BQExportPanel({
       const firstRow = pageData.rows[0];
       totals[pageKey] = {
         pageKey, pageLabel, pageNumber: pageData.page_number, fileId: pageData.file_id,
-        total: pageTotal, itemCount,
+        total: pageTotal, itemCount, isCollection,
         collectionBox: collectionBox ? {
           x0: collectionBox.x * (firstRow?.page_width ?? 1),
           y0: collectionBox.y * (firstRow?.page_height ?? 1),
@@ -113,7 +159,98 @@ export function BQExportPanel({
     return totals;
   }, [bqPageData]);
 
-  const grandTotal = useMemo(() => Object.values(pageTotals).reduce((sum, pt) => sum + pt.total, 0), [pageTotals]);
+  // Grand total excludes collection pages to avoid double-counting
+  const grandTotal = useMemo(() => Object.values(pageTotals).filter(pt => !pt.isCollection).reduce((sum, pt) => sum + pt.total, 0), [pageTotals]);
+
+  // Build page label lookup for collection page reference mapping
+  const pageLabelLookup = useMemo(() => {
+    const lookup: Record<string, { pageKey: string; total: number }> = {};
+    for (const pt of Object.values(pageTotals)) {
+      if (pt.pageLabel) {
+        lookup[pt.pageLabel] = { pageKey: pt.pageKey, total: pt.total };
+      }
+    }
+    return lookup;
+  }, [pageTotals]);
+
+  // Available page labels for collection entry dropdown
+  const availablePageLabels = useMemo(() => {
+    return Object.values(pageTotals)
+      .filter(pt => !pt.isCollection && pt.pageLabel)
+      .map(pt => pt.pageLabel)
+      .sort();
+  }, [pageTotals]);
+
+  // ──────────────────────────────────────────────────────────────────────────
+  // Recalculate: rate × qty → total for all items, then page totals,
+  // then collection page totals
+  // ──────────────────────────────────────────────────────────────────────────
+  const handleRecalculate = useCallback(() => {
+    const updates: Array<{ pageKey: string; rowId: number; total: number }> = [];
+
+    // Step 1: Recalculate rate × qty → total for all items
+    for (const { pageKey, row } of allRows) {
+      if (row.type === "item" && row.quantity != null && row.rate != null) {
+        const newTotal = row.quantity * row.rate;
+        if (row.total !== newTotal) {
+          updates.push({ pageKey, rowId: row.id, total: newTotal });
+        }
+      }
+    }
+
+    // Step 2: For collection_entry rows, map referenced page total
+    for (const { pageKey, row } of allRows) {
+      if (row.type === "collection_entry" && row.item_no) {
+        const refData = pageLabelLookup[row.item_no];
+        if (refData) {
+          // Use the page total of the referenced page
+          // (recalculated page total, not the OCR one)
+          let recalcPageTotal = 0;
+          const refPageData = bqPageData[refData.pageKey];
+          if (refPageData) {
+            for (const r of refPageData.rows) {
+              if (r.type === "item" && r.total != null) {
+                // Check if this row has a pending update
+                const upd = updates.find(u => u.pageKey === refData.pageKey && u.rowId === r.id);
+                recalcPageTotal += upd ? upd.total : r.total;
+              }
+            }
+          }
+          if (row.total !== recalcPageTotal) {
+            updates.push({ pageKey, rowId: row.id, total: recalcPageTotal });
+          }
+        }
+      }
+    }
+
+    // Apply updates
+    if (onBatchRecalculate) {
+      onBatchRecalculate(updates);
+    } else {
+      for (const { pageKey, rowId, total } of updates) {
+        onRowEdit(pageKey, rowId, "total", total);
+        onRowEdit(pageKey, rowId, "user_edited" as keyof BQRow, { total: true });
+      }
+    }
+  }, [allRows, pageLabelLookup, bqPageData, onBatchRecalculate, onRowEdit]);
+
+  // Listen for external recalculate trigger (from toolbar button)
+  useEffect(() => {
+    const handler = () => handleRecalculate();
+    window.addEventListener("bq-recalculate", handler);
+    return () => window.removeEventListener("bq-recalculate", handler);
+  }, [handleRecalculate]);
+
+  // Handle collection entry page ref change (dropdown)
+  const handleCollectionRefChange = useCallback((pageKey: string, rowId: number, newRef: string) => {
+    onRowEdit(pageKey, rowId, "item_no", newRef);
+    // Auto-fill total from referenced page
+    const refData = pageLabelLookup[newRef];
+    if (refData) {
+      onRowEdit(pageKey, rowId, "total", refData.total);
+      onRowEdit(pageKey, rowId, "user_edited" as keyof BQRow, { total: true });
+    }
+  }, [onRowEdit, pageLabelLookup]);
 
   const uniquePages = useMemo(() => {
     const pages = new Set<string>();
@@ -392,6 +529,15 @@ export function BQExportPanel({
           }
         }
         break;
+      case "Insert":
+        e.preventDefault();
+        {
+          const { pageKey: pk, row: rw } = filteredRows[focusedCell.rowIdx];
+          onInsertRow(pk, rw.id);
+          // Move focus to the newly inserted row (next row, description col)
+          setTimeout(() => focusCell(focusedCell.rowIdx + 1, 1), 50);
+        }
+        break;
       default:
         // Start editing on any printable character
         if (e.key.length === 1 && !e.ctrlKey && !e.metaKey && !e.altKey) {
@@ -404,7 +550,7 @@ export function BQExportPanel({
         break;
     }
   }, [focusedCell, editingCell, filteredRows, selectionStart, selectionRect,
-      handleCancelEdit, saveAndMove, focusCell, handleStartEdit, onRowEdit]);
+      handleCancelEdit, saveAndMove, focusCell, handleStartEdit, onRowEdit, onInsertRow]);
 
   const handleCellClick = useCallback((rowIdx: number, colIdx: number, e: React.MouseEvent) => {
     if (e.shiftKey && focusedCell) {
@@ -423,11 +569,17 @@ export function BQExportPanel({
   // ──────────────────────────────────────────────────────────────────────────
 
   const getFilteredExportRows = () => {
-    return allRows.filter(({ row }) => {
+    const filtered = allRows.filter(({ row }) => {
       if (exportFilterPage !== "all" && row.page_label !== exportFilterPage) return false;
       if (exportFilterRev !== "all" && row.revision !== exportFilterRev) return false;
       if (exportFilterType !== "all" && row.type !== exportFilterType) return false;
       return true;
+    });
+    // always export in page order (and by file if multiple PDFs)
+    return filtered.sort((a, b) => {
+      if (a.row.file_id !== b.row.file_id) return a.row.file_id.localeCompare(b.row.file_id);
+      if (a.row.page_number !== b.row.page_number) return a.row.page_number - b.row.page_number;
+      return a.row.id - b.row.id;
     });
   };
 
@@ -435,16 +587,18 @@ export function BQExportPanel({
     return getFilteredExportRows().map(({ row }, idx) => {
       const { bill, page } = parseBillPage(row.page_label || "");
       const ref = buildRef(row);
-      const isItem = row.type === "item";
+      const hasQty = row.type === "item" || row.type === "sub-item";
+      const typeLabel = row.type === "item" ? "Item" : row.type === "sub-item" ? "Sub-Item" : row.type === "notes" ? "Notes" : row.type;
       return {
         id: idx + 1, project_id: pid,
-        Type: row.type === "item" ? "Item" : row.type === "notes" ? "Notes" : row.type,
+        Type: typeLabel,
+        parent_id: row.parent_id ?? null,
         bill, page, item: row.item_no, revision: row.revision, ref,
         data_detail: row.description,
         data_X1: row.bbox_x0?.toString() ?? "", data_X2: row.bbox_x1?.toString() ?? "",
         data_Y1: row.bbox_y0?.toString() ?? "", data_Y2: row.bbox_y1?.toString() ?? "",
         page_width: row.page_width?.toString() ?? "", page_height: row.page_height?.toString() ?? "",
-        ...(isItem ? {
+        ...(hasQty ? {
           qty: row.quantity?.toString() ?? "", unit: row.unit,
           rate: row.rate?.toString() ?? "",
           total: (row.quantity && row.rate) ? (row.quantity * row.rate).toString() : (row.total?.toString() ?? ""),
@@ -491,7 +645,7 @@ export function BQExportPanel({
       const totalBox = pageData.boxes["Total"];
       const collectionBox = pageData.boxes["Collection"];
       for (const row of pageData.rows) {
-        if (row.type !== "item" || !row.user_edited) continue;
+        if ((row.type !== "item" && row.type !== "sub-item") || !row.user_edited) continue;
         const pw = row.page_width ?? 1;
         if (row.user_edited.quantity && row.quantity !== null && qtyBox) {
           const annId = `auto-qty-${row.id}`;
@@ -594,7 +748,7 @@ export function BQExportPanel({
       const annotations: TextAnnotation[] = [];
       if (includeAnnotations) {
         for (const { row, pageKey } of filteredForExport) {
-          if (row.type === "item" && row.user_edited) {
+          if ((row.type === "item" || row.type === "sub-item") && row.user_edited) {
             const pageData = bqPageData[pageKey]; if (!pageData) continue;
             const sp = pageData.annotation_positions || {};
             const pw = row.page_width ?? 1;
@@ -660,11 +814,24 @@ export function BQExportPanel({
           <select style={filterSelect} value={filterType} onChange={(e) => setFilterType(e.target.value)}>
             <option value="all">All Types ({stats.total})</option>
             <option value="item">Items ({stats.itemCount})</option>
+            <option value="sub-item">Sub-items ({stats.subItemCount})</option>
             <option value="notes">Notes ({stats.notesCount})</option>
             <option value="heading1">Heading 1 ({stats.heading1Count})</option>
             <option value="heading2">Heading 2 ({stats.heading2Count})</option>
+            <option value="collection">Collection pages ({stats.collectionPages})</option>
+            {stats.collectionEntryCount > 0 && <option value="collection_entry">Collection entries ({stats.collectionEntryCount})</option>}
           </select>
-          <button style={exportBtn} onClick={() => setShowExportModal(true)} disabled={!canExport || exporting || allRows.length === 0} title={canExport ? "Export data" : "你的會員類別不允許匯出 BQ 資料"}>📥 Export</button>
+          <button
+            style={exportBtn}
+            onClick={() => setShowExportModal(true)}
+            disabled={exporting || allRows.length === 0}
+            title="Export data"
+          >
+            📥 Export
+          </button>
+          {limitedExport && (
+            <span style={{ marginLeft: 8, fontSize: 10, color: "#e74c3c" }}>JSON only</span>
+          )}
         </div>
       </div>
 
@@ -673,10 +840,34 @@ export function BQExportPanel({
         <span style={statItem}>📄 {stats.pagesWithData} pages</span>
         <span style={statItem}>📋 {stats.total} rows</span>
         <span style={statItem}>🟢 {stats.itemCount} items</span>
+        {stats.subItemCount > 0 && <span style={statItem}>🟣 {stats.subItemCount} sub-items</span>}
         <span style={statItem}>📝 {stats.notesCount} notes</span>
         <span style={statItem}>🔵 {stats.heading1Count} H1</span>
         <span style={statItem}>🟡 {stats.heading2Count} H2</span>
-        {grandTotal > 0 && <span style={{ ...statItem, fontWeight: 700, color: "#27ae60" }}>💰 Total: ${grandTotal.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</span>}
+        <span style={statItem}>📦 {stats.collectionPages} coll.pages</span>
+        {grandTotal > 0 && (
+          <span style={{ ...statItem, fontWeight: 700, color: "#27ae60" }} title="Excludes collection pages to avoid double-counting">
+            💰 Total: ${grandTotal.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+            {stats.collectionPages > 0 && <span style={{ fontSize: 9, fontWeight: 400, color: "#888", marginLeft: 4 }}>(excl. collection)</span>}
+          </span>
+        )}
+        <button
+          onClick={handleRecalculate}
+          style={{
+            marginLeft: "auto",
+            background: "#3498db",
+            color: "#fff",
+            border: "none",
+            borderRadius: 4,
+            padding: "3px 10px",
+            cursor: "pointer",
+            fontSize: 11,
+            fontWeight: 600,
+          }}
+          title="Recalculate: rate × qty → total for all items, then update page totals and collection page totals"
+        >
+          🔄 重新計算
+        </button>
       </div>
 
       {/* Keyboard hints */}
@@ -688,6 +879,7 @@ export function BQExportPanel({
         <span>Ctrl+C 複製</span>
         <span>Ctrl+V 貼上</span>
         <span>Del 清除</span>
+        <span>Insert 插入列</span>
       </div>
 
       {/* Export Modal */}
@@ -699,6 +891,11 @@ export function BQExportPanel({
               <label style={{ fontSize: 12, color: "#666", display: "block", marginBottom: 4 }}>Project ID (optional)</label>
               <input type="text" value={projectId} onChange={(e) => setProjectId(e.target.value)} placeholder={`BQ_${new Date().toISOString().slice(0, 10)}`} style={{ padding: "6px 10px", width: "100%", border: "1px solid #ddd", borderRadius: 4 }} />
             </div>
+            {limitedExport && (
+              <div style={{ marginBottom: 12, padding: 10, background: "#fff3cd", border: "1px solid #ffeeba", borderRadius: 4, color: "#856404", fontSize: 12 }}>
+                ⚠️ 您的會員等級目前只允許導出 JSON，其他格式已被禁用。
+              </div>
+            )}
             <div style={{ marginBottom: 16, padding: 12, background: "#f8f9fa", borderRadius: 4 }}>
               <label style={{ fontSize: 12, color: "#666", display: "block", marginBottom: 8, fontWeight: 600 }}>Filter Export Data</label>
               <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
@@ -711,7 +908,7 @@ export function BQExportPanel({
                   {uniqueRevisions.map(r => <option key={r} value={r}>{r}</option>)}
                 </select>
                 <select value={exportFilterType} onChange={(e) => setExportFilterType(e.target.value)} style={{ padding: "4px 8px", border: "1px solid #ddd", borderRadius: 4, fontSize: 12 }}>
-                  <option value="all">All Types</option><option value="item">Items</option><option value="notes">Notes</option><option value="heading1">Heading 1</option><option value="heading2">Heading 2</option>
+                  <option value="all">All Types</option><option value="item">Items</option><option value="sub-item">Sub-items</option><option value="notes">Notes</option><option value="heading1">Heading 1</option><option value="heading2">Heading 2</option>
                 </select>
               </div>
               <div style={{ fontSize: 11, color: "#888", marginTop: 6 }}>{getFilteredExportRows().length} of {allRows.length} rows will be exported</div>
@@ -719,10 +916,38 @@ export function BQExportPanel({
             <div style={{ display: "flex", gap: 8, justifyContent: "flex-end", flexWrap: "wrap" }}>
               <button style={{ ...modalBtn, background: "#95a5a6" }} onClick={() => setShowExportModal(false)}>Cancel</button>
               <button style={{ ...modalBtn, background: "#3498db" }} onClick={handleExportJSON}>📄 JSON</button>
-              <button style={{ ...modalBtn, background: "#2ecc71" }} onClick={handleExportExcel} disabled={exporting}>{exporting ? "⏳..." : "📊 Excel (CSV)"}</button>
-              <button style={{ ...modalBtn, background: "#16a085" }} onClick={handleExportPageTotals} disabled={exporting}>{exporting ? "⏳..." : "📋 Page Totals"}</button>
-              <button style={{ ...modalBtn, background: "#e74c3c" }} onClick={() => handleExportPDF(false)} disabled={exporting}>{exporting ? "⏳..." : "📄 PDF (原版)"}</button>
-              <button style={{ ...modalBtn, background: "#9b59b6" }} onClick={() => handleExportPDF(true)} disabled={exporting}>{exporting ? "⏳..." : "📝 PDF (含用戶輸入)"}</button>
+              <button
+                style={{ ...modalBtn, background: "#2ecc71" }}
+                onClick={handleExportExcel}
+                disabled={exporting || limitedExport}
+                title={limitedExport ? "只有 JSON 可用；升級以解鎖其他格式" : undefined}
+              >
+                {exporting ? "⏳..." : "📊 Excel (CSV)"}
+              </button>
+              <button
+                style={{ ...modalBtn, background: "#16a085" }}
+                onClick={handleExportPageTotals}
+                disabled={exporting || limitedExport}
+                title={limitedExport ? "只有 JSON 可用；升級以解鎖其他格式" : undefined}
+              >
+                {exporting ? "⏳..." : "📋 Page Totals"}
+              </button>
+              <button
+                style={{ ...modalBtn, background: "#e74c3c" }}
+                onClick={() => handleExportPDF(false)}
+                disabled={exporting || limitedExport}
+                title={limitedExport ? "只有 JSON 可用；升級以解鎖其他格式" : undefined}
+              >
+                {exporting ? "⏳..." : "📄 PDF (原版)"}
+              </button>
+              <button
+                style={{ ...modalBtn, background: "#9b59b6" }}
+                onClick={() => handleExportPDF(true)}
+                disabled={exporting || limitedExport}
+                title={limitedExport ? "只有 JSON 可用；升級以解鎖其他格式" : undefined}
+              >
+                {exporting ? "⏳..." : "📝 PDF (含用戶輸入)"}
+              </button>
             </div>
           </div>
         </div>
@@ -760,17 +985,49 @@ export function BQExportPanel({
           <tbody>
             {filteredRows.map(({ pageKey, row }, rowIdx) => {
               const isEditing = editingCell?.pageKey === pageKey && editingCell?.rowId === row.id;
-              const rowBg = row.type === "heading1" ? "#fef5f5" : row.type === "heading2" ? "#fef8e7" : row.type === "notes" ? "#f5f5f5" : "#fff";
+              const isCollectionRow = row.type === "collection_entry" || row.type === "collection_cf" || row.type === "collection_total";
+              const rowBg = row.type === "heading1" ? "#fef5f5" : row.type === "heading2" ? "#fef8e7" : row.type === "notes" ? "#f5f5f5" : row.type === "sub-item" ? "#f5f0ff" : isCollectionRow ? "#f0f5ff" : "#fff";
+
+              const getTypeColor = () => {
+                switch (row.type) {
+                  case "heading1": return "#e74c3c";
+                  case "heading2": return "#f39c12";
+                  case "notes": return "#95a5a6";
+                  case "sub-item": return "#9b59b6";
+                  case "collection_entry": return "#3498db";
+                  case "collection_cf": return "#8e44ad";
+                  case "collection_total": return "#2c3e50";
+                  default: return "#2ecc71";
+                }
+              };
 
               return (
-                <tr key={`${pageKey}-${row.id}`} style={{ background: rowBg, fontWeight: row.type === "heading1" ? 600 : row.type === "heading2" ? 500 : 400, fontStyle: row.type === "notes" ? "italic" : "normal" }}>
+                <tr key={`${pageKey}-${row.id}`} style={{ background: rowBg, fontWeight: row.type === "heading1" ? 600 : row.type === "heading2" ? 500 : 400, fontStyle: row.type === "notes" ? "italic" : "normal", paddingLeft: row.type === "sub-item" ? 16 : 0 }}>
                   <td style={{ ...td, color: "#aaa", fontSize: 9, textAlign: "center", width: 28 }}>{rowIdx + 1}</td>
                   <td style={td}>{row.page_label || `P${row.page_number + 1}`}</td>
                   <td style={td} title={row.revision}>{row.revision?.slice(0, 10) || ""}</td>
                   <td style={td}>
-                    <span style={{ ...typeTag, background: row.type === "heading1" ? "#e74c3c" : row.type === "heading2" ? "#f39c12" : row.type === "notes" ? "#95a5a6" : "#2ecc71" }}>
-                      {row.type === "heading1" ? "H1" : row.type === "heading2" ? "H2" : row.type === "notes" ? "Note" : "Item"}
-                    </span>
+                    <select
+                      value={row.type}
+                      onChange={(e) => {
+                        onRowEdit(pageKey, row.id, "type", e.target.value);
+                        onRowEdit(pageKey, row.id, "user_edited" as keyof BQRow, { ...(row.user_edited || {}), type: true });
+                      }}
+                      style={{
+                        ...typeTag,
+                        background: getTypeColor(),
+                        border: "none",
+                        cursor: "pointer",
+                        appearance: "none",
+                        WebkitAppearance: "none",
+                        paddingRight: 12,
+                      }}
+                      title="點擊更改類型"
+                    >
+                      {ROW_TYPE_OPTIONS.map((opt) => (
+                        <option key={opt.value} value={opt.value}>{opt.label}</option>
+                      ))}
+                    </select>
                   </td>
                   {EDITABLE_COLS.map((field, colIdx) => {
                     const focused = isCellFocused(rowIdx, colIdx);
@@ -798,9 +1055,39 @@ export function BQExportPanel({
                       fontWeight: isUserEdited ? 600 : "inherit",
                     };
 
+                    // Special rendering for collection_entry item_no: dropdown with page refs
+                    const isCollectionItemField = isCollectionRow && field === "item_no";
+
                     return (
                       <td key={field} style={cellStyle} onClick={(e) => handleCellClick(rowIdx, colIdx, e)} onDoubleClick={() => handleCellDoubleClick(rowIdx, colIdx)}>
-                        {editing ? (
+                        {isCollectionItemField ? (
+                          <div style={{ display: "flex", alignItems: "center", gap: 2, padding: "1px 2px" }}>
+                            <select
+                              value={row.item_no || ""}
+                              onChange={(e) => handleCollectionRefChange(pageKey, row.id, e.target.value)}
+                              style={{
+                                flex: 1,
+                                padding: "2px 4px",
+                                fontSize: 11,
+                                border: "1px solid #a8c7fa",
+                                borderRadius: 3,
+                                background: "#f0f5ff",
+                                cursor: "pointer",
+                                minWidth: 80,
+                              }}
+                              title="Select referenced page"
+                            >
+                              <option value="">-- 選擇頁面 --</option>
+                              {availablePageLabels.map(label => (
+                                <option key={label} value={label}>{label}</option>
+                              ))}
+                              {/* If current value not in list, still show it */}
+                              {row.item_no && !availablePageLabels.includes(row.item_no) && (
+                                <option value={row.item_no}>{row.item_no} (unmatched)</option>
+                              )}
+                            </select>
+                          </div>
+                        ) : editing ? (
                           field === "description" ? (
                             <textarea
                               style={editInputStyle}

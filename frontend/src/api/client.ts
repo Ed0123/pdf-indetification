@@ -784,6 +784,7 @@ export interface BQRowAPI {
   revision: string;
   bill_name: string;
   collection: string;
+  page_is_collection?: boolean;
   type: string;
   item_no: string;
   description: string;
@@ -791,6 +792,7 @@ export interface BQRowAPI {
   unit: string;
   rate: number | null;
   total: number | null;
+  parent_id?: number | null;
   // Bounding box for UI highlighting (absolute PDF coordinates)
   bbox_x0?: number;
   bbox_y0?: number;
@@ -836,6 +838,53 @@ export async function extractBQ(
 ): Promise<BQExtractResponse> {
   return request<BQExtractResponse>(
     "/api/bq/extract",
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(params),
+    },
+    LONG_TIMEOUT_MS
+  );
+}
+
+/** Collection integration request */
+export interface CollectionIntegrateRequest {
+  page_totals: Array<{
+    page_key: string;
+    page_label: string;
+    page_number: number;
+    file_id: string;
+    page_total: number;
+    item_count: number;
+    is_collection: boolean;
+  }>;
+}
+
+/** Collection integration response */
+export interface CollectionIntegrateResponse {
+  success: boolean;
+  collection_rows: Array<{
+    page_key: string;
+    row_id: number;
+    entry_type: string;
+    description: string;
+    page_ref: string;
+    matched_page_key: string;
+    total: number | null;
+    original_total: number | null;
+    mismatch_warning: string;
+  }>;
+  grand_total: number;
+  non_collection_total: number;
+  warnings: string[];
+}
+
+/** Integrate page totals into collection pages. */
+export async function integrateCollection(
+  params: CollectionIntegrateRequest
+): Promise<CollectionIntegrateResponse> {
+  return request<CollectionIntegrateResponse>(
+    "/api/bq/integrate-collection",
     {
       method: "POST",
       headers: { "Content-Type": "application/json" },

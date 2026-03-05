@@ -5,47 +5,56 @@ from backend.routers import bq_templates as bq_router
 
 
 def make_doc(data, _id="tmpl1"):
-    class Doc:
+    """Create a mock Firestore snapshot object."""
+    class DocSnap:
         def __init__(self, data, id):
             self._data = data
             self.id = id
-            self.reference = self
+            self.exists = True
 
         def to_dict(self):
             return dict(self._data)
 
-        def update(self, changes):
-            self._data.update(changes)
+    return DocSnap(data, _id)
 
-    return Doc(data, _id)
+
+class _DocRef:
+    """Mock Firestore document reference wrapping a snapshot."""
+    def __init__(self, snap):
+        self._snap = snap
+
+    def get(self):
+        return self._snap
+
+    def update(self, changes):
+        self._snap._data.update(changes)
 
 
 class DummyColl:
     def __init__(self, docs):
-        # docs: dict id->Doc
+        # docs: dict id->DocSnap
         self._docs = docs
 
     def stream(self):
         return list(self._docs.values())
 
     def document(self, tid):
-        # return existing doc or a stub object with exists=False
         if tid in self._docs:
-            return self._docs[tid]
-        # create a temporary object that mimics Firestore behaviour
-        class Empty:
-            def __init__(self):
-                self._exists = False
-                self.id = tid
+            return _DocRef(self._docs[tid])
 
+        class EmptySnap:
+            exists = False
+            id = tid
+            def to_dict(self):
+                return {}
+
+        class EmptyRef:
             def get(self):
-                return self
+                return EmptySnap()
+            def update(self, changes):
+                pass
 
-            @property
-            def exists(self):
-                return False
-
-        return Empty()
+        return EmptyRef()
 
 
 class DummyDB:

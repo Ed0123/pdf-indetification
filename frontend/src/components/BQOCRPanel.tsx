@@ -95,10 +95,6 @@ export function BQOCRPanel({
   // Page selector for batch extract
   const [showBatchSelector, setShowBatchSelector] = useState(false);
 
-  // Range input + info
-  const [rangeInput, setRangeInput] = useState<string>("");
-  const [rangeCount, setRangeCount] = useState<number>(0);
-
   // Progress tracking for batch
   const [batchProgress, setBatchProgress] = useState<{done: number; total: number} | null>(null);
 
@@ -163,42 +159,6 @@ export function BQOCRPanel({
     return allPages[idx];
   };
 
-  // parse user-entered range string into SelectedPage[]
-  const parseRangeString = (input: string): SelectedPage[] => {
-    const indices = new Set<number>();
-    input
-      .split(",")
-      .map((t) => t.trim())
-      .forEach((tok) => {
-        if (!tok) return;
-        const dash = tok.indexOf("-");
-        if (dash !== -1) {
-          const a = parseInt(tok.slice(0, dash), 10);
-          const b = parseInt(tok.slice(dash + 1), 10);
-          if (!isNaN(a) && !isNaN(b)) {
-            for (let n = a; n <= b; n++) {
-              indices.add(n - 1);
-            }
-          }
-        } else {
-          const n = parseInt(tok, 10);
-          if (!isNaN(n)) indices.add(n - 1);
-        }
-      });
-    return [...indices]
-      .filter((i) => i >= 0 && i < allPages.length)
-      .map((i) => allPages[i]);
-  };
-
-  // update count when rangeInput changes
-  useEffect(() => {
-    if (rangeInput.trim()) {
-      const pages = parseRangeString(rangeInput);
-      setRangeCount(pages.length);
-    } else {
-      setRangeCount(0);
-    }
-  }, [rangeInput]);
 
   const currentIdx = allPages.findIndex(
     (p) => p.file_id === selectedFileId && p.page_number === selectedPage
@@ -336,13 +296,15 @@ export function BQOCRPanel({
         revision: r.revision,
         bill_name: r.bill_name,
         collection: r.collection,
-        type: r.type as "heading1" | "heading2" | "item",
+        page_is_collection: r.page_is_collection,
+        type: r.type as BQRow["type"],
         item_no: r.item_no,
         description: r.description,
         quantity: r.quantity,
         unit: r.unit,
         rate: r.rate,
         total: r.total,
+        parent_id: r.parent_id,
         // Bbox for UI highlighting
         bbox_x0: r.bbox_x0,
         bbox_y0: r.bbox_y0,
@@ -353,12 +315,19 @@ export function BQOCRPanel({
       }));
 
       // Update BQ page data
+      // determine page-level collection flag if available in debug_info
+      let pageIsCollection: boolean | undefined;
+      if ((result as any).debug_info?.parse_debug?.collection_page) {
+        pageIsCollection = (result as any).debug_info.parse_debug.collection_page.is_collection;
+      }
+
       const newPageData: BQPageData = {
         file_id: selectedFileId,
         page_number: selectedPage,
         boxes: { ...currentBoxes },
         rows,
         applied_template: selectedTemplateId || undefined,
+        page_is_collection: pageIsCollection,
       };
       onBQDataChange(pageKey, newPageData);
 
@@ -451,13 +420,15 @@ export function BQOCRPanel({
           revision: r.revision,
           bill_name: r.bill_name,
           collection: r.collection,
-          type: r.type as "heading1" | "heading2" | "item",
+          page_is_collection: r.page_is_collection,
+          type: r.type as BQRow["type"],
           item_no: r.item_no,
           description: r.description,
           quantity: r.quantity,
           unit: r.unit,
           rate: r.rate,
           total: r.total,
+          parent_id: r.parent_id,
           // Bbox for UI highlighting
           bbox_x0: r.bbox_x0,
           bbox_y0: r.bbox_y0,
@@ -468,11 +439,16 @@ export function BQOCRPanel({
         }));
 
         const key = `${sp.file_id}-${sp.page_number}`;
+        let pageIsCollection: boolean | undefined;
+        if ((result as any).debug_info?.parse_debug?.collection_page) {
+          pageIsCollection = (result as any).debug_info.parse_debug.collection_page.is_collection;
+        }
         const newPageData: BQPageData = {
           file_id: sp.file_id,
           page_number: sp.page_number,
           boxes: { ...currentBoxes },
           rows,
+          page_is_collection: pageIsCollection,
         };
         onBQDataChange(key, newPageData);
 
@@ -500,27 +476,6 @@ export function BQOCRPanel({
     setBatchProgress(null);
   }, [currentBoxes, selectedEngine, onBQDataChange]);
 
-  // Handle range-based batch extract
-  const handleRangeExtract = () => {
-    if (!rangeInput.trim()) return;
-    const pages = parseRangeString(rangeInput);
-    if (pages.length === 0) {
-      setError("範圍格式錯誤或找不到頁面");
-      return;
-    }
-    if (pages.length > 200) {
-      setError("一次最多只能處理 200 頁");
-      return;
-    }
-    const usage = usagePages ?? 0;
-    const limit = usageLimit ?? -1;
-    if (limit !== -1 && usage + pages.length > limit) {
-      setError("OCR 配額不足，請減少頁數或升級方案");
-      return;
-    }
-    setRangeInput("");
-    handleBatchExtract(pages);
-  };
 
   // Handle template save
   const handleSaveTemplate = () => {
@@ -840,10 +795,13 @@ export function BQOCRPanel({
                 </table>
               </div>
               {/* Zone info */}
-              {(currentPageBQData.rows[0]?.page_label || currentPageBQData.rows[0]?.revision) && (
+              {(currentPageBQData.rows[0]?.page_label || currentPageBQData.rows[0]?.revision || currentPageBQData.page_is_collection) && (
                 <div style={zoneInfoBox}>
                   {currentPageBQData.rows[0]?.page_label && (
                     <span style={zoneInfoItem}>📄 Page: {currentPageBQData.rows[0].page_label}</span>
+                  )}
+                  {currentPageBQData.page_is_collection && (
+                    <span style={zoneInfoItem}>📦 Collection page</span>
                   )}
                   {currentPageBQData.rows[0]?.revision && (
                     <span style={zoneInfoItem}>🔄 Revision: {currentPageBQData.rows[0].revision}</span>
@@ -893,24 +851,6 @@ export function BQOCRPanel({
           </button>
           {/* Range / batch controls */}
         <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
-          <input
-            style={{ ...pageSelect, width: 120 }}
-            placeholder="頁碼或範圍 e.g. 1-5,7"
-            value={rangeInput}
-            onChange={(e) => setRangeInput(e.target.value)}
-            onKeyDown={(e) => e.key === "Enter" && handleRangeExtract()}
-            disabled={extracting}
-            title="輸入欲處理之頁碼或範圍，使用逗號分隔"
-          />
-          <button
-            style={{ ...batchExtractBtn, opacity: rangeInput.trim() ? 1 : 0.5 }}
-            disabled={extracting || !rangeInput.trim()}
-            onClick={handleRangeExtract}
-            title="依照上方範圍直接執行 OCR"
-          >
-            {extracting ? "⏳" : "📚 範圍 OCR"}
-          </button>
-
           <button
             style={{
               ...batchExtractBtn,
@@ -926,11 +866,6 @@ export function BQOCRPanel({
         </div>
 
         {/* range info message */}
-        {rangeInput.trim() && (
-          <div style={{ fontSize: 11, color: "#555", marginTop: 4 }}>
-            {rangeCount} 頁將被處理，檢查配額後才會執行。
-          </div>
-        )}
       </div>
         {!hasDataRange && (
           <div style={{ fontSize: 11, color: "#e74c3c", marginTop: 4 }}>
