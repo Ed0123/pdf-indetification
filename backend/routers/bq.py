@@ -8,9 +8,10 @@ Provides endpoints for:
 """
 
 import os
+import re
 from datetime import datetime, timezone
 from typing import Optional, Literal
-from fastapi import APIRouter, HTTPException, Depends
+from fastapi import APIRouter, HTTPException, Depends, Request
 from pydantic import BaseModel
 
 from ..auth_middleware import require_auth
@@ -196,6 +197,44 @@ def _check_bq_permission(user: dict) -> dict:
     )
 
 
+def _normalize_fontname(name: str | None) -> str | None:
+    """Strip the 6-char subset prefix (e.g. 'BCDEEE+Arial-Bold' -> 'Arial-Bold')."""
+    if not name:
+        return name
+    if len(name) > 7 and name[6] == '+' and name[:6].isalpha():
+        return name[7:]
+    return name
+
+
+def _should_split_block(prev_line: dict, curr_line: dict, para_threshold: float) -> tuple[bool, str]:
+    """Decide whether two consecutive lines should be in separate blocks.
+
+    Returns (should_split, reason) where reason is '' or one of
+    'style', 'indent', 'gap'.
+    """
+    # 1. Font / size change
+    prev_font = _normalize_fontname(prev_line.get('fontname'))
+    curr_font = _normalize_fontname(curr_line.get('fontname'))
+    if prev_font is not None and curr_font is not None and prev_font != curr_font:
+        return True, 'style'
+    if abs((prev_line.get('size') or 0) - (curr_line.get('size') or 0)) > 0.5:
+        return True, 'style'
+
+    # 2. Indentation / left-edge shift
+    avg_width = ((prev_line['x1'] - prev_line['x0']) + (curr_line['x1'] - curr_line['x0'])) / 2
+    x_threshold = max(30, avg_width * 0.2)
+    x_diff = abs(curr_line['x0'] - prev_line['x0'])
+    if x_diff > x_threshold:
+        return True, 'indent'
+
+    # 3. Large vertical gap
+    gap = curr_line['y_top'] - prev_line['y_bottom']
+    if gap > para_threshold:
+        return True, 'gap'
+
+    return False, ''
+
+
 def _extract_text_from_box(pdf_path: str, page_num: int, box: BoxDefinition, engine: str = "pdfplumber") -> str:
     """Extract text from a specific box region on a PDF page."""
     import fitz  # PyMuPDF
@@ -345,9 +384,12 @@ def _parse_bq_rows(
             if not col_x_ranges:
                 col_x_ranges["Description"] = (dr_x0, dr_x1)
             
-            # Extract words from DataRange
+            # Extract words from DataRange (include font attributes for style splitting)
             cropped = page.within_bbox(dr_bbox)
-            words = cropped.extract_words(keep_blank_chars=True, y_tolerance=3, x_tolerance=3)
+            words = cropped.extract_words(
+                keep_blank_chars=True, y_tolerance=3, x_tolerance=3,
+                extra_attrs=['fontname', 'size'],
+            )
             
             parse_debug["words_extracted"] = len(words)
             
@@ -372,29 +414,26 @@ def _parse_bq_rows(
                 if not text:
                     continue
                 
+                word_entry = {
+                    'text': text,
+                    'y': word_y_mid,
+                    'y_top': w['top'],
+                    'y_bottom': w['bottom'],
+                    'x0': w['x0'],
+                    'x1': w['x1'],
+                    'fontname': w.get('fontname'),
+                    'size': w.get('size'),
+                }
+                
                 assigned = False
                 for col_name, (cx0, cx1) in col_x_ranges.items():
                     if cx0 <= word_x_mid < cx1:  # Note: < not <= for right boundary
-                        col_words[col_name].append({
-                            'text': text,
-                            'y': word_y_mid,
-                            'y_top': w['top'],
-                            'y_bottom': w['bottom'],
-                            'x0': w['x0'],
-                            'x1': w['x1']
-                        })
+                        col_words[col_name].append(word_entry)
                         assigned = True
                         break
                 
                 if not assigned:
-                    col_words["_unassigned"].append({
-                        'text': text,
-                        'y': word_y_mid,
-                        'y_top': w['top'],
-                        'y_bottom': w['bottom'],
-                        'x0': w['x0'],
-                        'x1': w['x1']
-                    })
+                    col_words["_unassigned"].append(word_entry)
             
             # Log word distribution
             for col, wds in col_words.items():
@@ -492,6 +531,9 @@ def _parse_bq_rows(
             
             parse_debug["line_count"] = len(desc_lines)
             parse_debug["para_threshold"] = para_threshold
+            # Counters for style/indent driven splits (populated below)
+            style_splits = 0
+            indent_splits = 0
             
             # Step 2c: Extract Item values with Y positions (these mark new items)
             def extract_col_lines(col_name: str) -> list[dict]:
@@ -601,25 +643,16 @@ def _parse_bq_rows(
                         notes_before.append(line)
                         assigned_lines.add(id(line))
                 
-                # Group notes_before by paragraph gaps, but also split on style or indentation changes
+                # Group notes_before by paragraph gaps, style or indentation changes
                 if notes_before:
                     current_block = {'type': 'notes', 'lines': [notes_before[0]], 'y_start': notes_before[0]['y_top'], 'y_end': notes_before[0]['y_bottom']}
                     for i in range(1, len(notes_before)):
                         curr = notes_before[i]
                         prev = current_block['lines'][-1]
-                        gap = curr['y_top'] - current_block['y_end']
-                        # determine if font/style changed
-                        style_diff = (
-                            prev.get('fontname') != curr.get('fontname') or
-                            abs((prev.get('size') or 0) - (curr.get('size') or 0)) > 0.5
-                        )
-                        # indentation/left-shift check
-                        avg_width = ((prev['x1'] - prev['x0']) + (curr['x1'] - curr['x0'])) / 2
-                        x_threshold2 = max(30, avg_width * 0.2)
-                        x_diff = abs(curr['x0'] - prev['x0'])
-
-                        if style_diff or x_diff > x_threshold2 or gap > para_threshold:
-                            # start a new notes block
+                        split, reason = _should_split_block(prev, curr, para_threshold)
+                        if reason == 'style': style_splits += 1
+                        if reason == 'indent': indent_splits += 1
+                        if split:
                             all_blocks.append(current_block)
                             current_block = {'type': 'notes', 'lines': [curr], 'y_start': curr['y_top'], 'y_end': curr['y_bottom']}
                         else:
@@ -658,38 +691,11 @@ def _parse_bq_rows(
                             item_desc_lines.append(line)
                         else:
                             prev_line = candidate_lines[i-1]
-                            y_gap = line['y_top'] - prev_line['y_bottom']
-
-                            # Style difference should split even without a big gap
-                            style_diff = (
-                                prev_line.get('fontname') != line.get('fontname') or
-                                abs((prev_line.get('size') or 0) - (line.get('size') or 0)) > 0.5
-                            )
-
-                            # Calculate X position difference (using left edges)
-                            x_diff = abs(line['x0'] - prev_line['x0'])
-
-                            # Paragraph break conditions:
-                            # 1. Large Y gap alone
-                            if y_gap > para_threshold:
+                            split, reason = _should_split_block(prev_line, line, para_threshold)
+                            if reason == 'style': style_splits += 1
+                            if reason == 'indent': indent_splits += 1
+                            if split:
                                 break
-
-                            # 1b. Style change always breaks
-                            if style_diff:
-                                break
-
-                            # 2. Significant X difference should break even if gap small
-                            avg_line_width = (prev_line['x1'] - prev_line['x0'] + line['x1'] - line['x0']) / 2
-                            x_threshold = max(30, avg_line_width * 0.2)  # At least 30px or 20% of line width
-
-                            if x_diff > x_threshold:
-                                break
-
-                            # previous behavior: require y_gap>5 for x shift notice
-                            if x_diff > x_threshold and y_gap > 5:
-                                # Significant X shift with Y gap - likely a new block
-                                break
-
                             item_desc_lines.append(line)
                     
                     # Mark these lines as assigned
@@ -719,22 +725,16 @@ def _parse_bq_rows(
                 # Check for any unassigned lines and add them as trailing notes
                 unassigned_lines = [l for l in desc_lines if id(l) not in assigned_lines]
                 if unassigned_lines:
-                    # Sort by Y position and group as notes, adding style/indent boundary tests
+                    # Sort by Y and group as notes, splitting on style/indent changes
                     unassigned_sorted = sorted(unassigned_lines, key=lambda l: l['y_center'])
                     current_block = {'type': 'notes', 'lines': [unassigned_sorted[0]], 'y_start': unassigned_sorted[0]['y_top'], 'y_end': unassigned_sorted[0]['y_bottom']}
                     for i in range(1, len(unassigned_sorted)):
                         curr = unassigned_sorted[i]
                         prev = current_block['lines'][-1]
-                        gap = curr['y_top'] - current_block['y_end']
-                        style_diff = (
-                            prev.get('fontname') != curr.get('fontname') or
-                            abs((prev.get('size') or 0) - (curr.get('size') or 0)) > 0.5
-                        )
-                        avg_width = ((prev['x1'] - prev['x0']) + (curr['x1'] - curr['x0'])) / 2
-                        x_threshold2 = max(30, avg_width * 0.2)
-                        x_diff = abs(curr['x0'] - prev['x0'])
-
-                        if style_diff or x_diff > x_threshold2 or gap > para_threshold:
+                        split, reason = _should_split_block(prev, curr, para_threshold)
+                        if reason == 'style': style_splits += 1
+                        if reason == 'indent': indent_splits += 1
+                        if split:
                             all_blocks.append(current_block)
                             current_block = {'type': 'notes', 'lines': [curr], 'y_start': curr['y_top'], 'y_end': curr['y_bottom']}
                         else:
@@ -746,6 +746,8 @@ def _parse_bq_rows(
                 all_blocks.sort(key=lambda b: b['y_start'])
                 
                 parse_debug["blocks_count"] = len(all_blocks)
+                parse_debug["style_splits"] = style_splits
+                parse_debug["indent_splits"] = indent_splits
                 
                 # Create output rows
                 for block in all_blocks:

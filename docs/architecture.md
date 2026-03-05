@@ -226,11 +226,12 @@ BQ-OCR extracts structured table data from PDF Bill of Quantities documents usin
 |------|-------------|
 | 1. Zone Detection | User defines boxes for: `DataRange`, `PageNo`, `Revision`, `BillName`, `Collection` |
 | 2. Column Headers | User defines boxes for columns: `Item`, `Description`, `Qty`, `Unit`, `Rate`, `Total` |
-| 3. Text Extraction | `pdfplumber` extracts all text with coordinates inside DataRange |
-| 4. Column Assignment | Each text block assigned to column based on X-coordinate overlap with header boxes |
-| 5. Line Grouping | Text blocks grouped into lines by Y-coordinate (threshold: median line height) |
-| 6. Row Merging | Consecutive lines merged if Y-distance < 1.5× median line height |
-| 7. Type Classification | Rows classified as: `heading1`, `heading2`, `item`, `notes` based on column population |
+| 3. Text Extraction | `pdfplumber` extracts all text with coordinates and font attributes (`fontname`, `size`) inside DataRange |
+| 4. Column Assignment | Each word assigned to column based on X-midpoint overlap with header boxes; font info carried through |
+| 5. Line Grouping | Words grouped into lines by Y-coordinate proximity (tolerance: 5pt) |
+| 6. Block Splitting | Consecutive lines split into separate blocks when: (a) font name/size changes, (b) left-edge X shifts by >max(30px, 20% of line width), or (c) vertical gap exceeds 2.5× median line gap. Font names are normalized by stripping PDF subset prefixes (e.g. `BCDEEE+Arial` → `Arial`). |
+| 7. Row Merging | Consecutive lines within the same block merged into one description row |
+| 8. Type Classification | Rows classified as: `item` (has Item column value) or `notes` (all other rows). Debug info includes `style_splits` and `indent_splits` counters. |
 
 ### Row Type Classification Logic
 | Type | Condition |
