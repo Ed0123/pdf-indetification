@@ -167,18 +167,38 @@ async def export_annotated(req: AnnotatedExportRequest, user: dict = Depends(req
                         # Always use BLACK for PDF export (ignore annotation color)
                         color = (0, 0, 0)  # Black
                         
-                        point = fitz.Point(ann.x, ann.y)
                         fontname = "helv"
                         if ann.bold:
                             fontname = "hebo"
                         
-                        page.insert_text(
-                            point,
-                            ann.text,
-                            fontsize=ann.font_size,
-                            fontname=fontname,
-                            color=color,
-                        )
+                        if ann.align and ann.align in ("center", "right"):
+                            # Use insert_textbox for alignment support
+                            # Create a generous-width rect anchored at ann.x
+                            box_w = 200  # pt, wide enough for any number
+                            if ann.align == "right":
+                                # rect ends at ann.x (text right-aligns to that edge)
+                                rect = fitz.Rect(ann.x - box_w, ann.y - ann.font_size - 2, ann.x, ann.y + 4)
+                                fitz_align = 2  # TEXT_ALIGN_RIGHT
+                            else:  # center
+                                rect = fitz.Rect(ann.x - box_w / 2, ann.y - ann.font_size - 2, ann.x + box_w / 2, ann.y + 4)
+                                fitz_align = 1  # TEXT_ALIGN_CENTER
+                            page.insert_textbox(
+                                rect,
+                                ann.text,
+                                fontsize=ann.font_size,
+                                fontname=fontname,
+                                color=color,
+                                align=fitz_align,
+                            )
+                        else:
+                            point = fitz.Point(ann.x, ann.y)
+                            page.insert_text(
+                                point,
+                                ann.text,
+                                fontsize=ann.font_size,
+                                fontname=fontname,
+                                color=color,
+                            )
             
             src.close()
         
@@ -227,18 +247,35 @@ async def export_annotated(req: AnnotatedExportRequest, user: dict = Depends(req
                         
                         for ann in page_annotations:
                             color = (0, 0, 0)  # Black
-                            point = fitz.Point(ann.x, ann.y)
                             fontname = "helv"
                             if ann.bold:
                                 fontname = "hebo"
                             
-                            page.insert_text(
-                                point,
-                                ann.text,
-                                fontsize=ann.font_size,
-                                fontname=fontname,
-                                color=color,
-                            )
+                            if ann.align and ann.align in ("center", "right"):
+                                box_w = 200
+                                if ann.align == "right":
+                                    rect = fitz.Rect(ann.x - box_w, ann.y - ann.font_size - 2, ann.x, ann.y + 4)
+                                    fitz_align = 2
+                                else:
+                                    rect = fitz.Rect(ann.x - box_w / 2, ann.y - ann.font_size - 2, ann.x + box_w / 2, ann.y + 4)
+                                    fitz_align = 1
+                                page.insert_textbox(
+                                    rect,
+                                    ann.text,
+                                    fontsize=ann.font_size,
+                                    fontname=fontname,
+                                    color=color,
+                                    align=fitz_align,
+                                )
+                            else:
+                                point = fitz.Point(ann.x, ann.y)
+                                page.insert_text(
+                                    point,
+                                    ann.text,
+                                    fontsize=ann.font_size,
+                                    fontname=fontname,
+                                    color=color,
+                                )
                 
                 pdf_bytes = single.tobytes()
                 single.close()

@@ -132,6 +132,7 @@ export interface TextAnnotation {
   color?: string;                     // Hex color (default #000000)
   bold?: boolean;                     // Bold text
   created_at?: string;                // ISO date string
+  align?: "left" | "center" | "right"; // Text alignment (default "left")
 }
 
 /** BQ page data - stores boxes and extracted rows for a single page */

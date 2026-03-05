@@ -994,6 +994,16 @@ export default function App() {
     });
   }, [state.selected_file_id, state.selected_page]);
 
+  // Auto-derive pdfPageSize from BQ row data so annotations render without needing to click a row
+  useEffect(() => {
+    const pageKey = `${state.selected_file_id}-${state.selected_page}`;
+    const pageData = bqPageData[pageKey];
+    const firstRow = pageData?.rows?.[0];
+    if (firstRow?.page_width && firstRow?.page_height) {
+      setPdfPageSize({ width: firstRow.page_width, height: firstRow.page_height });
+    }
+  }, [state.selected_file_id, state.selected_page, bqPageData]);
+
   // Get current page annotations (auto-generated from BQ edits, with stored position overrides)
   const currentAnnotations = useMemo(() => {
     if (!showAnnotations) return [];
@@ -1015,35 +1025,37 @@ export default function App() {
       const qtyBox = pageData.boxes["Qty"];
       const totalBox = pageData.boxes["Total"];
       
-      // Quantity annotation
+      // Quantity annotation — right-aligned at right edge of Qty box
       if (row.user_edited.quantity && row.quantity !== null && qtyBox) {
         const annId = `auto-qty-${row.id}`;
         const stored = storedPositions[annId];
         autoAnnotations.push({
           id: annId,
           text: row.quantity.toString(),
-          x: stored?.x ?? (qtyBox.x * pageWidth + 5),
+          x: stored?.x ?? ((qtyBox.x + qtyBox.width) * pageWidth),
           y: stored?.y ?? ((row.bbox_y0 ?? 0) + 12),
           font_size: 9,
           color: "#0000FF",
+          align: "right" as const,
         });
       }
       
-      // Rate annotation
+      // Rate annotation — right-aligned at right edge of Rate box
       if (row.user_edited.rate && row.rate !== null && rateBox) {
         const annId = `auto-rate-${row.id}`;
         const stored = storedPositions[annId];
         autoAnnotations.push({
           id: annId,
           text: row.rate.toFixed(2),
-          x: stored?.x ?? (rateBox.x * pageWidth + 5),
+          x: stored?.x ?? ((rateBox.x + rateBox.width) * pageWidth),
           y: stored?.y ?? ((row.bbox_y0 ?? 0) + 12),
           font_size: 9,
           color: "#0000FF",
+          align: "right" as const,
         });
       }
       
-      // Total annotation
+      // Total annotation — right-aligned at right edge of Total box
       if ((row.user_edited.total || (row.user_edited.rate && row.user_edited.quantity)) && 
           row.total !== null && totalBox) {
         const annId = `auto-total-${row.id}`;
@@ -1051,10 +1063,11 @@ export default function App() {
         autoAnnotations.push({
           id: annId,
           text: row.total.toFixed(2),
-          x: stored?.x ?? (totalBox.x * pageWidth + 5),
+          x: stored?.x ?? ((totalBox.x + totalBox.width) * pageWidth),
           y: stored?.y ?? ((row.bbox_y0 ?? 0) + 12),
           font_size: 9,
           color: "#0000FF",
+          align: "right" as const,
         });
       }
     }
@@ -1076,11 +1089,12 @@ export default function App() {
           autoAnnotations.push({
             id: annId,
             text: `$${pageTotal.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`,
-            x: stored?.x ?? (collectionBox.x * pw + 5),
+            x: stored?.x ?? ((collectionBox.x + collectionBox.width / 2) * pw),
             y: stored?.y ?? ((collectionBox.y + collectionBox.height * 0.5) * ph),
             font_size: 10,
             color: "#008000",
             bold: true,
+            align: "center" as const,
           });
         }
       }

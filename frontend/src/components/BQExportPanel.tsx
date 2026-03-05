@@ -177,26 +177,33 @@ export function BQExportPanel({
     }
     const currentRowEntry = allRows.find(r => r.pageKey === pageKey && r.row.id === rowId);
     const currentRow = currentRowEntry?.row;
+    const newQty = field === "quantity" ? value : currentRow?.quantity;
+    const newRate = field === "rate" ? value : currentRow?.rate;
+    const autoCalcTotal = (field === "rate" || field === "quantity") && newQty != null && newRate != null;
     if (currentRow && ["quantity", "rate", "total"].includes(field)) {
       const userEdited = currentRow.user_edited || {};
-      onRowEdit(pageKey, rowId, "user_edited" as keyof BQRow, { ...userEdited, [field]: true });
+      // Also mark total as user_edited when it's auto-calculated from rate×qty
+      onRowEdit(pageKey, rowId, "user_edited" as keyof BQRow, {
+        ...userEdited,
+        [field]: true,
+        ...(autoCalcTotal ? { total: true } : {}),
+      });
     }
     onRowEdit(pageKey, rowId, field as keyof BQRow, value);
-    if (currentRow && (field === "rate" || field === "quantity")) {
-      const newQty = field === "quantity" ? value : currentRow.quantity;
-      const newRate = field === "rate" ? value : currentRow.rate;
-      if (newQty !== null && newRate !== null) {
-        onRowEdit(pageKey, rowId, "total", newQty * newRate);
-      }
+    if (autoCalcTotal) {
+      onRowEdit(pageKey, rowId, "total", newQty! * newRate!);
     }
     setEditingCell(null);
     setEditValue("");
-  }, [editingCell, editValue, allRows, onRowEdit]);
+    // Restore keyboard focus to the table so arrow-key navigation keeps working
+    setTimeout(() => tableRef.current?.focus(), 0);
+  }, [editingCell, editValue, allRows, onRowEdit, tableRef]);
 
   const handleCancelEdit = useCallback(() => {
     setEditingCell(null);
     setEditValue("");
-  }, []);
+    setTimeout(() => tableRef.current?.focus(), 0);
+  }, [tableRef]);
 
   // ──────────────────────────────────────────────────────────────────────────
   // Excel-like navigation
@@ -212,8 +219,11 @@ export function BQExportPanel({
       const { pageKey, row } = filteredRows[rowIdx];
       const field = EDITABLE_COLS[colIdx];
       handleStartEdit(pageKey, row.id, field, getCellValue(row, field), row);
+    } else {
+      // Ensure table container has keyboard focus so arrow keys work, not the scrollbar
+      setTimeout(() => tableRef.current?.focus(), 0);
     }
-  }, [filteredRows, handleStartEdit, getCellValue]);
+  }, [filteredRows, handleStartEdit, getCellValue, tableRef]);
 
   const saveAndMove = useCallback((dRow: number, dCol: number) => {
     handleSaveEdit();
@@ -274,6 +284,11 @@ export function BQExportPanel({
       if (rowIdx >= filteredRows.length) break;
       const cols = lines[dr].split("\t");
       const { pageKey, row } = filteredRows[rowIdx];
+
+      // Track what values are pasted in this row for auto-total calculation
+      let rowPastedRate: number | null | undefined = undefined;
+      let rowPastedQty: number | null | undefined = undefined;
+
       for (let dc = 0; dc < cols.length; dc++) {
         const colIdx = focusedCell.colIdx + dc;
         if (colIdx >= EDITABLE_COLS.length) break;
@@ -283,8 +298,25 @@ export function BQExportPanel({
           const num = parseFloat(value);
           value = isNaN(num) ? null : num;
           onRowEdit(pageKey, row.id, "user_edited" as keyof BQRow, { ...(row.user_edited || {}), [field]: true });
+          if (field === "rate") rowPastedRate = value;
+          if (field === "quantity") rowPastedQty = value;
         }
         onRowEdit(pageKey, row.id, field as keyof BQRow, value);
+      }
+
+      // Auto-calculate total when rate or qty was pasted and the other value is available
+      const effectiveRate = rowPastedRate !== undefined ? rowPastedRate : row.rate;
+      const effectiveQty  = rowPastedQty  !== undefined ? rowPastedQty  : row.quantity;
+      const shouldAutoCalc = (rowPastedRate !== undefined || rowPastedQty !== undefined)
+                            && effectiveRate != null && effectiveQty != null;
+      if (shouldAutoCalc) {
+        onRowEdit(pageKey, row.id, "user_edited" as keyof BQRow, {
+          ...(row.user_edited || {}),
+          ...(rowPastedRate !== undefined ? { rate: true } : {}),
+          ...(rowPastedQty  !== undefined ? { quantity: true } : {}),
+          total: true,
+        });
+        onRowEdit(pageKey, row.id, "total", effectiveQty! * effectiveRate!);
       }
     }
     setSelectionEnd({
@@ -461,17 +493,20 @@ export function BQExportPanel({
         if (row.user_edited.quantity && row.quantity !== null && qtyBox) {
           const annId = `auto-qty-${row.id}`;
           const stored = storedPositions[annId];
-          allAnnotations.push({ page_key: pageKey, file_id: pageData.file_id, page_number: pageData.page_number, id: annId, text: row.quantity.toString(), x: stored?.x ?? (qtyBox.x * pw + 5), y: stored?.y ?? ((row.bbox_y0 ?? 0) + 12), font_size: 9, color: "#0000FF" });
+          // Right-align: place at right edge of Qty box
+          allAnnotations.push({ page_key: pageKey, file_id: pageData.file_id, page_number: pageData.page_number, id: annId, text: row.quantity.toString(), x: stored?.x ?? ((qtyBox.x + qtyBox.width) * pw), y: stored?.y ?? ((row.bbox_y0 ?? 0) + 12), font_size: 9, color: "#0000FF", align: "right" });
         }
         if (row.user_edited.rate && row.rate !== null && rateBox) {
           const annId = `auto-rate-${row.id}`;
           const stored = storedPositions[annId];
-          allAnnotations.push({ page_key: pageKey, file_id: pageData.file_id, page_number: pageData.page_number, id: annId, text: row.rate.toFixed(2), x: stored?.x ?? (rateBox.x * pw + 5), y: stored?.y ?? ((row.bbox_y0 ?? 0) + 12), font_size: 9, color: "#0000FF" });
+          // Right-align: place at right edge of Rate box
+          allAnnotations.push({ page_key: pageKey, file_id: pageData.file_id, page_number: pageData.page_number, id: annId, text: row.rate.toFixed(2), x: stored?.x ?? ((rateBox.x + rateBox.width) * pw), y: stored?.y ?? ((row.bbox_y0 ?? 0) + 12), font_size: 9, color: "#0000FF", align: "right" });
         }
         if ((row.user_edited.total || (row.user_edited.rate && row.user_edited.quantity)) && row.total !== null && totalBox) {
           const annId = `auto-total-${row.id}`;
           const stored = storedPositions[annId];
-          allAnnotations.push({ page_key: pageKey, file_id: pageData.file_id, page_number: pageData.page_number, id: annId, text: row.total.toFixed(2), x: stored?.x ?? (totalBox.x * pw + 5), y: stored?.y ?? ((row.bbox_y0 ?? 0) + 12), font_size: 9, color: "#0000FF" });
+          // Right-align: place at right edge of Total box
+          allAnnotations.push({ page_key: pageKey, file_id: pageData.file_id, page_number: pageData.page_number, id: annId, text: row.total.toFixed(2), x: stored?.x ?? ((totalBox.x + totalBox.width) * pw), y: stored?.y ?? ((row.bbox_y0 ?? 0) + 12), font_size: 9, color: "#0000FF", align: "right" });
         }
       }
       if (collectionBox && pageData.rows.length > 0) {
@@ -482,7 +517,8 @@ export function BQExportPanel({
           const pw = fr?.page_width ?? 1, ph = fr?.page_height ?? 1;
           const annId = `auto-pagetotal-${pageKey}`;
           const stored = storedPositions[annId];
-          allAnnotations.push({ page_key: pageKey, file_id: pageData.file_id, page_number: pageData.page_number, id: annId, text: `$${pageTotal.toFixed(2)}`, x: stored?.x ?? (collectionBox.x * pw + 5), y: stored?.y ?? ((collectionBox.y + collectionBox.height * 0.5) * ph), font_size: 10, color: "#008000", bold: true });
+          // Center in the collection box
+          allAnnotations.push({ page_key: pageKey, file_id: pageData.file_id, page_number: pageData.page_number, id: annId, text: `$${pageTotal.toFixed(2)}`, x: stored?.x ?? ((collectionBox.x + collectionBox.width / 2) * pw), y: stored?.y ?? ((collectionBox.y + collectionBox.height * 0.5) * ph), font_size: 10, color: "#008000", bold: true, align: "center" });
         }
       }
     }
@@ -562,15 +598,18 @@ export function BQExportPanel({
             const rateBox = pageData.boxes["Rate"], qtyBox = pageData.boxes["Qty"], totalBox = pageData.boxes["Total"];
             if (row.user_edited.quantity && row.quantity !== null && qtyBox) {
               const id = `auto-qty-${row.id}`; const s = sp[id];
-              annotations.push({ file_id: row.file_id, page_number: row.page_number, text: row.quantity.toString(), x: s?.x ?? (qtyBox.x * pw + 5), y: s?.y ?? ((row.bbox_y0 ?? 0) + 12), font_size: 9, color: "#0000FF" });
+              // Right-align at right edge of Qty box
+              annotations.push({ file_id: row.file_id, page_number: row.page_number, text: row.quantity.toString(), x: s?.x ?? ((qtyBox.x + qtyBox.width) * pw), y: s?.y ?? ((row.bbox_y0 ?? 0) + 12), font_size: 9, color: "#0000FF", align: "right" as const });
             }
             if (row.user_edited.rate && row.rate !== null && rateBox) {
               const id = `auto-rate-${row.id}`; const s = sp[id];
-              annotations.push({ file_id: row.file_id, page_number: row.page_number, text: row.rate.toFixed(2), x: s?.x ?? (rateBox.x * pw + 5), y: s?.y ?? ((row.bbox_y0 ?? 0) + 12), font_size: 9, color: "#0000FF" });
+              // Right-align at right edge of Rate box
+              annotations.push({ file_id: row.file_id, page_number: row.page_number, text: row.rate.toFixed(2), x: s?.x ?? ((rateBox.x + rateBox.width) * pw), y: s?.y ?? ((row.bbox_y0 ?? 0) + 12), font_size: 9, color: "#0000FF", align: "right" as const });
             }
             if ((row.user_edited.total || (row.user_edited.rate && row.user_edited.quantity)) && row.total !== null && totalBox) {
               const id = `auto-total-${row.id}`; const s = sp[id];
-              annotations.push({ file_id: row.file_id, page_number: row.page_number, text: row.total.toFixed(2), x: s?.x ?? (totalBox.x * pw + 5), y: s?.y ?? ((row.bbox_y0 ?? 0) + 12), font_size: 9, color: "#0000FF" });
+              // Right-align at right edge of Total box
+              annotations.push({ file_id: row.file_id, page_number: row.page_number, text: row.total.toFixed(2), x: s?.x ?? ((totalBox.x + totalBox.width) * pw), y: s?.y ?? ((row.bbox_y0 ?? 0) + 12), font_size: 9, color: "#0000FF", align: "right" as const });
             }
           }
         }
@@ -578,7 +617,10 @@ export function BQExportPanel({
           if (pt.total > 0 && pt.collectionBox) {
             const pd = bqPageData[pageKey]; const sp = pd?.annotation_positions || {};
             const id = `auto-pagetotal-${pageKey}`; const s = sp[id];
-            annotations.push({ file_id: pt.fileId, page_number: pt.pageNumber, text: `$${pt.total.toFixed(2)}`, x: s?.x ?? (pt.collectionBox.x0 + 5), y: s?.y ?? (pt.collectionBox.y0 + 12), font_size: 10, color: "#008000", bold: true });
+            // Center in the collection box
+            const cx = (pt.collectionBox.x0 + pt.collectionBox.x1) / 2;
+            const cy = (pt.collectionBox.y0 + pt.collectionBox.y1) / 2;
+            annotations.push({ file_id: pt.fileId, page_number: pt.pageNumber, text: `$${pt.total.toFixed(2)}`, x: s?.x ?? cx, y: s?.y ?? cy, font_size: 10, color: "#008000", bold: true, align: "center" as const });
           }
         }
       }

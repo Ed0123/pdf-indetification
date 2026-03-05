@@ -177,22 +177,23 @@ export function PDFViewer({
   // Coordinate conversion helpers
   const absToDisplayX = useCallback((absX: number) => {
     if (!pdfPageSize || pdfPageSize.width <= 0) return 0;
-    return (absX / pdfPageSize.width) * imgNatural.w * zoom / RENDER_SCALE;
+    // Map absolute PDF pt → display CSS px (image is rendered at RENDER_SCALE but CSS size = imgNatural.w * zoom)
+    return (absX / pdfPageSize.width) * imgNatural.w * zoom;
   }, [pdfPageSize, imgNatural.w, zoom]);
 
   const absToDisplayY = useCallback((absY: number) => {
     if (!pdfPageSize || pdfPageSize.height <= 0) return 0;
-    return (absY / pdfPageSize.height) * imgNatural.h * zoom / RENDER_SCALE;
+    return (absY / pdfPageSize.height) * imgNatural.h * zoom;
   }, [pdfPageSize, imgNatural.h, zoom]);
 
   const displayToAbsX = useCallback((dispX: number) => {
     if (!pdfPageSize || imgNatural.w <= 0) return 0;
-    return (dispX / (imgNatural.w * zoom)) * pdfPageSize.width * RENDER_SCALE;
+    return (dispX / (imgNatural.w * zoom)) * pdfPageSize.width;
   }, [pdfPageSize, imgNatural.w, zoom]);
 
   const displayToAbsY = useCallback((dispY: number) => {
     if (!pdfPageSize || imgNatural.h <= 0) return 0;
-    return (dispY / (imgNatural.h * zoom)) * pdfPageSize.height * RENDER_SCALE;
+    return (dispY / (imgNatural.h * zoom)) * pdfPageSize.height;
   }, [pdfPageSize, imgNatural.h, zoom]);
 
   const displayW = imgNatural.w * zoom;
@@ -284,6 +285,7 @@ export function PDFViewer({
                 displayX={absToDisplayX(ann.x)}
                 displayY={absToDisplayY(ann.y)}
                 zoom={zoom}
+                pdfScale={imgNatural.w / pdfPageSize.width}
                 interactive={annotationsInteractive}
                 onDragEnd={(newDispX, newDispY) => {
                   if (onAnnotationMove) {
@@ -306,6 +308,7 @@ interface DraggableAnnotationProps {
   displayX: number;
   displayY: number;
   zoom: number;
+  pdfScale: number;  // imgNatural.w / pdfPageSize.width — scales font to match PDF rendering
   interactive: boolean;
   onDragEnd: (newDisplayX: number, newDisplayY: number) => void;
 }
@@ -315,6 +318,7 @@ function DraggableAnnotation({
   displayX,
   displayY,
   zoom,
+  pdfScale,
   interactive,
   onDragEnd,
 }: DraggableAnnotationProps) {
@@ -323,9 +327,11 @@ function DraggableAnnotation({
   const [hovered, setHovered] = useState(false);
   const dragStartRef = useRef<{ mouseX: number; mouseY: number } | null>(null);
 
-  const fontSize = (annotation.font_size ?? 10) * zoom;
+  // Scale font by PDF rendering scale so text appears at matching size
+  const fontSize = (annotation.font_size ?? 10) * zoom * pdfScale;
   const isBold = annotation.bold;
   const color = annotation.color ?? "#0000FF";
+  const align = (annotation as any).align ?? "left";  // "left" | "center" | "right"
 
   // Determine background color based on annotation type (from color hint)
   const bgColor = color === "#008000" || color === "green"
@@ -372,6 +378,11 @@ function DraggableAnnotation({
   const finalX = displayX + (dragging ? offset.dx : 0);
   const finalY = displayY + (dragging ? offset.dy : 0);
 
+  // CSS transform for text alignment: shift element so the anchor point aligns correctly
+  const alignTransform =
+    align === "right"  ? "translateX(-100%)" :
+    align === "center" ? "translateX(-50%)"  : "";
+
   return (
     <div
       onMouseDown={handleMouseDown}
@@ -384,6 +395,7 @@ function DraggableAnnotation({
         fontSize,
         lineHeight: 1.15,
         color,
+        transform: alignTransform || undefined,
         background: dragging
           ? "rgba(255, 255, 150, 0.95)"
           : hovered

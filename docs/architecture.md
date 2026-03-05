@@ -1,6 +1,6 @@
 # Architecture & Feature Documentation
 
-> Last updated after Phase 9 (Cloud Storage Upgrade, UI Cleanup & Template Sync).
+> Last updated after Phase 10 (BQ Rate/Total Annotation Fixes).
 
 ---
 
@@ -498,3 +498,11 @@ cd frontend && npm run build
 5. **Template Manager UI:** Columns changed to ID / Name / Columns / Notes / Owner; added filter input (searches name, columns, notes, owner, ID); `currentUserUid` prop for ownership display
 6. **Template apply — column sync:** Both `handleTemplateApply` (multi-page) and `handleSingleApplyTemplate` (single-page) now auto-add missing columns from the template via `project.addColumn()` before applying boxes
 7. **Cloud project TTL & permanent:** Projects default to 14-day TTL from last update; load extends TTL; permanent toggle (lock/unlock) in CloudProjectsPanel; expiry displayed with color-coded status
+
+### Phase 10 — BQ Rate/Total Annotation Fixes
+1. **Bug fix — textbox not created on rate edit (Bug 1):** `handleSaveEdit` now marks `user_edited.total = true` when auto-calculating total from rate × qty, so the `currentAnnotations` condition `(user_edited.total || ...)` correctly triggers the overlay.
+2. **Bug fix — annotation position/size wrong in preview (Bug 2):** Removed incorrect `/ RENDER_SCALE` from `absToDisplayX/Y` (was placing annotations at half the correct CSS position). Added `pdfScale = imgNatural.w / pdfPageSize.width` prop to `DraggableAnnotation` so font size correctly scales as `font_size * zoom * pdfScale`. Added `useEffect` in App.tsx to auto-derive `pdfPageSize` from BQ row data on load (previously only set on page-row click). **Coordinate round-trip is a proper inverse:** forward `absToDisplayX(x) = (x / pdfW) * imgNatural.w * zoom`; reverse `displayToAbsX(px) = (px / (imgNatural.w * zoom)) * pdfW`. Drag delta from `mousemove` is in raw CSS pixels matching the container coordinate space (no CSS scale transform), so `onDragEnd(displayX + dx, ...)` → `displayToAbsX(...)` correctly converts back to PDF pts.
+3. **Bug fix — exported text not centered (Bug 3):** Numbers (qty/rate/total) now use right-edge x `(colBox.x + colBox.width) * pageWidth` with `align: "right"`; collection totals use center x `(colBox.x + colBox.width/2) * pageWidth` with `align: "center"`. Backend (`pdf_export.py`) uses `page.insert_textbox()` with fitz `align=2` (right) or `align=1` (center) for both merge and ZIP export paths.
+4. **Bug fix — Ctrl+V paste doesn't auto-calculate (Bug 4):** `handlePaste` now tracks pasted `rate`/`qty` per row and auto-calculates total with `user_edited.total = true` when both values are present.
+5. **Bug fix — arrow keys scroll page (Bug 5):** Added `tableRef.current?.focus()` calls in `focusCell`, `handleSaveEdit`, and `handleCancelEdit` to keep keyboard focus on the table div; prevents browser scrolling on ↑↓ key press.
+6. **TypeScript:** Added `align?: "left" | "center" | "right"` field to `TextAnnotation` interface.
