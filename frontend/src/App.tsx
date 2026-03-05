@@ -1567,6 +1567,7 @@ export default function App() {
           activeModule={activeModule}
           onModuleChange={setActiveModule}
           userTier={profile?.tier ?? "basic"}
+          userFeatures={profile?.tier_features}
         />
 
         {/* Column 1: PDF Tree (collapsible) */}
@@ -1735,6 +1736,7 @@ export default function App() {
               onRowEdit={handleBQRowEdit}
               onDeleteRow={handleBQRowDelete}
               onNavigateToRow={handleNavigateToRow}
+              canExport={profile?.tier_features?.bq_export !== false}
             />
           )}
 

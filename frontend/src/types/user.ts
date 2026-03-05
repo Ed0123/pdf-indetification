@@ -44,6 +44,8 @@ export interface UserProfile {
   last_login: string;       // ISO
   notes: string;            // admin-editable
   photo_url: string;        // from Google
+  /** Resolved feature flags from the user's tier (returned by GET /me). */
+  tier_features?: Record<string, boolean>;
 }
 
 /** Feature flags that can be toggled per tier */
@@ -54,7 +56,8 @@ export const TIER_FEATURES = [
   { key: "export_pdf", label: "匯出 PDF 頁面" },
   { key: "templates", label: "範本管理" },
   { key: "bq_ocr", label: "BQ OCR 提取" },
-  { key: "bq_export", label: "BQ 數據匯出" },
+  { key: "bq_export_page", label: "BQ 匯出頁面（瀏覽）" },
+  { key: "bq_export", label: "BQ 數據匯出（下載）" },
 ] as const;
 
 export type TierFeatureKey = typeof TIER_FEATURES[number]["key"];

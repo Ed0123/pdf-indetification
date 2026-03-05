@@ -79,13 +79,13 @@ TIERS_COLLECTION = "tiers"
 DEFAULT_GROUPS = ["General"]
 DEFAULT_TIERS = [
     {"name": "basic", "label": "基本", "quota": 100, "storage_quota_mb": 0,
-     "features": {"ocr": True, "export_excel": True, "export_pdf": True, "templates": True, "cloud_save": False, "bq_ocr": False, "bq_export": False}},
+     "features": {"ocr": True, "export_excel": True, "export_pdf": True, "templates": True, "cloud_save": False, "bq_ocr": False, "bq_export_page": False, "bq_export": False}},
     {"name": "sponsor", "label": "贊助", "quota": 300, "storage_quota_mb": 100,
-     "features": {"ocr": True, "export_excel": True, "export_pdf": True, "templates": True, "cloud_save": True, "bq_ocr": True, "bq_export": True}},
+     "features": {"ocr": True, "export_excel": True, "export_pdf": True, "templates": True, "cloud_save": True, "bq_ocr": True, "bq_export_page": True, "bq_export": True}},
     {"name": "premium", "label": "特許", "quota": 500, "storage_quota_mb": 300,
-     "features": {"ocr": True, "export_excel": True, "export_pdf": True, "templates": True, "cloud_save": True, "bq_ocr": True, "bq_export": True}},
+     "features": {"ocr": True, "export_excel": True, "export_pdf": True, "templates": True, "cloud_save": True, "bq_ocr": True, "bq_export_page": True, "bq_export": True}},
     {"name": "admin", "label": "管理員", "quota": -1, "storage_quota_mb": -1,
-     "features": {"ocr": True, "export_excel": True, "export_pdf": True, "templates": True, "cloud_save": True, "bq_ocr": True, "bq_export": True}},
+     "features": {"ocr": True, "export_excel": True, "export_pdf": True, "templates": True, "cloud_save": True, "bq_ocr": True, "bq_export_page": True, "bq_export": True}},
 ]
 
 def _user_ref(uid: str):
@@ -139,6 +139,15 @@ def _get_tier_quota(tier_name: str) -> int:
         if t["name"] == tier_name:
             return t.get("quota", 100)
     return 100  # fallback
+
+
+def _get_tier_features(tier_name: str) -> dict:
+    """Return feature flags for a tier name."""
+    tiers = _ensure_default_tiers()
+    for t in tiers:
+        if t["name"] == tier_name:
+            return t.get("features", {})
+    return {}
 
 
 def _ensure_default_groups() -> list[dict]:
@@ -241,7 +250,11 @@ def _reassign_deleted_group_in_documents(deleted_name: str, fallback_name: str):
 
 @router.get("/me")
 def get_my_profile(user: dict = Depends(require_auth)):
-    """Return the current user's profile, creating it if first login."""
+    """Return the current user's profile, creating it if first login.
+
+    Also attaches ``tier_features`` dict resolved from the user's tier
+    so the frontend can gate UI elements without a separate tier lookup.
+    """
     profile = _get_or_create_profile(
         uid=user["uid"],
         email=user.get("email"),
@@ -254,6 +267,8 @@ def get_my_profile(user: dict = Depends(require_auth)):
         profile["tier"] = "admin"
     # Update last_login
     _user_ref(user["uid"]).update({"last_login": datetime.now(timezone.utc).isoformat()})
+    # Attach resolved tier features so frontend can gate UI elements
+    profile["tier_features"] = _get_tier_features(profile.get("tier", "basic"))
     return profile
 
 

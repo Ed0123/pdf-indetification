@@ -29,8 +29,9 @@ interface ModuleConfig {
   label: string;
   shortLabel: string;
   description: string;
-  tier?: string;  // Required tier for access
-  group?: number; // grouping key for visual separators
+  tier?: string;     // Required tier for access (legacy fallback)
+  feature?: string;  // Feature flag key checked against tier_features
+  group?: number;    // grouping key for visual separators
 }
 
 const MODULES: ModuleConfig[] = [
@@ -43,14 +44,16 @@ const MODULES: ModuleConfig[] = [
   { id: "exportpdf", icon: "📕", label: "PDF Export", shortLabel: "PDF", description: "Export selected PDF pages", group: 2 },
 
   // BQ tools are a sponsor‑tier group (3)
-  { id: "bq_ocr", icon: "📋", label: "BQ OCR", shortLabel: "BQ", description: "Extract Bill of Quantities data", tier: "sponsor", group: 3 },
-  { id: "bq_export", icon: "📊", label: "BQ Export", shortLabel: "BQ Ex", description: "Review and export BQ data", tier: "sponsor", group: 3 },
+  { id: "bq_ocr", icon: "📋", label: "BQ OCR", shortLabel: "BQ", description: "Extract Bill of Quantities data", tier: "sponsor", feature: "bq_ocr", group: 3 },
+  { id: "bq_export", icon: "📊", label: "BQ Export", shortLabel: "BQ Ex", description: "Review and export BQ data", tier: "sponsor", feature: "bq_export_page", group: 3 },
 ];
 
 interface ActivityBarProps {
   activeModule: ModuleId;
   onModuleChange: (module: ModuleId) => void;
   userTier?: string;
+  /** Resolved feature flags from the user's tier (from profile.tier_features). */
+  userFeatures?: Record<string, boolean>;
   collapsed?: boolean;
   onToggleCollapse?: () => void;
 }
@@ -59,11 +62,17 @@ export function ActivityBar({
   activeModule,
   onModuleChange,
   userTier = "basic",
+  userFeatures,
   collapsed = false,
   onToggleCollapse,
 }: ActivityBarProps) {
   // Check if user has access to a module
   const hasAccess = (module: ModuleConfig): boolean => {
+    // If the module has a feature key AND we have feature flags, use them
+    if (module.feature && userFeatures) {
+      return userFeatures[module.feature] === true;
+    }
+    // Fallback: use tier hierarchy
     if (!module.tier) return true;
     const tierOrder = ["basic", "sponsor", "premium", "admin"];
     const userIdx = tierOrder.indexOf(userTier);

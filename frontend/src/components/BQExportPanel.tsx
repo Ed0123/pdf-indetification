@@ -25,6 +25,8 @@ interface BQExportPanelProps {
     bbox: { x0: number; y0: number; x1: number; y1: number } | null,
     pageSize?: { width: number; height: number } | null
   ) => void;
+  /** Whether the user can actually export files (JSON/CSV/Excel/PDF). When false the export button is hidden. */
+  canExport?: boolean;
 }
 
 export function BQExportPanel({
@@ -32,6 +34,7 @@ export function BQExportPanel({
   onRowEdit,
   onDeleteRow,
   onNavigateToRow,
+  canExport = true,
 }: BQExportPanelProps) {
   const [filterType, setFilterType] = useState<string>("all");
   const [exporting, setExporting] = useState(false);
@@ -661,7 +664,7 @@ export function BQExportPanel({
             <option value="heading1">Heading 1 ({stats.heading1Count})</option>
             <option value="heading2">Heading 2 ({stats.heading2Count})</option>
           </select>
-          <button style={exportBtn} onClick={() => setShowExportModal(true)} disabled={exporting || allRows.length === 0}>📥 Export</button>
+          <button style={exportBtn} onClick={() => setShowExportModal(true)} disabled={!canExport || exporting || allRows.length === 0} title={canExport ? "Export data" : "你的會員類別不允許匯出 BQ 資料"}>📥 Export</button>
         </div>
       </div>
 
