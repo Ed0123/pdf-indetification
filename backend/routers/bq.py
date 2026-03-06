@@ -398,10 +398,43 @@ _PAGE_REF_RE = re.compile(
     re.IGNORECASE,
 )
 
-# Regex for currency/number extraction
-_CURRENCY_NUM_RE = re.compile(
-    r'[\$]?\s*(\d{1,3}(?:,\d{3})*(?:\.\d+)?)'
+# Regex for trailing amount extraction used as a fallback on collection pages.
+# Keep this strict so page refs like "4.5/1" are not misread as amount "1".
+_TRAILING_AMOUNT_RE = re.compile(
+    r'(?:HK\$|US\$|\$)?\s*'
+    r'('
+    r'\d{1,3}(?:,\d{3})+(?:\.\d+)?'   # 1,234 or 1,234.56
+    r'|\d+\.\d{2,}'                    # 123.45
+    r'|[1-9]\d{2,}'                      # >= 100 (plain integer)
+    r')\s*$'
 )
+
+
+def _extract_trailing_amount(text: str) -> float | None:
+    """Extract a probable trailing monetary amount from a collection line.
+
+    This is a fallback path when the Total-column match fails.  We deliberately
+    reject tiny plain integers (e.g. 1..99) and slash-delimited references like
+    "4.5/1" to avoid false positives on summary page references.
+    """
+    if not text:
+        return None
+
+    m = _TRAILING_AMOUNT_RE.search(text)
+    if not m:
+        return None
+
+    # Guard against page-ref tails such as "... 4.5/1" where the matched token
+    # could still be an integer at the end in noisy OCR output.
+    start = m.start(1)
+    if start > 0 and text[start - 1] in "/.":
+        return None
+
+    amount_raw = m.group(1).replace(",", "")
+    try:
+        return float(amount_raw)
+    except ValueError:
+        return None
 
 
 def _parse_collection_entries(
@@ -456,15 +489,10 @@ def _parse_collection_entries(
         elif re.search(r'grand\s*total', text, re.IGNORECASE):
             entry['entry_type'] = 'grand_total'
 
-        # If no total found from total column, try extracting from the line itself
+        # If no total found from total column, try extracting a trailing amount
+        # from the line text with strict heuristics.
         if entry['total'] is None:
-            # Look for trailing number in the description (common in collection pages)
-            num_match = _CURRENCY_NUM_RE.findall(text)
-            if num_match:
-                try:
-                    entry['total'] = float(num_match[-1].replace(",", ""))
-                except ValueError:
-                    pass
+            entry['total'] = _extract_trailing_amount(text)
 
         entries.append(entry)
 
@@ -626,6 +654,13 @@ def _extract_text_from_box(pdf_path: str, page_num: int, box: BoxDefinition, eng
     # page OCR path
     if engine == "page_ocr":
         try:
+            # If vector text already exists in this clip, prefer it to avoid
+            # duplicate/garbled output from OCR-on-top-of-text PDFs.
+            native_text = page.get_text("text", clip=clip_rect).strip()
+            if native_text:
+                doc.close()
+                return native_text
+
             if hasattr(page, "get_textpage_ocr"):
                 tp = page.get_textpage_ocr(flags=0, full=False)
                 text = page.get_text("text", clip=clip_rect, textpage=tp)
@@ -765,12 +800,60 @@ def _parse_bq_rows(
             if not col_x_ranges:
                 col_x_ranges["Description"] = (dr_x0, dr_x1)
             
-            # Extract words from DataRange (include font attributes for style splitting)
-            cropped = page.within_bbox(dr_bbox)
-            words = cropped.extract_words(
-                keep_blank_chars=True, y_tolerance=3, x_tolerance=3,
-                extra_attrs=['fontname', 'size'],
-            )
+            # Extract words from DataRange.
+            # For page_ocr engine, use PyMuPDF OCR words directly; otherwise use
+            # pdfplumber vector-text extraction.
+            words: list[dict] = []
+            if engine == "page_ocr":
+                try:
+                    import fitz
+
+                    with fitz.open(pdf_path) as fdoc:
+                        fpage = fdoc[page_num]
+                        if hasattr(fpage, "get_textpage_ocr"):
+                            tp = fpage.get_textpage_ocr(flags=0, full=False)
+                            ocr_words = fpage.get_text(
+                                "words",
+                                clip=fitz.Rect(dr_x0, dr_y0, dr_x1, dr_y1),
+                                textpage=tp,
+                            ) or []
+
+                            # PyMuPDF words tuple: x0,y0,x1,y1,text,block,line,word
+                            seen_keys: set[tuple] = set()
+                            for w in ocr_words:
+                                if len(w) < 5:
+                                    continue
+                                text = (w[4] or "").strip()
+                                if not text:
+                                    continue
+                                key = (
+                                    text.lower(),
+                                    round(float(w[0]), 1),
+                                    round(float(w[1]), 1),
+                                    round(float(w[2]), 1),
+                                    round(float(w[3]), 1),
+                                )
+                                if key in seen_keys:
+                                    continue
+                                seen_keys.add(key)
+                                words.append({
+                                    "x0": float(w[0]),
+                                    "top": float(w[1]),
+                                    "x1": float(w[2]),
+                                    "bottom": float(w[3]),
+                                    "text": text,
+                                    "fontname": None,
+                                    "size": None,
+                                })
+                except Exception:
+                    words = []
+
+            if not words:
+                cropped = page.within_bbox(dr_bbox)
+                words = cropped.extract_words(
+                    keep_blank_chars=True, y_tolerance=3, x_tolerance=3,
+                    extra_attrs=['fontname', 'size'],
+                )
 
             # Detect underline graphic elements inside the DataRange
             underlines = _detect_underlines(page, dr_bbox)

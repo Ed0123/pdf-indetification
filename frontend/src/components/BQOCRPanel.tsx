@@ -53,6 +53,7 @@ interface BQOCRPanelProps {
   // optional OCR quota info (from parent App)
   usagePages?: number;
   usageLimit?: number; // -1 = unlimited
+  onBusyChange?: (busy: boolean, message?: string) => void;
 }
 
 
@@ -74,6 +75,7 @@ export function BQOCRPanel({
   onUpdateBQTemplate,
   usagePages,
   usageLimit,
+  onBusyChange,
 }: BQOCRPanelProps) {
   // Engine list
   const [engines, setEngines] = useState<BQEngineInfo[]>([]);
@@ -102,6 +104,19 @@ export function BQOCRPanel({
   const [editingRowId, setEditingRowId] = useState<number | null>(null);
   const [editingField, setEditingField] = useState<string | null>(null);
   const [editValue, setEditValue] = useState<string>("");
+
+  useEffect(() => {
+    if (!onBusyChange) return;
+    if (extracting) {
+      if (batchProgress) {
+        onBusyChange(true, `BQ OCR processing ${batchProgress.done}/${batchProgress.total} pages...`);
+      } else {
+        onBusyChange(true, "BQ OCR extracting page...");
+      }
+    } else {
+      onBusyChange(false);
+    }
+  }, [extracting, batchProgress, onBusyChange]);
 
   // Current file/page data
   const file = files.find((f) => f.file_id === selectedFileId);

@@ -47,6 +47,7 @@ interface BQExportPanelProps {
    * so the user understands their tier doesn't include full export access.
    */
   canExport?: boolean;
+  onBusyChange?: (busy: boolean, message?: string) => void;
 }
 
 export function BQExportPanel({
@@ -57,7 +58,23 @@ export function BQExportPanel({
   onNavigateToRow,
   onBatchRecalculate,
   canExport = true,
+  onBusyChange,
 }: BQExportPanelProps) {
+  const buildRowToken = useCallback((row: BQRow): string => {
+    return [
+      row.file_id,
+      row.page_number,
+      row.id,
+      row.type,
+      row.item_no,
+      row.description,
+      row.bbox_x0 ?? "",
+      row.bbox_y0 ?? "",
+      row.bbox_x1 ?? "",
+      row.bbox_y1 ?? "",
+    ].join("|");
+  }, []);
+
   // `canExport` really means "can export formats beyond JSON"; when false we
   // still show the panel and let JSON work, but every other export button will
   // be disabled and the user will see a warning message.
@@ -65,7 +82,7 @@ export function BQExportPanel({
   const [filterType, setFilterType] = useState<string>("all");
   const [exporting, setExporting] = useState(false);
   const [exportError, setExportError] = useState<string | null>(null);
-  const [editingCell, setEditingCell] = useState<{ pageKey: string; rowId: number; field: string } | null>(null);
+  const [editingCell, setEditingCell] = useState<{ pageKey: string; rowId: number; field: string; rowToken: string } | null>(null);
   const [editValue, setEditValue] = useState("");
   // Focused cell (for keyboard nav, highlighted but not editing)
   const [focusedCell, setFocusedCell] = useState<{ rowIdx: number; colIdx: number } | null>(null);
@@ -75,6 +92,15 @@ export function BQExportPanel({
   const tableRef = useRef<HTMLDivElement>(null);
   const [showExportModal, setShowExportModal] = useState(false);
   const [projectId, setProjectId] = useState("");
+
+  useEffect(() => {
+    if (!onBusyChange) return;
+    if (exporting) {
+      onBusyChange(true, "Exporting BQ data...");
+    } else {
+      onBusyChange(false);
+    }
+  }, [exporting, onBusyChange]);
 
   // Export filter state
   const [exportFilterPage, setExportFilterPage] = useState<string>("all");
@@ -130,11 +156,19 @@ export function BQExportPanel({
       pageWidth?: number; pageHeight?: number;
     }> = {};
     for (const [pageKey, pageData] of Object.entries(bqPageData)) {
-      let pageTotal = 0, itemCount = 0, pageLabel = "";
+      let itemCount = 0, pageLabel = "";
       const isCollection = pageData.page_is_collection || pageData.rows.some(r => r.page_is_collection);
       for (const row of pageData.rows) {
-        if (row.type === "item" && row.total !== null) { pageTotal += row.total; itemCount++; }
+        if (row.type === "item" && row.total !== null) itemCount++;
         if (!pageLabel && row.page_label) pageLabel = row.page_label;
+      }
+      let pageTotal = 0;
+      for (const row of pageData.rows) {
+        if (isCollection) {
+          if (row.type === "collection_entry" && row.total !== null) pageTotal += row.total;
+        } else {
+          if (row.type === "item" && row.total !== null) pageTotal += row.total;
+        }
       }
       const collectionBox = pageData.boxes["Collection"];
       const firstRow = pageData.rows[0];
@@ -160,7 +194,7 @@ export function BQExportPanel({
   const pageLabelLookup = useMemo(() => {
     const lookup: Record<string, { pageKey: string; total: number }> = {};
     for (const pt of Object.values(pageTotals)) {
-      if (pt.pageLabel) {
+      if (!pt.isCollection && pt.pageLabel) {
         lookup[pt.pageLabel] = { pageKey: pt.pageKey, total: pt.total };
       }
     }
@@ -172,10 +206,26 @@ export function BQExportPanel({
   const findPageLabel = useCallback((ref: string): string | null => {
     if (!ref) return null;
     if (pageLabelLookup[ref]) return ref;
+
+    const normalize = (v: string) => v.toLowerCase().replace(/[^a-z0-9]/g, "");
+    const refNorm = normalize(ref);
+
+    for (const label of Object.keys(pageLabelLookup)) {
+      if (normalize(label) === refNorm) return label;
+    }
+
     // Try substring match: e.g. ref="4.5/1" matches label="Page No.4.5/1"
     for (const label of Object.keys(pageLabelLookup)) {
       if (label.includes(ref) || ref.includes(label)) return label;
     }
+
+    if (refNorm) {
+      for (const label of Object.keys(pageLabelLookup)) {
+        const labelNorm = normalize(label);
+        if (labelNorm && (labelNorm.includes(refNorm) || refNorm.includes(labelNorm))) return label;
+      }
+    }
+
     return null;
   }, [pageLabelLookup]);
 
@@ -308,7 +358,7 @@ export function BQExportPanel({
   // ──────────────────────────────────────────────────────────────────────────
 
   const handleStartEdit = useCallback((pageKey: string, rowId: number, field: string, currentValue: any, row: BQRow) => {
-    setEditingCell({ pageKey, rowId, field });
+    setEditingCell({ pageKey, rowId, field, rowToken: buildRowToken(row) });
     setEditValue(String(currentValue ?? ""));
     if (onNavigateToRow && row.file_id) {
       const bbox = (row.bbox_x0 !== undefined && row.bbox_y0 !== undefined &&
@@ -317,7 +367,24 @@ export function BQExportPanel({
       const pageSize = (row.page_width && row.page_height) ? { width: row.page_width, height: row.page_height } : null;
       onNavigateToRow(row.file_id, row.page_number, bbox, pageSize);
     }
-  }, [onNavigateToRow]);
+  }, [onNavigateToRow, buildRowToken]);
+
+  // If data got replaced (e.g. re-OCR same page), cancel stale edit mode so
+  // old input cannot be committed onto newly extracted rows.
+  useEffect(() => {
+    if (!editingCell) return;
+    const entry = allRows.find((r) => r.pageKey === editingCell.pageKey && r.row.id === editingCell.rowId);
+    if (!entry) {
+      setEditingCell(null);
+      setEditValue("");
+      return;
+    }
+    const currentToken = buildRowToken(entry.row);
+    if (currentToken !== editingCell.rowToken) {
+      setEditingCell(null);
+      setEditValue("");
+    }
+  }, [editingCell, allRows, buildRowToken]);
 
   const handleSaveEdit = useCallback(() => {
     if (!editingCell) return;
@@ -327,6 +394,20 @@ export function BQExportPanel({
       value = editValue ? parseFloat(editValue) : null;
     }
     const currentRowEntry = allRows.find(r => r.pageKey === pageKey && r.row.id === rowId);
+    if (!currentRowEntry) {
+      setEditingCell(null);
+      setEditValue("");
+      setTimeout(() => tableRef.current?.focus(), 0);
+      return;
+    }
+
+    if (currentRowEntry && buildRowToken(currentRowEntry.row) !== editingCell.rowToken) {
+      setEditingCell(null);
+      setEditValue("");
+      setTimeout(() => tableRef.current?.focus(), 0);
+      return;
+    }
+
     const currentRow = currentRowEntry?.row;
     const newQty = field === "quantity" ? value : currentRow?.quantity;
     const newRate = field === "rate" ? value : currentRow?.rate;
@@ -348,7 +429,7 @@ export function BQExportPanel({
     setEditValue("");
     // Restore keyboard focus to the table so arrow-key navigation keeps working
     setTimeout(() => tableRef.current?.focus(), 0);
-  }, [editingCell, editValue, allRows, onRowEdit, tableRef]);
+  }, [editingCell, editValue, allRows, onRowEdit, tableRef, buildRowToken]);
 
   const handleCancelEdit = useCallback(() => {
     setEditingCell(null);
@@ -682,8 +763,7 @@ export function BQExportPanel({
         }
       }
       if (collectionBox && pageData.rows.length > 0) {
-        let pageTotal = 0;
-        for (const row of pageData.rows) { if (row.type === "item" && row.total !== null) pageTotal += row.total; }
+        const pageTotal = pageTotals[pageKey]?.total ?? 0;
         if (pageTotal > 0) {
           const fr = pageData.rows[0];
           const pw = fr?.page_width ?? 1, ph = fr?.page_height ?? 1;
@@ -996,7 +1076,7 @@ export function BQExportPanel({
               <th style={thEditCol}>Unit</th>
               <th style={thEditCol}>Rate</th>
               <th style={thEditCol}>Total</th>
-              <th style={th}>🗑️</th>
+              <th style={th}>Action</th>
             </tr>
           </thead>
           <tbody>
@@ -1142,6 +1222,7 @@ export function BQExportPanel({
                     );
                   })}
                   <td style={{ ...td, textAlign: "center" }}>
+                    <button style={addBtn} onClick={() => onInsertRow(pageKey, row.id)} title="Insert a row below">➕</button>
                     <button style={deleteBtn} onClick={() => onDeleteRow(pageKey, row.id)} title="Delete">🗑️</button>
                   </td>
                 </tr>
@@ -1215,6 +1296,7 @@ const editInputStyle: React.CSSProperties = {
 const typeTag: React.CSSProperties = { padding: "2px 6px", borderRadius: 3, color: "#fff", fontSize: 9, fontWeight: 600 };
 
 const deleteBtn: React.CSSProperties = { background: "none", border: "none", cursor: "pointer", fontSize: 12, opacity: 0.6 };
+const addBtn: React.CSSProperties = { background: "none", border: "none", cursor: "pointer", fontSize: 12, opacity: 0.8, marginRight: 4 };
 
 const modalOverlay: React.CSSProperties = {
   position: "fixed", top: 0, left: 0, right: 0, bottom: 0,

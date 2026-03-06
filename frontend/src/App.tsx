@@ -139,6 +139,33 @@ export default function App() {
   const [pdfPageSize, setPdfPageSize] = useState<{ width: number; height: number } | null>(null);
   // Show/hide BQ text overlays on PDF viewer
   const [showAnnotations, setShowAnnotations] = useState(true);
+  const [globalBusy, setGlobalBusy] = useState<{ active: boolean; message: string }>({
+    active: false,
+    message: "Processing...",
+  });
+  const busyCountRef = useRef(0);
+
+  const beginGlobalBusy = useCallback((message: string) => {
+    busyCountRef.current += 1;
+    setGlobalBusy({ active: true, message });
+  }, []);
+
+  const endGlobalBusy = useCallback(() => {
+    busyCountRef.current = Math.max(0, busyCountRef.current - 1);
+    if (busyCountRef.current === 0) {
+      setGlobalBusy((prev) => ({ ...prev, active: false }));
+    }
+  }, []);
+
+  const handleChildBusyChange = useCallback((busy: boolean, message?: string) => {
+    if (busy) {
+      setGlobalBusy({ active: true, message: message || "Processing..." });
+      return;
+    }
+    if (busyCountRef.current === 0) {
+      setGlobalBusy((prev) => ({ ...prev, active: false }));
+    }
+  }, []);
 
   const fileInputRef = useRef<HTMLInputElement>(null);
   // map from server file_id → original File (for draft persistence/restore)
@@ -609,6 +636,7 @@ export default function App() {
     const files = Array.from(e.target.files ?? []).filter((f) => f.name.endsWith(".pdf"));
     if (!files.length) return;
     setMsg("Uploading PDFs...", 10);
+    beginGlobalBusy("Uploading PDF files...");
     try {
       const infos = await uploadPDFs(files);
       const fileInfos = infos.map(serverInfoToFileInfo);
@@ -620,6 +648,8 @@ export default function App() {
       setMsg(`Imported ${fileInfos.length} file(s)`, null);
     } catch (err) {
       setMsg(`Import error: ${err}`, null);
+    } finally {
+      endGlobalBusy();
     }
     e.target.value = "";
   };
@@ -627,17 +657,32 @@ export default function App() {
 
   // file deletion is triggered from the PDF tree view now
   const handleDeleteFile = (fileId: string) => {
+    // Purge per-file transient data so viewer/export state does not leak
+    // into the next imported PDF session.
+    setBqPageData((prev) => {
+      const next: Record<string, BQPageData> = {};
+      for (const [k, v] of Object.entries(prev)) {
+        if (!k.startsWith(`${fileId}-`)) next[k] = v;
+      }
+      return next;
+    });
+    delete pdfBlobsRef.current[fileId];
+    setHighlightBox(null);
+    setPdfPageSize(null);
     project.deleteFiles([fileId]);
     setMsg("File deleted");
   };
 
   const handleExportExcel = async () => {
     setMsg("Exporting to Excel...", 50);
+    beginGlobalBusy("Exporting to Excel...");
     try {
       await exportExcel(buildProjectPayload());
       setMsg("Exported successfully");
     } catch (err) {
       setMsg(`Export error: ${err}`);
+    } finally {
+      endGlobalBusy();
     }
   };
 
@@ -741,11 +786,14 @@ export default function App() {
   const handleExportPdfConfirm = async (entries: ExportPageEntry[]) => {
     setShowExportModal(false);
     setMsg(`Exporting ${entries.length} page(s) as ZIP...`, 20);
+    beginGlobalBusy(`Exporting ${entries.length} page(s) to PDF...`);
     try {
       await exportPdfPages(entries);
       setMsg(`Exported ${entries.length} PDF(s)`, null);
     } catch (err) {
       setMsg(`Export error: ${err}`);
+    } finally {
+      endGlobalBusy();
     }
   };
 
@@ -758,68 +806,75 @@ export default function App() {
     setShowRecognizeSelector(false);
     if (!pages.length) return;
 
-    let done = 0;
-    let failures = 0;
-    const total = pages.reduce((sum, sp) => {
-      const file = state.pdf_files.find((f) => f.file_id === sp.file_id);
-      const page = file?.pages.find((p) => p.page_number === sp.page_number);
-      return sum + Object.keys(page?.boxes ?? {}).length;
-    }, 0);
+    beginGlobalBusy("Recognizing selected pages...");
 
-    if (total === 0) { setMsg("No boxes drawn on selected pages"); return; }
-
-    // Check usage limit before starting
     try {
-      const usageCheck = await recordUsage(0); // check without adding
-      if (usageCheck.over_limit) {
-        showError("⚠ 本月 OCR 頁數已達上限，請升級方案。");
-        return;
-      }
-    } catch (err: any) {
-      // If 401 or auth error, stop; otherwise proceed
-      if (err?.message?.includes("401") || err?.message?.includes("登入")) {
-        showError(err.message);
-        return;
-      }
-      console.warn("Usage check unavailable, proceeding:", err);
-    }
 
-    setMsg(`Recognizing text (0/${total})...`, 0);
+      let done = 0;
+      let failures = 0;
+      const total = pages.reduce((sum, sp) => {
+        const file = state.pdf_files.find((f) => f.file_id === sp.file_id);
+        const page = file?.pages.find((p) => p.page_number === sp.page_number);
+        return sum + Object.keys(page?.boxes ?? {}).length;
+      }, 0);
 
-    for (const sp of pages) {
-      const file = state.pdf_files.find((f) => f.file_id === sp.file_id);
-      const page = file?.pages.find((p) => p.page_number === sp.page_number);
-      if (!page) continue;
-      for (const box of Object.values(page.boxes)) {
-        try {
-          const text = await extractText(sp.file_id, sp.page_number, box, status.ocr_available);
-          project.setCell(sp.file_id, sp.page_number, box.column_name, text);
-        } catch (err: any) {
-          failures++;
-          // If auth expired mid-batch, abort remaining
-          if (err?.message?.includes("401") || err?.message?.includes("登入")) {
-            showError("認證已過期，請重新登入後再試。");
-            return;
-          }
-          console.warn(`OCR failed for ${sp.file_id} p${sp.page_number} box ${box.column_name}:`, err);
+      if (total === 0) { setMsg("No boxes drawn on selected pages"); return; }
+
+      // Check usage limit before starting
+      try {
+        const usageCheck = await recordUsage(0); // check without adding
+        if (usageCheck.over_limit) {
+          showError("⚠ 本月 OCR 頁數已達上限，請升級方案。");
+          return;
         }
-        done++;
-        setMsg(`Recognizing text (${done}/${total})...`, Math.round((done / total) * 100));
+      } catch (err: any) {
+        // If 401 or auth error, stop; otherwise proceed
+        if (err?.message?.includes("401") || err?.message?.includes("登入")) {
+          showError(err.message);
+          return;
+        }
+        console.warn("Usage check unavailable, proceeding:", err);
       }
-    }
 
-    // Record usage
-    try {
-      const ocrPages = pages.length;
-      const result = await recordUsage(ocrPages);
-      setUsagePages(result.usage_pages);
-      setUsageLimit(result.limit);
-    } catch (err: any) {
-      console.warn("Usage recording failed:", err);
-    }
+      setMsg(`Recognizing text (0/${total})...`, 0);
 
-    const suffix = failures > 0 ? `（${failures} 個框辨識失敗）` : "";
-    setMsg(`Text recognition complete${suffix}`, null);
+      for (const sp of pages) {
+        const file = state.pdf_files.find((f) => f.file_id === sp.file_id);
+        const page = file?.pages.find((p) => p.page_number === sp.page_number);
+        if (!page) continue;
+        for (const box of Object.values(page.boxes)) {
+          try {
+            const text = await extractText(sp.file_id, sp.page_number, box, status.ocr_available);
+            project.setCell(sp.file_id, sp.page_number, box.column_name, text);
+          } catch (err: any) {
+            failures++;
+            // If auth expired mid-batch, abort remaining
+            if (err?.message?.includes("401") || err?.message?.includes("登入")) {
+              showError("認證已過期，請重新登入後再試。");
+              return;
+            }
+            console.warn(`OCR failed for ${sp.file_id} p${sp.page_number} box ${box.column_name}:`, err);
+          }
+          done++;
+          setMsg(`Recognizing text (${done}/${total})...`, Math.round((done / total) * 100));
+        }
+      }
+
+      // Record usage
+      try {
+        const ocrPages = pages.length;
+        const result = await recordUsage(ocrPages);
+        setUsagePages(result.usage_pages);
+        setUsageLimit(result.limit);
+      } catch (err: any) {
+        console.warn("Usage recording failed:", err);
+      }
+
+      const suffix = failures > 0 ? `（${failures} 個框辨識失敗）` : "";
+      setMsg(`Text recognition complete${suffix}`, null);
+    } finally {
+      endGlobalBusy();
+    }
   };
 
   // Single-page recognize (from SinglePageDataTable)
@@ -1028,6 +1083,19 @@ export default function App() {
     
     const storedPositions = pageData.annotation_positions || {};
     const autoAnnotations: import("./types").TextAnnotation[] = [];
+    const pageIsCollection = pageData.page_is_collection || pageData.rows.some((r) => r.page_is_collection);
+
+    const computePageTotal = () => {
+      let total = 0;
+      for (const r of pageData.rows) {
+        if (pageIsCollection) {
+          if (r.type === "collection_entry" && r.total !== null) total += r.total;
+        } else {
+          if (r.type === "item" && r.total !== null) total += r.total;
+        }
+      }
+      return total;
+    };
     
     for (const row of pageData.rows) {
       if (row.type !== "item" || !row.user_edited) continue;
@@ -1085,15 +1153,32 @@ export default function App() {
         });
       }
     }
+
+    // Collection entry total annotation — align to Total column for collection page rows
+    const totalBox = pageData.boxes["Total"];
+    if (totalBox) {
+      for (const row of pageData.rows) {
+        if (row.type !== "collection_entry" || row.total === null || row.total <= 0) continue;
+        const pageWidth = row.page_width ?? 1;
+        const annId = `auto-coll-total-${row.id}`;
+        const stored = storedPositions[annId];
+        autoAnnotations.push({
+          id: annId,
+          text: row.total.toFixed(2),
+          x: stored?.x ?? ((totalBox.x + totalBox.width) * pageWidth),
+          y: stored?.y ?? ((row.bbox_y0 ?? 0) + 12),
+          font_size: 9,
+          color: "#0000FF",
+          align: "right" as const,
+        });
+      }
+    }
     
     // Page total annotation (shown in Collection box area)
     if (pageData.rows.length > 0) {
       const collectionBox = pageData.boxes["Collection"];
       if (collectionBox) {
-        let pageTotal = 0;
-        for (const row of pageData.rows) {
-          if (row.type === "item" && row.total !== null) pageTotal += row.total;
-        }
+        const pageTotal = computePageTotal();
         if (pageTotal > 0) {
           const firstRow = pageData.rows[0];
           const pw = firstRow?.page_width ?? 1;
@@ -1348,6 +1433,17 @@ export default function App() {
       if (idx === -1) return prev;
       const refRow = pageData.rows[idx];
       const maxId = pageData.rows.reduce((m, r) => Math.max(m, r.id), 0);
+
+      const isCollectionPage = !!(pageData.page_is_collection || refRow.page_is_collection);
+      let defaultType: BQRow["type"] = "item";
+      if (isCollectionPage) {
+        defaultType = refRow.type.startsWith("collection")
+          ? refRow.type
+          : "collection_entry";
+      } else if (refRow.type === "notes") {
+        defaultType = "item";
+      }
+
       const newRow: BQRow = {
         id: maxId + 1,
         file_id: refRow.file_id,
@@ -1357,7 +1453,7 @@ export default function App() {
         bill_name: refRow.bill_name,
         collection: refRow.collection,
         page_is_collection: refRow.page_is_collection,
-        type: "notes",
+        type: defaultType,
         item_no: "",
         description: "",
         quantity: null,
@@ -1633,13 +1729,18 @@ export default function App() {
           onLoad={(data) => {
             project.loadProject(data);
             // Restore BQ OCR state if present
-            if (data.bq_page_data) setBqPageData(data.bq_page_data);
-            if (data.bq_templates) setBqTemplates(data.bq_templates);
+            // Always replace (including empty) to avoid stale data leakage
+            // from previously opened projects.
+            setBqPageData(data.bq_page_data ?? {});
+            setBqTemplates(data.bq_templates ?? []);
+            setHighlightBox(null);
+            setPdfPageSize(null);
             setMsg("已載入雲端專案");
           }}
           onClose={() => setShowCloudProjects(false)}
           onError={showError}
           onMsg={(m) => setMsg(m)}
+          onBusyChange={handleChildBusyChange}
         />
       )}
 
@@ -1811,6 +1912,7 @@ export default function App() {
               onUpdateBQTemplate={handleUpdateBQTemplate}
               usagePages={usagePages}
               usageLimit={usageLimit}
+              onBusyChange={handleChildBusyChange}
             />
           )}
 
@@ -1823,6 +1925,7 @@ export default function App() {
               onNavigateToRow={handleNavigateToRow}
               onBatchRecalculate={handleBQBatchRecalculate}
               canExport={profile?.tier_features?.bq_export !== false}
+              onBusyChange={handleChildBusyChange}
             />
           )}
 
@@ -1935,6 +2038,35 @@ export default function App() {
           }}
         >
           {toastMsg}
+        </div>
+      )}
+
+      {globalBusy.active && (
+        <div
+          style={{
+            position: "fixed",
+            inset: 0,
+            background: "rgba(0, 0, 0, 0.45)",
+            display: "flex",
+            alignItems: "center",
+            justifyContent: "center",
+            zIndex: 100000,
+          }}
+        >
+          <div
+            style={{
+              minWidth: 320,
+              maxWidth: "80vw",
+              background: "#fff",
+              borderRadius: 10,
+              padding: "16px 20px",
+              boxShadow: "0 8px 24px rgba(0,0,0,0.25)",
+              textAlign: "center",
+            }}
+          >
+            <div style={{ fontSize: 14, fontWeight: 700, marginBottom: 8 }}>Please wait</div>
+            <div style={{ fontSize: 13, color: "#444" }}>{globalBusy.message}</div>
+          </div>
         </div>
       )}
     </div>

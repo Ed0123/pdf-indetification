@@ -26,9 +26,10 @@ interface Props {
   onClose: () => void;
   onError: (msg: string) => void;
   onMsg: (msg: string) => void;
+  onBusyChange?: (busy: boolean, message?: string) => void;
 }
 
-export function CloudProjectsPanel({ projectPayload, onLoad, onClose, onError, onMsg }: Props) {
+export function CloudProjectsPanel({ projectPayload, onLoad, onClose, onError, onMsg, onBusyChange }: Props) {
   const [projects, setProjects] = useState<CloudProjectItem[]>([]);
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
@@ -53,6 +54,7 @@ export function CloudProjectsPanel({ projectPayload, onLoad, onClose, onError, o
   const handleSave = async () => {
     const name = newName.trim() || `Project ${new Date().toLocaleDateString()}`;
     setSaving(true);
+    onBusyChange?.(true, "Saving project to cloud...");
     try {
       const created = await createCloudProject(name);
       const payload = projectPayload();
@@ -64,12 +66,14 @@ export function CloudProjectsPanel({ projectPayload, onLoad, onClose, onError, o
       onError(`雲端保存失敗：${err.message || err}`);
     } finally {
       setSaving(false);
+      onBusyChange?.(false);
     }
   };
 
   const handleOverwrite = async (proj: CloudProjectItem) => {
     if (!window.confirm(`確定要覆蓋「${proj.name}」嗎？所有 PDF 和資料將會更新。`)) return;
     setSaving(true);
+    onBusyChange?.(true, "Overwriting cloud project...");
     try {
       const payload = projectPayload();
       await uploadCloudProjectFull(proj.id, payload);
@@ -79,10 +83,12 @@ export function CloudProjectsPanel({ projectPayload, onLoad, onClose, onError, o
       onError(`覆蓋失敗：${err.message || err}`);
     } finally {
       setSaving(false);
+      onBusyChange?.(false);
     }
   };
 
   const handleLoad = async (proj: CloudProjectItem) => {
+    onBusyChange?.(true, `Loading cloud project: ${proj.name}...`);
     try {
       onMsg(`正在從雲端載入「${proj.name}」（含 PDF 還原）…`);
       const data = await loadCloudProjectFull(proj.id);
@@ -96,6 +102,8 @@ export function CloudProjectsPanel({ projectPayload, onLoad, onClose, onError, o
       onClose();
     } catch (err: any) {
       onError(`載入失敗：${err.message || err}`);
+    } finally {
+      onBusyChange?.(false);
     }
   };
 
