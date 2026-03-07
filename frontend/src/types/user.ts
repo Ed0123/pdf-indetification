@@ -46,6 +46,8 @@ export interface UserProfile {
   photo_url: string;        // from Google
   /** Resolved feature flags from the user's tier (returned by GET /me). */
   tier_features?: Record<string, boolean>;
+  /** Per-project size cap (MB), resolved from tier. -1 means unlimited. */
+  project_size_mb?: number;
 }
 
 /** Feature flags that can be toggled per tier */
@@ -58,6 +60,7 @@ export const TIER_FEATURES = [
   { key: "bq_ocr", label: "BQ OCR 提取" },
   { key: "bq_export_page", label: "BQ 匯出頁面（瀏覽）" },
   { key: "bq_export", label: "BQ 數據匯出（下載）" },
+  { key: "auto_backup", label: "自動備份工作階段" },
 ] as const;
 
 export type TierFeatureKey = typeof TIER_FEATURES[number]["key"];

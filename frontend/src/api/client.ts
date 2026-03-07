@@ -194,6 +194,34 @@ export async function replyToMessage(id: string, reply: string): Promise<void> {
 }
 
 // --------------------------------------------------------------------------
+// System Updates (Home changelog)
+// --------------------------------------------------------------------------
+
+export interface SystemUpdateItem {
+  id: string;
+  heading: string;
+  content: string;
+  created_at: string;
+  source?: string;
+}
+
+export async function listSystemUpdates(): Promise<SystemUpdateItem[]> {
+  return request<SystemUpdateItem[]>("/api/system-updates/");
+}
+
+export async function createSystemUpdate(heading: string, content: string): Promise<SystemUpdateItem> {
+  return request<SystemUpdateItem>("/api/system-updates/", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ heading, content }),
+  });
+}
+
+export async function deleteSystemUpdate(id: string): Promise<{ deleted: string }> {
+  return request<{ deleted: string }>(`/api/system-updates/${id}`, { method: "DELETE" });
+}
+
+// --------------------------------------------------------------------------
 // PDF
 // --------------------------------------------------------------------------
 
@@ -488,6 +516,7 @@ export interface TierItem {
   label: string;
   quota: number; // -1 = unlimited
   storage_quota_mb: number; // cloud storage MB, 0 = none, -1 = unlimited
+  project_size_mb: number; // per-project upload cap in MB, -1 = unlimited
   features: Record<string, boolean>; // feature flags
 }
 
@@ -498,19 +527,19 @@ export async function listTiers(): Promise<TierItem[]> {
 
 /** Admin: create a new tier. */
 export async function createTier(
-  data: { name: string; label: string; quota: number; storage_quota_mb?: number; features?: Record<string, boolean> }
+  data: { name: string; label: string; quota: number; storage_quota_mb?: number; project_size_mb?: number; features?: Record<string, boolean> }
 ): Promise<TierItem> {
   return request<TierItem>("/api/users/tiers", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ storage_quota_mb: 0, features: {}, ...data }),
+    body: JSON.stringify({ storage_quota_mb: 0, project_size_mb: 200, features: {}, ...data }),
   });
 }
 
 /** Admin: update a tier. */
 export async function updateTier(
   tierId: string,
-  data: { name?: string; label?: string; quota?: number; storage_quota_mb?: number; features?: Record<string, boolean> }
+  data: { name?: string; label?: string; quota?: number; storage_quota_mb?: number; project_size_mb?: number; features?: Record<string, boolean> }
 ): Promise<TierItem> {
   return request<TierItem>(`/api/users/tiers/${tierId}`, {
     method: "PUT",
@@ -651,6 +680,7 @@ export interface CloudProjectItem {
   id: string;
   name: string;
   owner_uid: string;
+  project_json_path?: string;
   size_bytes: number;
   pdf_count: number;
   page_count: number;
@@ -658,6 +688,24 @@ export interface CloudProjectItem {
   expires_at: string;
   created_at: string;
   updated_at: string;
+  is_current?: boolean;
+  last_backup_at?: string;
+  backup_status?: "idle" | "running" | "ok" | "error";
+}
+
+export interface WorkspaceStartupInfo {
+  current_project: CloudProjectItem | null;
+  has_current_data: boolean;
+  recent_projects: CloudProjectItem[];
+}
+
+export interface WorkspaceBackupDiffPatch {
+  set_fields?: Record<string, any>;
+  upsert_files?: any[];
+  remove_file_ids?: string[];
+  upsert_pages?: Array<{ file_id: string; page_number: number; page: any }>;
+  bq_page_data_upsert?: Record<string, any>;
+  bq_page_data_remove?: string[];
 }
 
 /** List current user's cloud projects. */
@@ -721,6 +769,48 @@ export async function loadCloudProjectFull(
   projectId: string,
 ): Promise<any> {
   return request<any>(`/api/projects/cloud/${projectId}/load-full`, undefined, LONG_TIMEOUT_MS);
+}
+
+export async function getWorkspaceStartup(): Promise<WorkspaceStartupInfo> {
+  return request<WorkspaceStartupInfo>("/api/projects/cloud/startup");
+}
+
+export async function ensureCurrentWorkspaceProject(): Promise<CloudProjectItem> {
+  return request<CloudProjectItem>("/api/projects/cloud/current");
+}
+
+export async function loadCurrentWorkspaceProject(): Promise<any> {
+  return request<any>("/api/projects/cloud/current/load-full", undefined, LONG_TIMEOUT_MS);
+}
+
+export async function backupCurrentWorkspace(payload: any): Promise<CloudProjectItem> {
+  return request<CloudProjectItem>("/api/projects/cloud/current/backup", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+  }, LONG_TIMEOUT_MS);
+}
+
+export async function backupCurrentWorkspaceDiff(patch: WorkspaceBackupDiffPatch): Promise<CloudProjectItem> {
+  return request<CloudProjectItem>("/api/projects/cloud/current/backup-diff", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ patch }),
+  }, LONG_TIMEOUT_MS);
+}
+
+export async function resetCurrentWorkspace(name = "Current Project"): Promise<CloudProjectItem> {
+  return request<CloudProjectItem>("/api/projects/cloud/current/reset", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ name }),
+  });
+}
+
+export async function restoreMissingPdfFromCurrentWorkspace(oldFileId: string): Promise<ServerFileInfo> {
+  return request<ServerFileInfo>(`/api/projects/cloud/current/restore-file/${oldFileId}`, {
+    method: "POST",
+  }, LONG_TIMEOUT_MS);
 }
 
 /** Load a cloud project's JSON data. */

@@ -1,6 +1,7 @@
 import React, { useRef, useEffect, useCallback, useState } from "react";
 import type { BoxInfo, TextAnnotation } from "../types";
 import { renderPage } from "../api/client";
+import { getCachedPage, setCachedPage } from "../storage/pageCache";
 
 interface PDFViewerProps {
   fileId: string | null;
@@ -48,15 +49,37 @@ export function PDFViewer({
   } | null>(null);
   const [imgNatural, setImgNatural] = useState({ w: 0, h: 0 });
 
-  // Fetch page image whenever file/page changes
+  // Fetch page image whenever file/page changes — with cache
   useEffect(() => {
     if (!fileId) { setImgSrc(null); return; }
+    let cancelled = false;
     setLoading(true);
     setError(null);
     setPan({ x: 0, y: 0 });
-    renderPage(fileId, pageNum, 2.0)
-      .then((b64) => { setImgSrc(`data:image/png;base64,${b64}`); setLoading(false); })
-      .catch((e) => { setError(String(e)); setLoading(false); });
+
+    (async () => {
+      // 1. Try cache first
+      const cached = await getCachedPage(fileId, pageNum, 2.0);
+      if (cached && !cancelled) {
+        setImgSrc(`data:image/png;base64,${cached}`);
+        setLoading(false);
+        return;
+      }
+      // 2. Fetch from backend
+      try {
+        const b64 = await renderPage(fileId, pageNum, 2.0);
+        if (!cancelled) {
+          setImgSrc(`data:image/png;base64,${b64}`);
+          setLoading(false);
+          // Cache in background
+          setCachedPage(fileId, pageNum, 2.0, b64).catch(() => {});
+        }
+      } catch (e) {
+        if (!cancelled) { setError(String(e)); setLoading(false); }
+      }
+    })();
+
+    return () => { cancelled = true; };
   }, [fileId, pageNum]);
 
   // Redraw canvas: boxes + highlight (annotations are now DOM overlays)
@@ -239,10 +262,24 @@ export function PDFViewer({
         onMouseLeave={() => { setDrawing(null); pandStartRef.current = null; }}
         onContextMenu={(e) => e.preventDefault()}
       >
-        {loading && <div style={centeredOverlay}>Loading page...</div>}
+        {loading && (
+          <div style={centeredOverlay}>
+            <div style={{ display: "flex", flexDirection: "column", alignItems: "center", gap: 8 }}>
+              <div style={{
+                width: 24, height: 24, border: "2px solid rgba(255,255,255,0.3)", borderTopColor: "#fff",
+                borderRadius: "50%", animation: "spin 0.8s linear infinite",
+              }} />
+              <style>{`@keyframes spin { to { transform: rotate(360deg); } }`}</style>
+              <span>Loading page...</span>
+            </div>
+          </div>
+        )}
         {error && <div style={{ ...centeredOverlay, color: "#f55" }}>{error}</div>}
         {!loading && !imgSrc && !error && (
-          <div style={centeredOverlay}>Select a page from the tree to view it here</div>
+          <div style={{ ...centeredOverlay, flexDirection: "column", gap: 6 }}>
+            <span style={{ fontSize: 32, opacity: 0.5 }}>📄</span>
+            <span>從左側選擇頁面</span>
+          </div>
         )}
 
         {imgSrc && (

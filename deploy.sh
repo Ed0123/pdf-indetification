@@ -12,6 +12,11 @@
 #     GMAIL_USER           – sender address (mcqshk@gmail.com)
 #     GMAIL_APP_PASSWORD   – 16‑character App Password (Google Account > Security > App Passwords)
 #     ADMIN_NOTIFY_EMAIL   – (optional) recipient for new-user alerts; default is GMAIL_USER
+#     DEPLOY_UPDATE_TOKEN  – (optional) token for posting deploy update notes
+#
+# Optional deploy note env vars:
+#     DEPLOY_UPDATE_HEADING  – update heading (default: 系統更新)
+#     DEPLOY_UPDATE_TEXT     – simple Chinese summary for end users
 #
 # If the agent runs this script, it must set those vars (or the run will
 # succeed but email functionality will be disabled); the script itself will
@@ -54,6 +59,7 @@ ENV_VARS="STORAGE_BUCKET=${STORAGE_BUCKET}"
 [[ -n "$GMAIL_USER" ]] && ENV_VARS="${ENV_VARS},GMAIL_USER=${GMAIL_USER}"
 [[ -n "$GMAIL_APP_PASSWORD" ]] && ENV_VARS="${ENV_VARS},GMAIL_APP_PASSWORD=${GMAIL_APP_PASSWORD}"
 [[ -n "$ADMIN_NOTIFY_EMAIL" ]] && ENV_VARS="${ENV_VARS},ADMIN_NOTIFY_EMAIL=${ADMIN_NOTIFY_EMAIL}"
+[[ -n "$DEPLOY_UPDATE_TOKEN" ]] && ENV_VARS="${ENV_VARS},DEPLOY_UPDATE_TOKEN=${DEPLOY_UPDATE_TOKEN}"
 
 gcloud run deploy "${SERVICE}" \
   --source . \
@@ -86,3 +92,19 @@ echo ""
 echo "✅ Done!"
 echo "   Frontend : https://${PROJECT}.web.app"
 echo "   Backend  : ${BACKEND_URL}"
+
+if [[ -n "$DEPLOY_UPDATE_TEXT" ]]; then
+  if [[ -z "$DEPLOY_UPDATE_TOKEN" ]]; then
+    echo "⚠ DEPLOY_UPDATE_TEXT 已提供，但未設定 DEPLOY_UPDATE_TOKEN，略過更新日誌推送。"
+  else
+    echo "=== 5. Push deploy update note ==="
+    HEADING="${DEPLOY_UPDATE_HEADING:-系統更新}"
+    NOW_UTC=$(date -u +"%Y-%m-%d %H:%M UTC")
+    CONTENT="${NOW_UTC} 更新：${DEPLOY_UPDATE_TEXT}"
+    curl -sS -X POST "${BACKEND_URL}/api/system-updates/deploy-push" \
+      -H "Content-Type: application/json" \
+      -H "X-Deploy-Token: ${DEPLOY_UPDATE_TOKEN}" \
+      -d "$(printf '{"heading":"%s","content":"%s"}' "${HEADING//\"/\\\"}" "${CONTENT//\"/\\\"}")" \
+      >/dev/null && echo "已推送更新日誌。"
+  fi
+fi

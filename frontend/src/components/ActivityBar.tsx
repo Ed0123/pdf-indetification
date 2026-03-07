@@ -12,6 +12,7 @@
 import React from "react";
 
 export type ModuleId = 
+  | "home"
   | "singlepage"
   | "bq_ocr"
   | "bq_export"
@@ -35,6 +36,9 @@ interface ModuleConfig {
 }
 
 const MODULES: ModuleConfig[] = [
+  // Home dashboard appears first for post-login context and alerts.
+  { id: "home", icon: "🏠", label: "Home", shortLabel: "Home", description: "System updates, quota, and access overview", group: 0 },
+
   // Template management stands alone in its own group (1)
   { id: "templates", icon: "📝", label: "Templates", shortLabel: "Tmpl", description: "Manage extraction templates", group: 1 },
 
@@ -103,10 +107,10 @@ export function ActivityBar({
         key={mod.id}
         style={{
           ...moduleBtn,
-          background: isActive ? "#fff" : "transparent",
-          color: isActive ? "#333" : isLocked ? "#bbb" : "#666",
+          background: isActive ? "#ffffff" : "transparent",
+          color: isActive ? "#1f2d3a" : isLocked ? "#b7c1ca" : "#607183",
           cursor: isLocked ? "not-allowed" : "pointer",
-          borderLeft: isActive ? "3px solid #3498db" : "3px solid transparent",
+          borderLeft: isActive ? "3px solid #2e8ecb" : "3px solid transparent",
         }}
         onClick={() => !isLocked && onModuleChange(mod.id)}
         disabled={isLocked}
@@ -152,8 +156,8 @@ export function ActivityBar({
 const container: React.CSSProperties = {
   display: "flex",
   flexDirection: "column",
-  background: "#f5f5f5",
-  borderRight: "1px solid #e0e0e0",
+  background: "linear-gradient(180deg, #f7fbff 0%, #f4f8f7 100%)",
+  borderRight: "1px solid #d8e4ef",
   width: "fit-content",
   minWidth: 48,
   height: "100%",
@@ -171,6 +175,8 @@ const moduleBtn: React.CSSProperties = {
   transition: "all 0.15s ease",
   position: "relative",
   minHeight: 56,
+  borderRadius: 8,
+  margin: "2px 4px",
 };
 
 const lockIcon: React.CSSProperties = {
@@ -182,7 +188,7 @@ const lockIcon: React.CSSProperties = {
 
 const separator: React.CSSProperties = {
   height: 1,
-  background: "#ddd",
+  background: "#dce7f1",
   margin: "4px 0",
   width: "100%",
 };

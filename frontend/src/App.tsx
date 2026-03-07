@@ -18,11 +18,12 @@ import { BQExportPanel } from "./components/BQExportPanel";
 import { TemplateManagerPanel } from "./components/TemplateManagerPanel";
 import { ExcelExportPanel } from "./components/ExcelExportPanel";
 import { PDFExportPanel } from "./components/PDFExportPanel";
+import { HomePanel } from "./components/HomePanel";
 import { FeedbackButton } from "./components/FeedbackButton";
 import type { SelectedPage } from "./components/PageSelectorModal";
 import { useProject } from "./hooks/useProject";
 import { useAuth } from "./hooks/useAuth";
-import { saveDraft, loadDraft, clearDraft } from "./storage/localDraft";
+import { saveDraft } from "./storage/localDraft";
 import type { DraftPayload } from "./storage/localDraft";
 import type { PDFFileInfo, PageData, StatusInfo, Template, TemplateBox, BoxInfo, BQPageData, BQRow, BQTemplate } from "./types";
 import type { UserProfile } from "./types/user";
@@ -50,6 +51,16 @@ import {
   recordUsage,
   listCloudTemplates,
   installMissingFileHandler,
+  restoreMissingPdfFromCurrentWorkspace,
+  getWorkspaceStartup,
+  ensureCurrentWorkspaceProject,
+  loadCurrentWorkspaceProject,
+  backupCurrentWorkspace,
+  backupCurrentWorkspaceDiff,
+  resetCurrentWorkspace,
+  listSystemUpdates,
+  createSystemUpdate,
+  deleteSystemUpdate,
   createCloudTemplate,
   updateCloudTemplate,
   deleteCloudTemplate,
@@ -61,12 +72,17 @@ import {
   updateBQTemplate,
   deleteBQTemplate,
 } from "./api/client";
-import type { GroupItem, TierItem, ServerFileInfo, CloudTemplate, BQTemplateAPI } from "./api/client";
+import type { GroupItem, TierItem, ServerFileInfo, CloudTemplate, BQTemplateAPI, CloudProjectItem, SystemUpdateItem, WorkspaceBackupDiffPatch } from "./api/client";
 
 // Route views
 type AppView = "login" | "account" | "admin" | "main";
+type BackupMode = "manual" | "smart" | "aggressive";
 
 const IS_DEV_MODE = import.meta.env.VITE_DEV_MODE === "1";
+
+const round2 = (value: number): number => Math.round((value + Number.EPSILON) * 100) / 100;
+const formatMoney = (value: number): string => round2(value).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+const formatQuantity = (value: number): string => value.toLocaleString(undefined, { minimumFractionDigits: 0, maximumFractionDigits: 2 });
 
 export default function App() {
   const project = useProject();
@@ -84,6 +100,18 @@ export default function App() {
   // Usage tracking
   const [usagePages, setUsagePages] = useState(0);
   const [usageLimit, setUsageLimit] = useState<number>(-1);
+  const [systemUpdates, setSystemUpdates] = useState<SystemUpdateItem[]>([]);
+  const [startupCurrent, setStartupCurrent] = useState<CloudProjectItem | null>(null);
+  const [hasCurrentData, setHasCurrentData] = useState(false);
+  const [backupEnabled, setBackupEnabled] = useState(true);
+  const [backupMode, setBackupMode] = useState<BackupMode>("smart");
+  const [backupStatus, setBackupStatus] = useState<"idle" | "running" | "ok" | "error">("idle");
+  const [backupAt, setBackupAt] = useState<string | null>(null);
+  const [backupWrites, setBackupWrites] = useState(0);
+  const [backupSkips, setBackupSkips] = useState(0);
+  const [localSnapshotAt, setLocalSnapshotAt] = useState<string | null>(null);
+  const lastBackupSignatureRef = useRef<string>("");
+  const lastBackedPayloadRef = useRef<any | null>(null);
 
   // Global error toast
   const [toastMsg, setToastMsg] = useState<string | null>(null);
@@ -121,7 +149,7 @@ export default function App() {
   const [contentWidth, setContentWidth] = useState(48); // percentage
 
   // Activity bar module selection
-  const [activeModule, setActiveModuleRaw] = useState<ModuleId>("singlepage");
+  const [activeModule, setActiveModuleRaw] = useState<ModuleId>("home");
   // Reset drawing state when switching modules
   const setActiveModule = useCallback((m: ModuleId) => {
     setActiveModuleRaw(m);
@@ -189,12 +217,35 @@ export default function App() {
     // missing-file handler will attempt to re-upload using cached blob
     installMissingFileHandler(async (oldId) => {
       const blob = pdfBlobsRef.current[oldId];
-      if (!blob) return null;
+      if (blob) {
+        try {
+          const infos = await uploadPDFs([blob]);
+          if (infos && infos[0]) {
+            const newInfo = serverInfoToFileInfo(infos[0]);
+            // merge old page data
+            const oldFile = project.state.pdf_files.find((f) => f.file_id === oldId);
+            if (oldFile) {
+              newInfo.pages = newInfo.pages.map((p, idx) => {
+                const oldPage = oldFile.pages[idx];
+                return oldPage ? { ...p, extracted_data: oldPage.extracted_data, boxes: oldPage.boxes } : p;
+              });
+            }
+            project.replaceFile(oldId, newInfo);
+            // keep blob under new id too
+            pdfBlobsRef.current[infos[0].file_id] = blob;
+            delete pdfBlobsRef.current[oldId];
+            return infos[0].file_id;
+          }
+        } catch (err) {
+          console.warn("reupload failed for", oldId, err);
+        }
+      }
+
+      // Fallback: recover from current cloud workspace backup.
       try {
-        const infos = await uploadPDFs([blob]);
-        if (infos && infos[0]) {
-          const newInfo = serverInfoToFileInfo(infos[0]);
-          // merge old page data
+        const restored = await restoreMissingPdfFromCurrentWorkspace(oldId);
+        if (restored?.file_id) {
+          const newInfo = serverInfoToFileInfo(restored);
           const oldFile = project.state.pdf_files.find((f) => f.file_id === oldId);
           if (oldFile) {
             newInfo.pages = newInfo.pages.map((p, idx) => {
@@ -203,13 +254,10 @@ export default function App() {
             });
           }
           project.replaceFile(oldId, newInfo);
-          // keep blob under new id too
-          pdfBlobsRef.current[infos[0].file_id] = blob;
-          delete pdfBlobsRef.current[oldId];
-          return infos[0].file_id;
+          return restored.file_id;
         }
       } catch (err) {
-        console.warn("reupload failed for", oldId, err);
+        console.warn("cloud restore failed for", oldId, err);
       }
       return null;
     });
@@ -238,6 +286,7 @@ export default function App() {
           setView("account");
         } else {
           setView("main");
+          setActiveModuleRaw("home");
         }
         // Fetch usage limit (quota check with 0 pages)
         recordUsage(0)
@@ -300,6 +349,10 @@ export default function App() {
 
   const autosaveTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
 
+  const backupPrefsKey = auth.user ? `backupPrefs:${auth.user.uid}` : null;
+  const backupStatsKey = auth.user ? `backupStats:${auth.user.uid}` : null;
+  const localSnapshotKey = auth.user ? `localSnapshot:${auth.user.uid}` : null;
+
   useEffect(() => {
     const uid = auth.user?.uid;
     if (!uid || state.pdf_files.length === 0) return;
@@ -330,35 +383,29 @@ export default function App() {
     };
   }, [state.pdf_files, state.columns, state.templates, state.selected_file_id, state.selected_page, auth.user, bqPageData, bqTemplates]);
 
-  // Offer to restore draft on login
-  const draftRestoreAttempted = useRef(false);
+  // Startup workflow data for Home (current session + update feed)
   useEffect(() => {
-    if (draftRestoreAttempted.current) return;
-    const uid = auth.user?.uid;
-    if (!uid || view !== "main") return;
-    draftRestoreAttempted.current = true;
+    if (IS_DEV_MODE) return;
+    if (!auth.user || view !== "main") return;
 
-    loadDraft(uid).then((draft) => {
-      if (!draft || !draft.payload.pdf_files?.length) return;
-      const minutesAgo = Math.round((Date.now() - draft.savedAt.getTime()) / 60000);
-      const label = minutesAgo < 1 ? "不到一分鐘前" : `${minutesAgo} 分鐘前`;
-      const ok = window.confirm(
-        `發現自動保存的草稿（${label}，${draft.payload.pdf_files.length} 個檔案）。\n\n要恢復嗎？（注意：如果伺服器暫存消失，會自動重傳原始 PDF）`
-      );
-      if (ok) {
-        project.restoreFromDraft(draft.payload);
-        // restore pdf blobs so they can be re‑uploaded later if needed
-        if (draft.payload.pdf_blobs) {
-          pdfBlobsRef.current = { ...draft.payload.pdf_blobs };
+    getWorkspaceStartup()
+      .then((info) => {
+        setStartupCurrent(info.current_project ?? null);
+        setHasCurrentData(Boolean(info.has_current_data));
+        if (info.current_project?.last_backup_at) {
+          setBackupAt(info.current_project.last_backup_at);
         }
-        // restore BQ OCR state
-        if (draft.payload.bq_page_data) setBqPageData(draft.payload.bq_page_data);
-        if (draft.payload.bq_templates) setBqTemplates(draft.payload.bq_templates);
-        setMsg("已恢復自動保存的草稿（PDF 需重新上傳）");
-      } else {
-        clearDraft(uid).catch(() => {});
-      }
-    }).catch(() => {});
+        if (info.current_project?.backup_status) {
+          setBackupStatus(info.current_project.backup_status);
+        }
+      })
+      .catch((err) => {
+        console.warn("Failed to load startup workspace info", err);
+      });
+
+    listSystemUpdates()
+      .then((items) => setSystemUpdates(items))
+      .catch((err) => console.warn("Failed to load system updates", err));
   }, [view, auth.user]);
 
   // --------------------------------------------------------------------------
@@ -492,6 +539,7 @@ export default function App() {
       // If status is now active, allow going to main
       if (updated.status === "active") {
         setView("main");
+        setActiveModuleRaw("home");
       }
     } catch (err: any) {
       showError(`儲存個人資料失敗：${err.message || err}`);
@@ -564,7 +612,7 @@ export default function App() {
     }
   };
 
-  const handleCreateTier = async (data: { name: string; label: string; quota: number }) => {
+  const handleCreateTier = async (data: { name: string; label: string; quota: number; storage_quota_mb?: number; project_size_mb?: number; features?: Record<string, boolean> }) => {
     try {
       await createTier(data);
       await refreshAdminData();
@@ -573,7 +621,7 @@ export default function App() {
     }
   };
 
-  const handleUpdateTier = async (tierId: string, data: { name?: string; label?: string; quota?: number }) => {
+  const handleUpdateTier = async (tierId: string, data: { name?: string; label?: string; quota?: number; storage_quota_mb?: number; project_size_mb?: number; features?: Record<string, boolean> }) => {
     try {
       await updateTier(tierId, data);
       await refreshAdminData();
@@ -595,7 +643,7 @@ export default function App() {
   // Helpers
   // --------------------------------------------------------------------------
 
-  const buildProjectPayload = () => ({
+  const buildProjectPayload = useCallback(() => ({
     pdf_files: state.pdf_files.map((f) => ({
       ...f,
       pages: f.pages.map((p) => ({
@@ -610,7 +658,382 @@ export default function App() {
     // BQ OCR state — persisted for cloud restore
     bq_page_data: bqPageData,
     bq_templates: bqTemplates,
-  });
+  }), [state.pdf_files, state.columns, state.templates, state.selected_file_id, state.selected_page, bqPageData, bqTemplates]);
+
+  const buildBackupDiffPatch = useCallback((prevPayload: any, nextPayload: any): WorkspaceBackupDiffPatch | null => {
+    const asStr = (v: any) => JSON.stringify(v ?? null);
+    const patch: WorkspaceBackupDiffPatch = {};
+
+    const setFields: Record<string, any> = {};
+    const scalarOrSmallKeys = [
+      "columns",
+      "templates",
+      "last_selected_file",
+      "last_selected_page",
+      "bq_templates",
+    ];
+    for (const key of scalarOrSmallKeys) {
+      if (asStr(prevPayload?.[key]) !== asStr(nextPayload?.[key])) {
+        setFields[key] = nextPayload?.[key];
+      }
+    }
+    if (Object.keys(setFields).length > 0) {
+      patch.set_fields = setFields;
+    }
+
+    const prevFiles: Map<string, any> = new Map((prevPayload?.pdf_files ?? []).map((f: any) => [f.file_id, f]));
+    const nextFiles: Map<string, any> = new Map((nextPayload?.pdf_files ?? []).map((f: any) => [f.file_id, f]));
+
+    const removeFileIds: string[] = [];
+    prevFiles.forEach((_, fid) => {
+      if (!nextFiles.has(fid)) removeFileIds.push(fid);
+    });
+    if (removeFileIds.length > 0) {
+      patch.remove_file_ids = removeFileIds;
+    }
+
+    const upsertFiles: any[] = [];
+    const upsertPages: Array<{ file_id: string; page_number: number; page: any }> = [];
+
+    nextFiles.forEach((nextFile, fid) => {
+      const prevFile = prevFiles.get(fid);
+      if (!prevFile) {
+        upsertFiles.push(nextFile);
+        return;
+      }
+
+      const nextMeta = {
+        file_id: nextFile.file_id,
+        file_name: nextFile.file_name,
+        num_pages: nextFile.num_pages,
+        file_size: nextFile.file_size,
+      };
+      const prevMeta = {
+        file_id: prevFile.file_id,
+        file_name: prevFile.file_name,
+        num_pages: prevFile.num_pages,
+        file_size: prevFile.file_size,
+      };
+
+      if (asStr(nextMeta) !== asStr(prevMeta)) {
+        upsertFiles.push(nextFile);
+        return;
+      }
+
+      const prevPages = new Map((prevFile.pages ?? []).map((p: any) => [p.page_number, p]));
+      const nextPages = nextFile.pages ?? [];
+      if ((prevFile.pages ?? []).length !== nextPages.length) {
+        upsertFiles.push(nextFile);
+        return;
+      }
+
+      let changedPageCount = 0;
+      for (const page of nextPages) {
+        const oldPage = prevPages.get(page.page_number);
+        if (!oldPage || asStr(oldPage) !== asStr(page)) {
+          upsertPages.push({ file_id: fid, page_number: page.page_number, page });
+          changedPageCount += 1;
+        }
+      }
+
+      // If many pages changed in the same file, replacing file payload is cheaper.
+      if (changedPageCount > 0 && changedPageCount >= Math.ceil(nextPages.length / 2)) {
+        upsertFiles.push(nextFile);
+      }
+    });
+
+    if (upsertFiles.length > 0) {
+      patch.upsert_files = upsertFiles;
+    }
+
+    if (upsertPages.length > 0) {
+      const fullReplaceIds = new Set((patch.upsert_files ?? []).map((f: any) => f.file_id));
+      patch.upsert_pages = upsertPages.filter((p) => !fullReplaceIds.has(p.file_id));
+      if ((patch.upsert_pages ?? []).length === 0) {
+        delete patch.upsert_pages;
+      }
+    }
+
+    const prevBq = prevPayload?.bq_page_data ?? {};
+    const nextBq = nextPayload?.bq_page_data ?? {};
+    const bqUpsert: Record<string, any> = {};
+    const bqRemove: string[] = [];
+
+    for (const key of Object.keys(nextBq)) {
+      if (asStr(prevBq[key]) !== asStr(nextBq[key])) {
+        bqUpsert[key] = nextBq[key];
+      }
+    }
+    for (const key of Object.keys(prevBq)) {
+      if (!(key in nextBq)) {
+        bqRemove.push(key);
+      }
+    }
+
+    if (Object.keys(bqUpsert).length > 0) {
+      patch.bq_page_data_upsert = bqUpsert;
+    }
+    if (bqRemove.length > 0) {
+      patch.bq_page_data_remove = bqRemove;
+    }
+
+    const hasData =
+      (patch.set_fields && Object.keys(patch.set_fields).length > 0) ||
+      (patch.upsert_files && patch.upsert_files.length > 0) ||
+      (patch.remove_file_ids && patch.remove_file_ids.length > 0) ||
+      (patch.upsert_pages && patch.upsert_pages.length > 0) ||
+      (patch.bq_page_data_upsert && Object.keys(patch.bq_page_data_upsert).length > 0) ||
+      (patch.bq_page_data_remove && patch.bq_page_data_remove.length > 0);
+
+    return hasData ? patch : null;
+  }, []);
+
+  const localSnapshotSizeBytes = useMemo(() => {
+    try {
+      return new Blob([JSON.stringify(buildProjectPayload())]).size;
+    } catch {
+      return 0;
+    }
+  }, [buildProjectPayload]);
+
+  const refreshHomeData = useCallback(async () => {
+    try {
+      const info = await getWorkspaceStartup();
+      setStartupCurrent(info.current_project ?? null);
+      setHasCurrentData(Boolean(info.has_current_data));
+      if (info.current_project?.backup_status) setBackupStatus(info.current_project.backup_status);
+      if (info.current_project?.last_backup_at) setBackupAt(info.current_project.last_backup_at);
+    } catch (err) {
+      console.warn("refreshHomeData failed", err);
+    }
+    try {
+      const items = await listSystemUpdates();
+      setSystemUpdates(items);
+    } catch (err) {
+      console.warn("listSystemUpdates failed", err);
+    }
+  }, []);
+
+  const handleCreateSystemUpdate = useCallback(async (heading: string, content: string) => {
+    await createSystemUpdate(heading, content);
+    await refreshHomeData();
+  }, [refreshHomeData]);
+
+  const handleDeleteSystemUpdate = useCallback(async (id: string) => {
+    await deleteSystemUpdate(id);
+    await refreshHomeData();
+  }, [refreshHomeData]);
+
+  const handleResumeLastSession = useCallback(async () => {
+    beginGlobalBusy("正在載入上次工作階段...");
+    try {
+      const data = await loadCurrentWorkspaceProject();
+      if (data?.empty) {
+        setMsg("沒有可恢復的上次工作階段");
+        return;
+      }
+      project.loadProject(data);
+      setBqPageData(data.bq_page_data ?? {});
+      setBqTemplates(data.bq_templates ?? []);
+      setHighlightBox(null);
+      setPdfPageSize(null);
+      lastBackedPayloadRef.current = null;
+      setMsg("已回到上次工作階段");
+      setActiveModuleRaw("singlepage");
+    } catch (err: any) {
+      showError(`載入上次工作階段失敗：${err.message || err}`);
+    } finally {
+      endGlobalBusy();
+    }
+  }, [beginGlobalBusy, endGlobalBusy, project, showError]);
+
+  const handleStartNewSession = useCallback(async () => {
+    const ok = window.confirm("要開新工作嗎？目前畫面資料會清空，並建立新的 Current Project。");
+    if (!ok) return;
+    beginGlobalBusy("正在建立新工作階段...");
+    try {
+      await resetCurrentWorkspace(`Current Project ${new Date().toLocaleDateString()}`);
+      project.loadProject({
+        pdf_files: [],
+        columns: [{ name: "Title", visible: true }, { name: "Page Name", visible: true }],
+        templates: [],
+        selected_file_id: null,
+        selected_page: 0,
+      } as any);
+      setBqPageData({});
+      setBqTemplates([]);
+      lastBackedPayloadRef.current = null;
+      setMsg("已開啟新工作");
+      await refreshHomeData();
+    } catch (err: any) {
+      showError(`建立新工作失敗：${err.message || err}`);
+    } finally {
+      endGlobalBusy();
+    }
+  }, [beginGlobalBusy, endGlobalBusy, project, refreshHomeData, showError]);
+
+  const runAutoBackup = useCallback(async (reason: string) => {
+    if (!auth.user) return;
+    if (!backupEnabled) return;
+    if ((profile?.tier_features?.auto_backup ?? false) !== true) return;
+    if (backupMode === "manual" && reason !== "manual") return;
+    if (backupMode === "smart" && reason === "upload") return;
+
+    const payload = buildProjectPayload();
+    const signature = JSON.stringify({
+      files: payload.pdf_files.map((f: any) => ({ id: f.file_id, size: f.file_size, pages: f.pages.length })),
+      columns: payload.columns,
+      templates: payload.templates,
+      bq_page_data: payload.bq_page_data,
+      bq_templates: payload.bq_templates,
+    });
+
+    if (signature === lastBackupSignatureRef.current) {
+      setBackupSkips((prev) => prev + 1);
+      return;
+    }
+
+    setBackupStatus("running");
+    try {
+      await ensureCurrentWorkspaceProject();
+      const prevPayload = lastBackedPayloadRef.current;
+      let saved: CloudProjectItem;
+      if (prevPayload) {
+        const patch = buildBackupDiffPatch(prevPayload, payload);
+        if (patch) {
+          try {
+            saved = await backupCurrentWorkspaceDiff(patch);
+          } catch (err: any) {
+            // Fallback for transient/API mismatch cases.
+            console.warn("diff backup failed, fallback to full backup", err);
+            saved = await backupCurrentWorkspace(payload);
+          }
+        } else {
+          setBackupSkips((prev) => prev + 1);
+          setBackupStatus("ok");
+          return;
+        }
+      } else {
+        saved = await backupCurrentWorkspace(payload);
+      }
+      lastBackupSignatureRef.current = signature;
+      lastBackedPayloadRef.current = payload;
+      setBackupWrites((prev) => prev + 1);
+      setBackupStatus("ok");
+      setBackupAt(saved.last_backup_at || new Date().toISOString());
+      setStartupCurrent(saved);
+      setHasCurrentData(Boolean(saved.project_json_path));
+      setMsg(reason === "timer" ? "已自動備份工作階段" : "已更新 Current Project");
+    } catch (err: any) {
+      setBackupStatus("error");
+      console.warn("auto backup failed", err);
+    }
+  }, [auth.user, backupEnabled, profile?.tier_features, buildProjectPayload, backupMode, buildBackupDiffPatch]);
+
+  const saveLocalSnapshot = useCallback(() => {
+    if (!localSnapshotKey) return;
+    const payload = buildProjectPayload();
+    const savedAt = new Date().toISOString();
+    try {
+      localStorage.setItem(localSnapshotKey, JSON.stringify({ ...payload, saved_at: savedAt }));
+      setLocalSnapshotAt(savedAt);
+    } catch (err: any) {
+      showError(`本機快照儲存失敗：${err?.message || err}`);
+    }
+  }, [buildProjectPayload, localSnapshotKey, showError]);
+
+  const handleManualBackup = useCallback(async () => {
+    await runAutoBackup("manual");
+  }, [runAutoBackup]);
+
+  const handleRestoreLocalSnapshot = useCallback(() => {
+    if (!localSnapshotKey) return;
+    const raw = localStorage.getItem(localSnapshotKey);
+    if (!raw) {
+      setMsg("沒有可恢復的本機快照");
+      return;
+    }
+    try {
+      const data = JSON.parse(raw);
+      project.loadProject(data);
+      setBqPageData(data.bq_page_data ?? {});
+      setBqTemplates(data.bq_templates ?? []);
+      setHighlightBox(null);
+      setPdfPageSize(null);
+      setMsg("已從本機快照恢復");
+      setActiveModuleRaw("singlepage");
+    } catch (err: any) {
+      showError(`本機快照格式錯誤：${err?.message || err}`);
+    }
+  }, [localSnapshotKey, project, showError]);
+
+  useEffect(() => {
+    if (!backupPrefsKey) return;
+    const raw = localStorage.getItem(backupPrefsKey);
+    if (!raw) return;
+    try {
+      const prefs = JSON.parse(raw) as { enabled?: boolean; mode?: BackupMode };
+      if (typeof prefs.enabled === "boolean") setBackupEnabled(prefs.enabled);
+      if (prefs.mode === "manual" || prefs.mode === "smart" || prefs.mode === "aggressive") {
+        setBackupMode(prefs.mode);
+      }
+    } catch {
+      // ignore malformed local preference
+    }
+  }, [backupPrefsKey]);
+
+  useEffect(() => {
+    if (!backupPrefsKey) return;
+    localStorage.setItem(backupPrefsKey, JSON.stringify({ enabled: backupEnabled, mode: backupMode }));
+  }, [backupEnabled, backupMode, backupPrefsKey]);
+
+  useEffect(() => {
+    if (!backupStatsKey) return;
+    const raw = localStorage.getItem(backupStatsKey);
+    if (!raw) return;
+    try {
+      const stats = JSON.parse(raw) as { writes?: number; skips?: number; localSnapshotAt?: string | null };
+      if (typeof stats.writes === "number") setBackupWrites(stats.writes);
+      if (typeof stats.skips === "number") setBackupSkips(stats.skips);
+      if (typeof stats.localSnapshotAt === "string") setLocalSnapshotAt(stats.localSnapshotAt);
+    } catch {
+      // ignore malformed local stats
+    }
+  }, [backupStatsKey]);
+
+  useEffect(() => {
+    if (!backupStatsKey) return;
+    localStorage.setItem(
+      backupStatsKey,
+      JSON.stringify({ writes: backupWrites, skips: backupSkips, localSnapshotAt: localSnapshotAt ?? null })
+    );
+  }, [backupStatsKey, backupWrites, backupSkips, localSnapshotAt]);
+
+  useEffect(() => {
+    if (view !== "main" || !auth.user) return;
+    if (backupMode === "manual") return;
+    const intervalMs = backupMode === "aggressive" ? 5 * 60 * 1000 : 15 * 60 * 1000;
+    const timer = setInterval(() => {
+      runAutoBackup("timer").catch(() => {});
+    }, intervalMs);
+    return () => clearInterval(timer);
+  }, [view, auth.user, runAutoBackup, backupMode]);
+
+  useEffect(() => {
+    if (view !== "main" || !auth.user) return;
+    const timer = setInterval(() => {
+      saveLocalSnapshot();
+    }, 3 * 60 * 1000);
+    return () => clearInterval(timer);
+  }, [view, auth.user, saveLocalSnapshot]);
+
+  useEffect(() => {
+    const onBeforeUnload = () => {
+      saveLocalSnapshot();
+    };
+    window.addEventListener("beforeunload", onBeforeUnload);
+    return () => window.removeEventListener("beforeunload", onBeforeUnload);
+  }, [saveLocalSnapshot]);
 
   const serverInfoToFileInfo = (info: ServerFileInfo): PDFFileInfo => ({
     file_id: info.file_id,
@@ -635,6 +1058,19 @@ export default function App() {
   const onFilesSelected = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const files = Array.from(e.target.files ?? []).filter((f) => f.name.endsWith(".pdf"));
     if (!files.length) return;
+
+    const projectLimitMb = profile?.project_size_mb ?? 200;
+    if (projectLimitMb !== -1) {
+      const currentBytes = state.pdf_files.reduce((sum, f) => sum + (f.file_size || 0), 0);
+      const incomingBytes = files.reduce((sum, f) => sum + f.size, 0);
+      const limitBytes = projectLimitMb * 1024 * 1024;
+      if (currentBytes + incomingBytes > limitBytes) {
+        showError(`超過每專案大小上限（${projectLimitMb} MB），請減少上傳檔案或開新工作。`);
+        e.target.value = "";
+        return;
+      }
+    }
+
     setMsg("Uploading PDFs...", 10);
     beginGlobalBusy("Uploading PDF files...");
     try {
@@ -646,6 +1082,8 @@ export default function App() {
         pdfBlobsRef.current[info.file_id] = files[idx];
       });
       setMsg(`Imported ${fileInfos.length} file(s)`, null);
+      saveLocalSnapshot();
+      await runAutoBackup("upload");
     } catch (err) {
       setMsg(`Import error: ${err}`, null);
     } finally {
@@ -1089,12 +1527,12 @@ export default function App() {
       let total = 0;
       for (const r of pageData.rows) {
         if (pageIsCollection) {
-          if (r.type === "collection_entry" && r.total !== null) total += r.total;
+          if ((r.type === "collection_entry" || r.type === "item") && r.total !== null) total += r.total;
         } else {
           if (r.type === "item" && r.total !== null) total += r.total;
         }
       }
-      return total;
+      return round2(total);
     };
     
     for (const row of pageData.rows) {
@@ -1113,7 +1551,7 @@ export default function App() {
         const stored = storedPositions[annId];
         autoAnnotations.push({
           id: annId,
-          text: row.quantity.toString(),
+          text: formatQuantity(row.quantity),
           x: stored?.x ?? ((qtyBox.x + qtyBox.width) * pageWidth),
           y: stored?.y ?? ((row.bbox_y0 ?? 0) + 12),
           font_size: 9,
@@ -1128,7 +1566,7 @@ export default function App() {
         const stored = storedPositions[annId];
         autoAnnotations.push({
           id: annId,
-          text: row.rate.toFixed(2),
+          text: formatMoney(row.rate),
           x: stored?.x ?? ((rateBox.x + rateBox.width) * pageWidth),
           y: stored?.y ?? ((row.bbox_y0 ?? 0) + 12),
           font_size: 9,
@@ -1144,7 +1582,7 @@ export default function App() {
         const stored = storedPositions[annId];
         autoAnnotations.push({
           id: annId,
-          text: row.total.toFixed(2),
+          text: formatMoney(row.total),
           x: stored?.x ?? ((totalBox.x + totalBox.width) * pageWidth),
           y: stored?.y ?? ((row.bbox_y0 ?? 0) + 12),
           font_size: 9,
@@ -1164,7 +1602,7 @@ export default function App() {
         const stored = storedPositions[annId];
         autoAnnotations.push({
           id: annId,
-          text: row.total.toFixed(2),
+          text: formatMoney(row.total),
           x: stored?.x ?? ((totalBox.x + totalBox.width) * pageWidth),
           y: stored?.y ?? ((row.bbox_y0 ?? 0) + 12),
           font_size: 9,
@@ -1576,7 +2014,10 @@ export default function App() {
         tierLabels={Object.fromEntries(adminTiers.map((t) => [t.name, t.label]))}
         onSave={handleSaveProfile}
         onGoHome={() => {
-          if (profile?.status === "active") setView("main");
+          if (profile?.status === "active") {
+            setView("main");
+            setActiveModuleRaw("home");
+          }
         }}
         onSignOut={handleSignOut}
         onOpenAdmin={handleOpenAdmin}
@@ -1599,7 +2040,10 @@ export default function App() {
         onCreateTier={handleCreateTier}
         onUpdateTier={handleUpdateTier}
         onDeleteTier={handleDeleteTier}
-        onGoHome={() => setView("main")}
+        onGoHome={() => {
+          setView("main");
+          setActiveModuleRaw("home");
+        }}
       />
     );
   }
@@ -1609,6 +2053,7 @@ export default function App() {
   // --------------------------------------------------------------------------
 
   const currentBoxes = project.currentPageData?.boxes ?? {};
+  const isHomeModule = activeModule === "home";
 
   return (
     <div style={{ display: "flex", flexDirection: "column", height: "100vh", overflow: "hidden" }}>
@@ -1735,7 +2180,9 @@ export default function App() {
             setBqTemplates(data.bq_templates ?? []);
             setHighlightBox(null);
             setPdfPageSize(null);
+            lastBackedPayloadRef.current = null;
             setMsg("已載入雲端專案");
+            refreshHomeData().catch(() => {});
           }}
           onClose={() => setShowCloudProjects(false)}
           onError={showError}
@@ -1754,6 +2201,40 @@ export default function App() {
           userTier={profile?.tier ?? "basic"}
           userFeatures={profile?.tier_features}
         />
+
+        {isHomeModule && (
+          <div style={{ flex: 1, minWidth: 0 }}>
+            <HomePanel
+              profile={profile}
+              usagePages={usagePages}
+              usageLimit={usageLimit}
+              updates={systemUpdates}
+              startupCurrent={startupCurrent}
+              hasCurrentData={hasCurrentData}
+              backupEnabled={backupEnabled}
+              backupMode={backupMode}
+              backupStatus={backupStatus}
+              backupAt={backupAt}
+              backupWrites={backupWrites}
+              backupSkips={backupSkips}
+              localSnapshotAt={localSnapshotAt}
+              localSnapshotSizeBytes={localSnapshotSizeBytes}
+              onSetBackupEnabled={setBackupEnabled}
+              onSetBackupMode={setBackupMode}
+              onManualBackup={handleManualBackup}
+              onSaveLocalSnapshot={saveLocalSnapshot}
+              onRestoreLocalSnapshot={handleRestoreLocalSnapshot}
+              onResumeLastSession={handleResumeLastSession}
+              onStartNewSession={handleStartNewSession}
+              onOpenCloudProjects={() => setShowCloudProjects(true)}
+              onCreateUpdate={handleCreateSystemUpdate}
+              onDeleteUpdate={handleDeleteSystemUpdate}
+            />
+          </div>
+        )}
+
+        {!isHomeModule && (
+          <>
 
         {/* Column 1: PDF Tree (collapsible) */}
         <div style={{
@@ -2014,6 +2495,8 @@ export default function App() {
             onAnnotationMove={handleAnnotationMove}
           />
         </div>
+          </>
+        )}
       </div>
 
       {/* Status bar */}
@@ -2023,6 +2506,15 @@ export default function App() {
         pageCount={totalPages}
         usagePages={usagePages}
         usageLimit={usageLimit}
+        backupEnabled={backupEnabled}
+        backupSupported={(profile?.tier_features?.auto_backup ?? false) === true}
+        backupMode={backupMode}
+        backupStatus={backupStatus}
+        backupAt={backupAt}
+        backupWrites={backupWrites}
+        backupSkips={backupSkips}
+        onToggleBackup={setBackupEnabled}
+        onManualBackup={handleManualBackup}
       />
 
       {/* Error toast overlay */}

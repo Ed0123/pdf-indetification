@@ -177,8 +177,8 @@ export function CloudProjectsPanel({ projectPayload, onLoad, onClose, onError, o
         </div>
 
         {/* Info banner */}
-        <div style={{ padding: "8px 16px", background: "#eaf4fc", borderBottom: "1px solid #d5e8f5", fontSize: 12, color: "#2471a3" }}>
-          💡 雲端儲存會同時保存 PDF 原檔與專案資料。非永久保存的專案將在最後更新後 14 天自動刪除。
+        <div style={{ padding: "10px 16px", background: "#eaf4fc", borderBottom: "1px solid #d5e8f5", fontSize: 12, color: "#2471a3" }}>
+          💡 建議策略：平常先用本機快照，重要里程碑才寫雲端。這樣可降低後端 API 與 Storage 成本。非永久保存專案在最後更新後 14 天自動刪除。
         </div>
 
         {/* Save new */}

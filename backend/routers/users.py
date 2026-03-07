@@ -59,6 +59,7 @@ class TierCreate(BaseModel):
     label: str         # display name e.g. "基本", "贊助"
     quota: int         # monthly page limit (-1 = unlimited)
     storage_quota_mb: int = 0   # cloud storage MB (0 = none, -1 = unlimited)
+    project_size_mb: int = 200  # per-project size cap in MB (-1 = unlimited)
     features: dict = {}        # feature flags e.g. {"ocr": true, "export_excel": true}
 
 
@@ -67,6 +68,7 @@ class TierUpdate(BaseModel):
     label: Optional[str] = None
     quota: Optional[int] = None
     storage_quota_mb: Optional[int] = None
+    project_size_mb: Optional[int] = None
     features: Optional[dict] = None
 
 
@@ -78,14 +80,14 @@ GROUPS_COLLECTION = "groups"
 TIERS_COLLECTION = "tiers"
 DEFAULT_GROUPS = ["General"]
 DEFAULT_TIERS = [
-    {"name": "basic", "label": "基本", "quota": 100, "storage_quota_mb": 0,
-     "features": {"ocr": True, "export_excel": True, "export_pdf": True, "templates": True, "cloud_save": False, "bq_ocr": False, "bq_export_page": False, "bq_export": False}},
-    {"name": "sponsor", "label": "贊助", "quota": 300, "storage_quota_mb": 100,
-     "features": {"ocr": True, "export_excel": True, "export_pdf": True, "templates": True, "cloud_save": True, "bq_ocr": True, "bq_export_page": True, "bq_export": True}},
-    {"name": "premium", "label": "特許", "quota": 500, "storage_quota_mb": 300,
-     "features": {"ocr": True, "export_excel": True, "export_pdf": True, "templates": True, "cloud_save": True, "bq_ocr": True, "bq_export_page": True, "bq_export": True}},
-    {"name": "admin", "label": "管理員", "quota": -1, "storage_quota_mb": -1,
-     "features": {"ocr": True, "export_excel": True, "export_pdf": True, "templates": True, "cloud_save": True, "bq_ocr": True, "bq_export_page": True, "bq_export": True}},
+    {"name": "basic", "label": "基本", "quota": 100, "storage_quota_mb": 0, "project_size_mb": 200,
+     "features": {"ocr": True, "export_excel": True, "export_pdf": True, "templates": True, "cloud_save": False, "bq_ocr": False, "bq_export_page": False, "bq_export": False, "auto_backup": False}},
+    {"name": "sponsor", "label": "贊助", "quota": 300, "storage_quota_mb": 100, "project_size_mb": 500,
+     "features": {"ocr": True, "export_excel": True, "export_pdf": True, "templates": True, "cloud_save": True, "bq_ocr": True, "bq_export_page": True, "bq_export": True, "auto_backup": True}},
+    {"name": "premium", "label": "特許", "quota": 500, "storage_quota_mb": 300, "project_size_mb": 1024,
+     "features": {"ocr": True, "export_excel": True, "export_pdf": True, "templates": True, "cloud_save": True, "bq_ocr": True, "bq_export_page": True, "bq_export": True, "auto_backup": True}},
+    {"name": "admin", "label": "管理員", "quota": -1, "storage_quota_mb": -1, "project_size_mb": -1,
+     "features": {"ocr": True, "export_excel": True, "export_pdf": True, "templates": True, "cloud_save": True, "bq_ocr": True, "bq_export_page": True, "bq_export": True, "auto_backup": True}},
 ]
 
 def _user_ref(uid: str):
@@ -148,6 +150,15 @@ def _get_tier_features(tier_name: str) -> dict:
         if t["name"] == tier_name:
             return t.get("features", {})
     return {}
+
+
+def _get_tier_project_size_mb(tier_name: str) -> int:
+    """Return per-project size limit in MB for the tier. -1 means unlimited."""
+    tiers = _ensure_default_tiers()
+    for t in tiers:
+        if t["name"] == tier_name:
+            return t.get("project_size_mb", 200)
+    return 200
 
 
 def _ensure_default_groups() -> list[dict]:
@@ -269,6 +280,7 @@ def get_my_profile(user: dict = Depends(require_auth)):
     _user_ref(user["uid"]).update({"last_login": datetime.now(timezone.utc).isoformat()})
     # Attach resolved tier features so frontend can gate UI elements
     profile["tier_features"] = _get_tier_features(profile.get("tier", "basic"))
+    profile["project_size_mb"] = _get_tier_project_size_mb(profile.get("tier", "basic"))
     return profile
 
 
@@ -539,6 +551,7 @@ def create_tier(body: TierCreate, user: dict = Depends(require_auth)):
         "label": body.label.strip(),
         "quota": body.quota,
         "storage_quota_mb": body.storage_quota_mb,
+        "project_size_mb": body.project_size_mb,
         "features": body.features,
     }
     ref = _tiers_collection().document()
@@ -579,6 +592,8 @@ def update_tier(tier_id: str, body: TierUpdate, user: dict = Depends(require_aut
         changes["quota"] = body.quota
     if body.storage_quota_mb is not None:
         changes["storage_quota_mb"] = body.storage_quota_mb
+    if body.project_size_mb is not None:
+        changes["project_size_mb"] = body.project_size_mb
     if body.features is not None:
         changes["features"] = body.features
 

@@ -22,8 +22,8 @@ interface AdminPanelProps {
   onCreateGroup: (name: string) => Promise<void>;
   onRenameGroup: (groupId: string, name: string) => Promise<void>;
   onDeleteGroup: (groupId: string) => Promise<void>;
-  onCreateTier: (data: { name: string; label: string; quota: number; storage_quota_mb?: number; features?: Record<string, boolean> }) => Promise<void>;
-  onUpdateTier: (tierId: string, data: { name?: string; label?: string; quota?: number; storage_quota_mb?: number; features?: Record<string, boolean> }) => Promise<void>;
+  onCreateTier: (data: { name: string; label: string; quota: number; storage_quota_mb?: number; project_size_mb?: number; features?: Record<string, boolean> }) => Promise<void>;
+  onUpdateTier: (tierId: string, data: { name?: string; label?: string; quota?: number; storage_quota_mb?: number; project_size_mb?: number; features?: Record<string, boolean> }) => Promise<void>;
   onDeleteTier: (tierId: string) => Promise<void>;
   onGoHome: () => void;
 }
@@ -56,9 +56,11 @@ export function AdminPanel({
   const [newTierName, setNewTierName] = useState("");
   const [newTierLabel, setNewTierLabel] = useState("");
   const [newTierQuota, setNewTierQuota] = useState("100");
+  const [newTierProjectSize, setNewTierProjectSize] = useState("200");
   const [selectedTierId, setSelectedTierId] = useState("");
   const [editTierLabel, setEditTierLabel] = useState("");
   const [editTierQuota, setEditTierQuota] = useState("");
+  const [editTierProjectSize, setEditTierProjectSize] = useState("");
 
   // Build tier label lookup (dynamic tiers override static TIER_LABELS)
   const tierLabelMap = useMemo(() => {
@@ -131,19 +133,23 @@ export function AdminPanel({
     const name = newTierName.trim().toLowerCase();
     const label = newTierLabel.trim();
     const quota = parseInt(newTierQuota, 10);
-    if (!name || !label || isNaN(quota)) return;
-    await onCreateTier({ name, label, quota });
+    const projectSize = parseInt(newTierProjectSize, 10);
+    if (!name || !label || isNaN(quota) || isNaN(projectSize)) return;
+    await onCreateTier({ name, label, quota, project_size_mb: projectSize });
     setNewTierName("");
     setNewTierLabel("");
     setNewTierQuota("100");
+    setNewTierProjectSize("200");
   };
 
   const handleUpdateTier = async () => {
     if (!selectedTierId) return;
-    const changes: { label?: string; quota?: number } = {};
+    const changes: { label?: string; quota?: number; project_size_mb?: number } = {};
     if (editTierLabel.trim()) changes.label = editTierLabel.trim();
     const q = parseInt(editTierQuota, 10);
     if (!isNaN(q)) changes.quota = q;
+    const p = parseInt(editTierProjectSize, 10);
+    if (!isNaN(p)) changes.project_size_mb = p;
     if (Object.keys(changes).length === 0) return;
     await onUpdateTier(selectedTierId, changes);
   };
@@ -154,6 +160,7 @@ export function AdminPanel({
     setSelectedTierId("");
     setEditTierLabel("");
     setEditTierQuota("");
+    setEditTierProjectSize("");
   };
 
   return (
@@ -286,6 +293,14 @@ export function AdminPanel({
               type="number"
               title="-1 = 無限"
             />
+            <input
+              style={{ ...inputStyle, width: 92 }}
+              placeholder="專案MB"
+              value={newTierProjectSize}
+              onChange={(e) => setNewTierProjectSize(e.target.value)}
+              type="number"
+              title="每專案大小上限，-1 = 無限"
+            />
             <button style={miniBtn} onClick={handleCreateTier}>新增類別</button>
           </div>
 
@@ -300,6 +315,7 @@ export function AdminPanel({
                 const t = tiers.find((x) => x.id === id);
                 setEditTierLabel(t?.label ?? "");
                 setEditTierQuota(t?.quota !== undefined ? String(t.quota) : "");
+                setEditTierProjectSize(t?.project_size_mb !== undefined ? String(t.project_size_mb) : "");
               }}
             >
               <option value="">選擇類別</option>
@@ -320,6 +336,14 @@ export function AdminPanel({
               onChange={(e) => setEditTierQuota(e.target.value)}
               type="number"
               title="-1 = 無限"
+            />
+            <input
+              style={{ ...inputStyle, width: 92 }}
+              placeholder="專案MB"
+              value={editTierProjectSize}
+              onChange={(e) => setEditTierProjectSize(e.target.value)}
+              type="number"
+              title="每專案大小上限，-1 = 無限"
             />
             <button style={miniBtn} onClick={handleUpdateTier} disabled={!selectedTierId}>更新</button>
             <button style={miniBtn} onClick={handleDeleteTier} disabled={!selectedTierId}>刪除</button>
@@ -373,6 +397,23 @@ export function AdminPanel({
                               if (!isNaN(val)) onUpdateTier(t.id, { storage_quota_mb: val });
                             }}
                             title="-1 = 無限, 0 = 無"
+                          />
+                        </td>
+                      ))}
+                    </tr>
+                    <tr>
+                      <td style={tdFeature}>每專案大小 (MB)</td>
+                      {tiers.map((t) => (
+                        <td key={t.id} style={{ ...tdFeature, textAlign: "center" }}>
+                          <input
+                            type="number"
+                            style={{ width: 50, fontSize: 11, border: "1px solid #ccc", borderRadius: 2, textAlign: "center" }}
+                            value={t.project_size_mb ?? 200}
+                            onChange={(e) => {
+                              const val = parseInt(e.target.value, 10);
+                              if (!isNaN(val)) onUpdateTier(t.id, { project_size_mb: val });
+                            }}
+                            title="-1 = 無限"
                           />
                         </td>
                       ))}

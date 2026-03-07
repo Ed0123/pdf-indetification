@@ -12,6 +12,7 @@ from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 
 from backend.auth_middleware import require_auth
+from backend.firebase_setup import get_db
 
 # In-memory store: file_id -> absolute path on disk
 _STORE: Dict[str, str] = {}
@@ -26,6 +27,46 @@ def _get_path(file_id: str) -> str:
     if not path or not os.path.exists(path):
         raise HTTPException(status_code=404, detail=f"File '{file_id}' not found.")
     return path
+
+
+def _get_project_limit_and_usage_bytes(uid: str) -> tuple[int, int]:
+    """Return (limit_bytes, current_usage_bytes) for current workspace.
+
+    - limit_bytes = -1 means unlimited
+    - usage is best-effort from the user's current cloud project metadata
+    """
+    db = get_db()
+    user_snap = db.collection("users").document(uid).get()
+    if not user_snap.exists:
+        return 200 * 1024 * 1024, 0
+
+    user_data = user_snap.to_dict()
+    tier_name = user_data.get("tier", "basic")
+
+    limit_mb = 200
+    for t in db.collection("tiers").stream():
+        td = t.to_dict()
+        if td.get("name") == tier_name:
+            limit_mb = td.get("project_size_mb", 200)
+            break
+
+    if limit_mb == -1:
+        limit_bytes = -1
+    else:
+        limit_bytes = max(0, int(limit_mb)) * 1024 * 1024
+
+    usage_bytes = 0
+    try:
+        docs = db.collection("cloud_projects").where("owner_uid", "==", uid).stream()
+        for d in docs:
+            data = d.to_dict()
+            if data.get("is_current"):
+                usage_bytes = int(data.get("size_bytes", 0) or 0)
+                break
+    except Exception:
+        usage_bytes = 0
+
+    return limit_bytes, usage_bytes
 
 
 router = APIRouter()
@@ -58,14 +99,28 @@ async def upload_pdfs(files: List[UploadFile] = File(...), user: dict = Depends(
     results: List[FileInfo] = []
     tmp_dir = tempfile.mkdtemp(prefix="pdf_upload_")
 
+    total_incoming_bytes = 0
+    loaded_contents: list[tuple[UploadFile, bytes]] = []
     for upload in files:
+        content = await upload.read()
+        total_incoming_bytes += len(content)
+        loaded_contents.append((upload, content))
+
+    limit_bytes, usage_bytes = _get_project_limit_and_usage_bytes(user["uid"])
+    if limit_bytes != -1 and (usage_bytes + total_incoming_bytes) > limit_bytes:
+        limit_mb = limit_bytes // (1024 * 1024)
+        raise HTTPException(
+            status_code=413,
+            detail=f"Project size limit exceeded (limit {limit_mb} MB). Please start a new workspace or remove files.",
+        )
+
+    for upload, content in loaded_contents:
         if not upload.filename or not upload.filename.lower().endswith(".pdf"):
             continue
 
         file_id = str(uuid.uuid4())
         dest = os.path.join(tmp_dir, f"{file_id}.pdf")
 
-        content = await upload.read()
         if len(content) > MAX_FILE_SIZE:
             raise HTTPException(
                 status_code=413,
