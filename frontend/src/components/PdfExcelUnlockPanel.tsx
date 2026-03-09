@@ -45,7 +45,8 @@ export function PdfExcelUnlockPanel({ isAdmin, onBusyChange }: PdfExcelUnlockPan
     if (pending.length === 0) return;
     setPdfBusy(true);
     onBusyChange?.(true, `正在解鎖 ${pending.length} 個 PDF ...`);
-    for (const entry of pending) {
+    for (let idx = 0; idx < pending.length; idx++) {
+      const entry = pending[idx];
       setPdfFiles(prev => prev.map(f => f.file === entry.file ? { ...f, status: "processing", message: "處理中..." } : f));
       try {
         const arrayBuffer = await entry.file.arrayBuffer();
@@ -53,6 +54,8 @@ export function PdfExcelUnlockPanel({ isAdmin, onBusyChange }: PdfExcelUnlockPan
         const pdfBytes = await pdfDoc.save();
         downloadBlob(new Blob([pdfBytes as BlobPart], { type: "application/pdf" }), `unlocked-${entry.file.name}`);
         setPdfFiles(prev => prev.map(f => f.file === entry.file ? { ...f, status: "done", message: "✅ 已下載" } : f));
+        // Small delay between downloads to avoid browser blocking
+        if (idx < pending.length - 1) await new Promise(r => setTimeout(r, 500));
       } catch (err: any) {
         setPdfFiles(prev => prev.map(f => f.file === entry.file ? { ...f, status: "error", message: `❌ ${err.message || err}` } : f));
       }
@@ -66,7 +69,8 @@ export function PdfExcelUnlockPanel({ isAdmin, onBusyChange }: PdfExcelUnlockPan
     if (pending.length === 0) return;
     setExcelBusy(true);
     onBusyChange?.(true, `正在解鎖 ${pending.length} 個 Excel ...`);
-    for (const entry of pending) {
+    for (let idx = 0; idx < pending.length; idx++) {
+      const entry = pending[idx];
       setExcelFiles(prev => prev.map(f => f.file === entry.file ? { ...f, status: "processing", message: "處理中..." } : f));
       try {
         const arrayBuffer = await entry.file.arrayBuffer();
@@ -75,21 +79,24 @@ export function PdfExcelUnlockPanel({ isAdmin, onBusyChange }: PdfExcelUnlockPan
         for (const [path, file] of Object.entries(zip.files)) {
           if (sheetPattern.test(path) && !file.dir) {
             let xml = await file.async("string");
-            xml = xml.replace(/<sheetProtection[^/>]*\/>/g, "");
-            xml = xml.replace(/<sheetProtection[^>]*>.*?<\/sheetProtection>/gs, "");
+            // Remove all sheet protection — regex handles / in attribute values (e.g. hashValue)
+            xml = xml.replace(/<sheetProtection\b[^>]*\/>/g, "");
+            xml = xml.replace(/<sheetProtection\b[^>]*>.*?<\/sheetProtection>/gs, "");
             zip.file(path, xml);
           }
         }
         const wbFile = zip.file("xl/workbook.xml");
         if (wbFile) {
           let wbXml = await wbFile.async("string");
-          wbXml = wbXml.replace(/<workbookProtection[^/>]*\/>/g, "");
-          wbXml = wbXml.replace(/<workbookProtection[^>]*>.*?<\/workbookProtection>/gs, "");
+          wbXml = wbXml.replace(/<workbookProtection\b[^>]*\/>/g, "");
+          wbXml = wbXml.replace(/<workbookProtection\b[^>]*>.*?<\/workbookProtection>/gs, "");
           zip.file("xl/workbook.xml", wbXml);
         }
         const output = await zip.generateAsync({ type: "blob" });
         downloadBlob(output, `unlocked-${entry.file.name}`);
         setExcelFiles(prev => prev.map(f => f.file === entry.file ? { ...f, status: "done", message: "✅ 已下載" } : f));
+        // Small delay between downloads to avoid browser blocking
+        if (idx < pending.length - 1) await new Promise(r => setTimeout(r, 500));
       } catch (err: any) {
         setExcelFiles(prev => prev.map(f => f.file === entry.file ? { ...f, status: "error", message: `❌ ${err.message || err}` } : f));
       }

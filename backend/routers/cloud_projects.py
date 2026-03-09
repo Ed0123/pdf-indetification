@@ -67,29 +67,32 @@ class CloudProjectInfo(BaseModel):
 # ──────────────────────── Helpers ────────────────────────────────────────
 
 def _get_user_tier(uid: str) -> dict:
-    """Return user's tier info including storage_quota_mb."""
+    """Return user's tier info including storage_quota_mb and cloud_save flag."""
     db = get_db()
     user_snap = db.collection(USERS_COLLECTION).document(uid).get()
     if not user_snap.exists:
-        return {"tier": "basic", "storage_quota_mb": 0, "storage_used_bytes": 0}
+        return {"tier": "basic", "storage_quota_mb": 0, "storage_used_bytes": 0, "cloud_save": False}
 
     profile = user_snap.to_dict()
     tier_name = profile.get("tier", "basic")
     storage_used = profile.get("storage_used_bytes", 0)
 
-    # Look up tier quota
+    # Look up tier quota and cloud_save feature
     tiers = list(db.collection("tiers").stream())
     storage_quota_mb = 0
+    cloud_save = False
     for t in tiers:
         td = t.to_dict()
         if td.get("name") == tier_name:
             storage_quota_mb = td.get("storage_quota_mb", 0)
+            cloud_save = td.get("features", {}).get("cloud_save", False)
             break
 
     return {
         "tier": tier_name,
         "storage_quota_mb": storage_quota_mb,
         "storage_used_bytes": storage_used,
+        "cloud_save": cloud_save,
     }
 
 
@@ -312,6 +315,8 @@ def create_cloud_project(body: CloudProjectCreate, user: dict = Depends(require_
 
     # Check feature access
     tier_info = _get_user_tier(uid)
+    if not tier_info.get("cloud_save", False):
+        raise HTTPException(403, "雲端儲存功能未開啟，無法建立新專案")
     if tier_info["storage_quota_mb"] == 0:
         raise HTTPException(403, "Your tier does not include cloud storage")
 
