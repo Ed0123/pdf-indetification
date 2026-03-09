@@ -52,6 +52,13 @@ interface PageResult {
   textSnippet: string;
 }
 
+/** One row per keyword match — for the new results table. */
+interface MatchRow {
+  pageNum: number;
+  keyword: string;
+  contextSnippet: string; // 2 lines before/after with keyword bolded (HTML)
+}
+
 interface TextItem {
   str: string;
   transform: number[];
@@ -123,6 +130,8 @@ export function PdfSearchExtractPanel({ isAdmin, onBusyChange }: PdfSearchExtrac
   const [globalWhiteColor, setGlobalWhiteColor] = useState("#FFFF00");
   const [globalBlacklist, setGlobalBlacklist] = useState("");
   const [results, setResults] = useState<PageResult[]>([]);
+  const [matchRows, setMatchRows] = useState<MatchRow[]>([]);
+  const [showAllPages, setShowAllPages] = useState(false);
   const [running, setRunning] = useState(false);
   const [statusMsg, setStatusMsg] = useState("");
   const fileInputRef = useRef<HTMLInputElement>(null);
@@ -249,6 +258,42 @@ export function PdfSearchExtractPanel({ isAdmin, onBusyChange }: PdfSearchExtrac
       });
 
       setResults(pageResults);
+      // Build per-keyword-match rows with context snippet
+      const rows: MatchRow[] = [];
+      const allKws: string[] = [];
+      for (const kw of gwl) allKws.push(kw);
+      for (const rule of activeRules) {
+        for (const kw of parseList(rule.keywords)) allKws.push(kw);
+      }
+      for (const pr of pageResults) {
+        if (!pr.included) continue;
+        const pageText = pages.find(pp => pp.pageNum === pr.pageNum)?.text ?? "";
+        // Split into pseudo-lines (~80 chars each, or by sentence boundaries)
+        const lines = pageText.match(/.{1,80}(?:\s|$)/g) ?? [pageText];
+        for (const kw of pr.matchedKeywords) {
+          // Find the first line that contains the keyword
+          let contextHtml = "";
+          const idx = lines.findIndex(l => matchKeyword(l, kw));
+          if (idx >= 0) {
+            const start = Math.max(0, idx - 1);
+            const end = Math.min(lines.length - 1, idx + 1);
+            const snippet = lines.slice(start, end + 1).join("");
+            // Bold the keyword in the snippet
+            if (kw.includes("*") || kw.includes("?")) {
+              const re = wildcardToRegex(kw);
+              contextHtml = snippet.replace(re, (m) => `<b>${m}</b>`);
+            } else {
+              const escaped = kw.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+              contextHtml = snippet.replace(new RegExp(escaped, "gi"), (m) => `<b>${m}</b>`);
+            }
+          } else {
+            contextHtml = pageText.substring(0, 120);
+          }
+          rows.push({ pageNum: pr.pageNum, keyword: kw, contextSnippet: contextHtml });
+        }
+      }
+      setMatchRows(rows);
+      setShowAllPages(false);
       const includedCount = pageResults.filter(r => r.included).length;
       setStatusMsg(`分析完成：${includedCount} / ${pageResults.length} 頁符合條件`);
     } catch (err: any) {
@@ -466,33 +511,72 @@ export function PdfSearchExtractPanel({ isAdmin, onBusyChange }: PdfSearchExtrac
       {/* Results preview */}
       {results.length > 0 && (
         <div style={resultsSection}>
-          <h4 style={{ margin: "0 0 8px", fontSize: 14, fontWeight: 600 }}>
-            頁面結果預覽 ({results.filter(r => r.included).length} / {results.length} 頁符合)
-          </h4>
-          <div style={{ maxHeight: 300, overflow: "auto", border: "1px solid #e3ecf5", borderRadius: 8, background: "#fff" }}>
-            <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 12 }}>
-              <thead>
-                <tr style={{ background: "#f8fbff" }}>
-                  <th style={th}>頁碼</th>
-                  <th style={th}>狀態</th>
-                  <th style={th}>命中關鍵字</th>
-                  <th style={th}>排除原因</th>
-                  <th style={th}>文字預覽</th>
-                </tr>
-              </thead>
-              <tbody>
-                {results.map(r => (
-                  <tr key={r.pageNum} style={{ background: r.included ? "#eaffea" : "#fff5f5" }}>
-                    <td style={td}>{r.pageNum}</td>
-                    <td style={td}>{r.included ? "✅ 包含" : "❌ 排除"}</td>
-                    <td style={td}>{r.matchedKeywords.join(", ") || "-"}</td>
-                    <td style={td}>{r.excludedBy.join("; ") || "-"}</td>
-                    <td style={{ ...td, maxWidth: 200, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{r.textSnippet}</td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
+          <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 8 }}>
+            <h4 style={{ margin: 0, fontSize: 14, fontWeight: 600 }}>
+              結果：{results.filter(r => r.included).length} / {results.length} 頁符合
+            </h4>
+            <button
+              style={{ ...btnStyle, fontSize: 11, padding: "3px 8px" }}
+              onClick={() => setShowAllPages(prev => !prev)}
+            >
+              {showAllPages ? "隱藏全部頁面" : "顯示全部頁面"}
+            </button>
           </div>
+
+          {/* Per-keyword match rows (default view) */}
+          {matchRows.length > 0 && !showAllPages && (
+            <div style={{ maxHeight: 400, overflow: "auto", border: "1px solid #e3ecf5", borderRadius: 8, background: "#fff" }}>
+              <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 12 }}>
+                <thead>
+                  <tr style={{ background: "#f8fbff" }}>
+                    <th style={{ ...th, width: 50 }}>頁碼</th>
+                    <th style={{ ...th, width: 100 }}>命中關鍵字</th>
+                    <th style={th}>文字上下文</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {matchRows.map((mr, i) => (
+                    <tr key={i} style={{ background: "#eaffea" }}>
+                      <td style={{ ...td, textAlign: "center" }}>{mr.pageNum}</td>
+                      <td style={{ ...td, fontWeight: 600, color: "#2563eb" }}>{mr.keyword}</td>
+                      <td
+                        style={{ ...td, lineHeight: 1.5, maxWidth: 0 }}
+                        dangerouslySetInnerHTML={{ __html: mr.contextSnippet }}
+                      />
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          )}
+
+          {/* All pages view (expanded) */}
+          {showAllPages && (
+            <div style={{ maxHeight: 400, overflow: "auto", border: "1px solid #e3ecf5", borderRadius: 8, background: "#fff" }}>
+              <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 12 }}>
+                <thead>
+                  <tr style={{ background: "#f8fbff" }}>
+                    <th style={{ ...th, width: 50 }}>頁碼</th>
+                    <th style={{ ...th, width: 60 }}>狀態</th>
+                    <th style={{ ...th, width: 120 }}>命中關鍵字</th>
+                    <th style={th}>排除原因</th>
+                    <th style={th}>文字預覽</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {results.map(r => (
+                    <tr key={r.pageNum} style={{ background: r.included ? "#eaffea" : "#fff5f5" }}>
+                      <td style={{ ...td, textAlign: "center" }}>{r.pageNum}</td>
+                      <td style={{ ...td, textAlign: "center" }}>{r.included ? "✅" : "❌"}</td>
+                      <td style={td}>{r.matchedKeywords.join(", ") || "-"}</td>
+                      <td style={td}>{r.excludedBy.join("; ") || "-"}</td>
+                      <td style={{ ...td, maxWidth: 200, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{r.textSnippet}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          )}
         </div>
       )}
 

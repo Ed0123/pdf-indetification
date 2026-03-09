@@ -48,20 +48,22 @@ export interface UserProfile {
   tier_features?: Record<string, boolean>;
   /** Per-project size cap (MB), resolved from tier. -1 means unlimited. */
   project_size_mb?: number;
+  /** Cloud storage quota (MB), resolved from tier. 0 = none, -1 = unlimited. */
+  storage_quota_mb?: number;
 }
 
 /** Feature flags that can be toggled per tier.
  *  category: "toggle" = simple on/off, "quota" = has usage limits */
 export const TIER_FEATURES = [
-  { key: "ocr", label: "OCR 文字辨識", category: "quota" as const },
-  { key: "cloud_save", label: "雲端儲存專案", category: "quota" as const },
+  { key: "ocr", label: "OCR 文字辨識", category: "toggle" as const },
+  { key: "cloud_save", label: "雲端儲存專案", category: "toggle" as const },
   { key: "export_excel", label: "匯出 Excel", category: "toggle" as const },
   { key: "export_pdf", label: "匯出 PDF 頁面", category: "toggle" as const },
   { key: "templates", label: "範本管理", category: "toggle" as const },
   { key: "bq_ocr", label: "BQ OCR 提取", category: "toggle" as const },
   { key: "bq_export_page", label: "BQ 匯出頁面（瀏覽）", category: "toggle" as const },
   { key: "bq_export", label: "BQ 數據匯出（下載）", category: "toggle" as const },
-  { key: "auto_backup", label: "自動備份工作階段", category: "quota" as const },
+  { key: "auto_backup", label: "自動備份工作階段", category: "toggle" as const },
   { key: "pdf_unlock", label: "PDF 解鎖", category: "toggle" as const },
   { key: "excel_unlock", label: "Excel 解鎖", category: "toggle" as const },
   { key: "pdf_search", label: "PDF 搜尋/擷取", category: "toggle" as const },

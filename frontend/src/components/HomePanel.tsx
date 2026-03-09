@@ -80,10 +80,8 @@ export function HomePanel({
 
   const isAdmin = profile?.tier === "admin";
   const entries = Object.entries(profile?.tier_features ?? {});
-  const quotaKeys: Set<string> = new Set(TIER_FEATURES.filter((f) => f.category === "quota").map((f) => f.key));
-  const enabled = entries.filter(([key, value]) => value === true && !quotaKeys.has(key));
-  const disabled = entries.filter(([key, value]) => value === false && !quotaKeys.has(key));
-  const quotaBased = entries.filter(([key]) => quotaKeys.has(key));
+  const enabled = entries.filter(([, value]) => value === true);
+  const disabled = entries.filter(([, value]) => value === false);
   const backupSupported = (profile?.tier_features?.auto_backup ?? false) === true;
 
   const backupText = useMemo(() => {
@@ -227,18 +225,17 @@ export function HomePanel({
               </div>
             </div>
           )}
-          {quotaBased.length > 0 && (
-            <div>
-              <div style={subTitle}>限額類</div>
-              <div style={chipWrap}>
-                {quotaBased.map(([key, value]) => (
-                  <span key={key} style={{ ...chip, ...chipQuota }}>
-                    {formatFeatureLabel(key)} {value ? "✓" : "✗"}
-                  </span>
-                ))}
-              </div>
+          <div>
+            <div style={subTitle}>限額類</div>
+            <div style={chipWrap}>
+              <span style={{ ...chip, ...chipQuota }}>
+                雲端儲存(MB): {profile?.storage_quota_mb === -1 ? "∞" : profile?.storage_quota_mb ?? 0}
+              </span>
+              <span style={{ ...chip, ...chipQuota }}>
+                每專案大小(MB): {profile?.project_size_mb === -1 ? "∞" : profile?.project_size_mb ?? 200}
+              </span>
             </div>
-          )}
+          </div>
         </section>
       </div>
 

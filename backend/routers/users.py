@@ -206,6 +206,15 @@ def _get_tier_project_size_mb(tier_name: str) -> int:
     return 200
 
 
+def _get_tier_storage_quota_mb(tier_name: str) -> int:
+    """Return cloud storage quota in MB for the tier. 0 = none, -1 = unlimited."""
+    tiers = _ensure_default_tiers()
+    for t in tiers:
+        if t["name"] == tier_name:
+            return t.get("storage_quota_mb", 0)
+    return 0
+
+
 def _ensure_default_groups() -> list[dict]:
     """Ensure group list exists; bootstrap A/B/C when empty."""
     docs = list(_groups_collection().stream())
@@ -326,6 +335,7 @@ def get_my_profile(user: dict = Depends(require_auth)):
     # Attach resolved tier features so frontend can gate UI elements
     profile["tier_features"] = _get_tier_features(profile.get("tier", "basic"))
     profile["project_size_mb"] = _get_tier_project_size_mb(profile.get("tier", "basic"))
+    profile["storage_quota_mb"] = _get_tier_storage_quota_mb(profile.get("tier", "basic"))
     return profile
 
 
