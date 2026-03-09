@@ -22,8 +22,11 @@ let pdfjsLib: any = null;
 async function getPdfjs() {
   if (pdfjsLib) return pdfjsLib;
   const pdfjs = await import("pdfjs-dist");
-  // Use the bundled worker
-  pdfjs.GlobalWorkerOptions.workerSrc = `https://cdnjs.cloudflare.com/ajax/libs/pdf.js/${pdfjs.version}/pdf.worker.min.mjs`;
+  // Use local bundled worker via Vite URL resolution (avoids CDN CORS issues)
+  pdfjs.GlobalWorkerOptions.workerSrc = new URL(
+    "pdfjs-dist/build/pdf.worker.min.mjs",
+    import.meta.url
+  ).toString();
   pdfjsLib = pdfjs;
   return pdfjs;
 }

@@ -91,6 +91,8 @@ chmod +x deploy.sh
 * **Admin panel** – manage users, tiers, groups, and usage resets
 * **Excel export** – download `.xlsx` exports of extracted data
 
+For a high-level overview of the web app features, see [docs/網站功能介紹.md](docs/%E7%B6%B2%E7%AB%99%E5%8A%9F%E8%83%BD%E4%BB%8B%E7%B4%B9.md).
+
 > ⚠️ **Removed features**: toolbar Save/Load (automatic IndexedDB persistence) and Clear Data.
 
 ---

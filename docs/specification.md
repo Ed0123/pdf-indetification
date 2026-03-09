@@ -1,5 +1,8 @@
 # Specification – Web-Based PDF Extraction System
 
+> **Note (2026-03-07):** Documentation reviewed and streamlined. Outdated authentication options (email/password) removed and audit log feature references deleted – these are not implemented.
+
+
 ## High‑Level Objective 🎯
 Build a cloud‑hosted application that allows users to upload PDF documents, define extraction templates, and automatically retrieve structured data into BigQuery or Excel.  The goal is to replace the legacy desktop PyQt5 tool with a responsive SPA frontend, a scalable REST/HTTP API backend, and optional OCR support for scanned documents.
 
@@ -32,7 +35,7 @@ Build a cloud‑hosted application that allows users to upload PDF documents, de
 
 ## Feature List ✅
 
-1. **User Authentication** – Firebase email/password and OAuth.
+1. **User Authentication** – Firebase Google OAuth only.
 2. **PDF Import** – Upload individual files or directories; preview upon upload.
 3. **Template Definition** – Create fields with names, types and region boxes; save per project.
 4. **Automatic Extraction** – Batch process PDFs using selected template; fallback to OCR.
@@ -41,7 +44,6 @@ Build a cloud‑hosted application that allows users to upload PDF documents, de
 7. **Excel Export** – Download results as `.xlsx` with fixed sheet layout.
 8. **Admin Messages** – Send broadcast notices to users via UI panel.
 9. **OCR Availability Indicator** – Shows whether OCR service is reachable.
-10. **Audit Logs & History** – Track changes to templates and exports.
 
 ---
 

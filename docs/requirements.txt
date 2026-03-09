@@ -1,3 +1,4 @@
+# Legacy desktop requirements (mostly superseded by the web frontend) 
 PyQt5>=5.15.0
 PyMuPDF>=1.23.0
 openpyxl>=3.1.0

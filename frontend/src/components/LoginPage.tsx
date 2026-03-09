@@ -27,13 +27,18 @@ export function LoginPage({ onGoogleSignIn }: LoginPageProps) {
   return (
     <div style={container}>
       <div style={card}>
-        {/* Logo / title */}
+        {/* Simple header with features list */}
         <div style={{ textAlign: "center", marginBottom: 24 }}>
-          <div style={{ fontSize: 52, marginBottom: 8 }}>🧠</div>
-          <h1 style={{ margin: 0, fontSize: 24, fontWeight: 800, color: "#1e2f3d" }}>PDF 智慧工作台</h1>
-          <p style={{ margin: "8px 0 0", color: "#5f7387", fontSize: 13 }}>
-            專業、可追蹤、低雲端成本的文件流程
+          <h1 style={{ margin: 0, fontSize: 32, fontWeight: 700, color: "#1e2f3d" }}>Tools for QS</h1>
+          <p style={{ margin: "12px 0 24px", color: "#5f7387", fontSize: 16, lineHeight: 1.4 }}>
+            BQ-OCR、抄標、PDF OCR 等工具
           </p>
+          {/* simplified features list to match Apple minimal aesthetic */}
+          <ul style={{ textAlign: "left", padding: "0 20px", margin: 0, listStyleType: "none", color: "#5f7387", fontSize: 14, lineHeight: 1.6 }}>
+            <li>BQ 工程量表 OCR 與編輯</li>
+            <li>快速抄標功能</li>
+            <li>一般 PDF OCR 及文件處理</li>
+          </ul>
         </div>
 
         {/* Google button */}
@@ -72,18 +77,18 @@ const container: React.CSSProperties = {
   alignItems: "center",
   justifyContent: "center",
   height: "100vh",
-  background: "radial-gradient(circle at 20% 20%, #d9f2ff 0%, #edf8e8 35%, #fff7ec 100%)",
-  fontFamily: '"Avenir Next", "Segoe UI", sans-serif',
+  background: "linear-gradient(135deg, #f2f2f5 0%, #ffffff 100%)",
+  fontFamily: "-apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, Cantarell, 'Open Sans', 'Helvetica Neue', sans-serif",
 };
 
 const card: React.CSSProperties = {
-  background: "rgba(255,255,255,0.92)",
-  border: "1px solid #dce9f4",
+  background: "#fff",
   borderRadius: 16,
-  padding: "46px 40px",
-  boxShadow: "0 20px 50px rgba(32, 57, 79, 0.16)",
-  width: 410,
+  padding: "48px 40px",
+  boxShadow: "0 4px 20px rgba(0,0,0,0.1)",
+  width: 360,
   maxWidth: "90vw",
+  textAlign: "center",
 };
 
 const googleBtn: React.CSSProperties = {
@@ -91,11 +96,12 @@ const googleBtn: React.CSSProperties = {
   alignItems: "center",
   justifyContent: "center",
   width: "100%",
-  padding: "12px 16px",
+  padding: "14px 18px",
   border: "1px solid #c7d8e8",
-  borderRadius: 10,
+  borderRadius: 12,
   background: "#fff",
-  fontSize: 15,
+  fontSize: 16,
   fontWeight: 700,
   color: "#223648",
+  transition: "opacity 0.2s ease",
 };

@@ -31,6 +31,13 @@ PROJECT="${1:?Please pass GCP project ID as first arg}"
 REGION="${2:-asia-east1}"
 SERVICE="pdf-backend"
 
+echo "=== 0. Sync Firestore schema defaults ==="
+if [[ "${SKIP_FIREBASE_SCHEMA_SYNC:-0}" == "1" ]]; then
+  echo "Skip schema sync (SKIP_FIREBASE_SCHEMA_SYNC=1)."
+else
+  python3 -m backend.scripts.firebase_schema_sync
+fi
+
 # ensure required Gmail credentials are present; deployment without them will
 # result in a working service but with email notifications permanently
 # disabled, which confuses our automation.

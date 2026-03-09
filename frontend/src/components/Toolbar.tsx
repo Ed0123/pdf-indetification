@@ -72,7 +72,7 @@ export function Toolbar({
       }}
     >
       <div style={{ display: "flex", alignItems: "center", gap: 10, minWidth: 240 }}>
-        <div style={{ fontSize: 18 }}>�</div>
+        <div style={{ fontSize: 18 }}>{"\uD83D\uDD27"}</div>
         <div>
           <div style={{ fontSize: 14, fontWeight: 700, color: "#243447" }}>QS 小工具</div>
           <div style={{ fontSize: 11, color: "#607388" }}>為QS同行而設的小工具</div>

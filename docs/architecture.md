@@ -1,5 +1,8 @@
 # Architecture & Feature Documentation
 
+> **Note (2026-03-07):** Reviewed and updated to match current project. Sections describing deprecated or unused functionality have been consolidated.
+
+
 > Last updated after Phase 11 (BQ Row Editing, Insert & Sub-item Hierarchy).
 
 ---

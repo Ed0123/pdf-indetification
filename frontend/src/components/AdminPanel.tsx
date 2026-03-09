@@ -1,10 +1,8 @@
 /**
- * AdminPanel — User management table for admin users.
- *
- * Displays all registered users with:
- *  - Filter by name / email
- *  - Inline edit: status dropdown, tier dropdown, group assignment, notes textarea
- *  - Usage statistics per user
+ * AdminPanel — User management with 3 sub-tabs:
+ *  (a) 群組與配額 — Groups + Tier/Quota management + Feature matrix
+ *  (b) 使用者列表 — User list with filter, sort, inline edit
+ *  (c) 使用者訊息 — Messages panel
  */
 import React, { useState, useMemo } from "react";
 import type { UserProfile, MemberTier, AccountStatus } from "../types/user";
@@ -30,6 +28,9 @@ interface AdminPanelProps {
 
 const STATUS_OPTIONS: AccountStatus[] = ["pending", "active", "suspended"];
 
+type AdminTab = "groups_tiers" | "users" | "messages";
+type SortField = "display_name" | "email" | "usage_pages" | "created_at" | "last_login" | "status" | "tier";
+
 export function AdminPanel({
   users,
   groups,
@@ -44,13 +45,15 @@ export function AdminPanel({
   onUpdateTier,
   onDeleteTier,
 }: AdminPanelProps) {
+  const [activeTab, setActiveTab] = useState<AdminTab>("users");
   const [filter, setFilter] = useState("");
-  const [showMessages, setShowMessages] = useState(false);
   const [editingNotes, setEditingNotes] = useState<{ uid: string; value: string } | null>(null);
   const [saving, setSaving] = useState<string | null>(null);
   const [newGroupName, setNewGroupName] = useState("");
   const [selectedGroupId, setSelectedGroupId] = useState("");
   const [renameGroupName, setRenameGroupName] = useState("");
+  const [sortField, setSortField] = useState<SortField>("display_name");
+  const [sortAsc, setSortAsc] = useState(true);
 
   // Tier management state
   const [newTierName, setNewTierName] = useState("");
@@ -70,15 +73,49 @@ export function AdminPanel({
   }, [tiers]);
 
   const filtered = useMemo(() => {
-    if (!filter.trim()) return users;
-    const q = filter.toLowerCase();
-    return users.filter(
-      (u) =>
-        u.display_name.toLowerCase().includes(q) ||
-        u.email.toLowerCase().includes(q) ||
-        (u.whatsapp || "").toLowerCase().includes(q)
-    );
-  }, [users, filter]);
+    let list = users;
+    if (filter.trim()) {
+      const q = filter.toLowerCase();
+      list = users.filter(
+        (u) =>
+          u.display_name.toLowerCase().includes(q) ||
+          u.email.toLowerCase().includes(q) ||
+          (u.whatsapp || "").toLowerCase().includes(q)
+      );
+    }
+    // Sort
+    const sorted = [...list].sort((a, b) => {
+      let av: any, bv: any;
+      switch (sortField) {
+        case "display_name": av = a.display_name.toLowerCase(); bv = b.display_name.toLowerCase(); break;
+        case "email": av = a.email.toLowerCase(); bv = b.email.toLowerCase(); break;
+        case "usage_pages": av = a.usage_pages ?? 0; bv = b.usage_pages ?? 0; break;
+        case "created_at": av = a.created_at || ""; bv = b.created_at || ""; break;
+        case "last_login": av = a.last_login || ""; bv = b.last_login || ""; break;
+        case "status": av = a.status; bv = b.status; break;
+        case "tier": av = a.tier; bv = b.tier; break;
+        default: av = ""; bv = "";
+      }
+      if (av < bv) return sortAsc ? -1 : 1;
+      if (av > bv) return sortAsc ? 1 : -1;
+      return 0;
+    });
+    return sorted;
+  }, [users, filter, sortField, sortAsc]);
+
+  const toggleSort = (field: SortField) => {
+    if (sortField === field) {
+      setSortAsc(!sortAsc);
+    } else {
+      setSortField(field);
+      setSortAsc(true);
+    }
+  };
+
+  const sortIcon = (field: SortField) => {
+    if (sortField !== field) return " ↕";
+    return sortAsc ? " ▲" : " ▼";
+  };
 
   const handleChange = async (uid: string, changes: Partial<UserProfile>) => {
     setSaving(uid);
@@ -163,400 +200,377 @@ export function AdminPanel({
     setEditTierProjectSize("");
   };
 
+  const tabs: { key: AdminTab; label: string }[] = [
+    { key: "users", label: "👥 使用者列表" },
+    { key: "groups_tiers", label: "⚙ 群組與配額" },
+    { key: "messages", label: "✉ 使用者訊息" },
+  ];
+
   return (
     <div style={container}>
       <div style={panel}>
         {/* Header */}
-        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 16 }}>
-          <h2 style={{ margin: 0, fontSize: 18 }}>⚙ 管理員面板</h2>
-          <div style={{ display: "flex", gap: 8 }}>
-            <button style={linkBtn} onClick={() => setShowMessages(!showMessages)}>
-              {showMessages ? "👥 使用者" : "✉ 訊息"}
-            </button>
-            <button style={linkBtn} onClick={onGoHome}>← 回到主頁</button>
-          </div>
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 12 }}>
+          <h2 style={{ margin: 0, fontSize: 18 }}>管理員面板</h2>
+          <button style={linkBtn} onClick={onGoHome}>← 回到主頁</button>
         </div>
 
-        {showMessages ? (
+        {/* Tab Bar */}
+        <div style={{ display: "flex", gap: 0, borderBottom: "2px solid #e0e0e0", marginBottom: 16 }}>
+          {tabs.map((t) => (
+            <button
+              key={t.key}
+              onClick={() => setActiveTab(t.key)}
+              style={{
+                padding: "8px 18px", fontSize: 13, fontWeight: activeTab === t.key ? 700 : 400,
+                border: "none", borderBottom: activeTab === t.key ? "2px solid #2980b9" : "2px solid transparent",
+                background: activeTab === t.key ? "#f0f7ff" : "transparent",
+                cursor: "pointer", color: activeTab === t.key ? "#2980b9" : "#555",
+                marginBottom: -2, borderRadius: "6px 6px 0 0",
+              }}
+            >
+              {t.label}
+            </button>
+          ))}
+        </div>
+
+        {/* Tab: Groups & Tiers */}
+        {activeTab === "groups_tiers" && (
+          <>
+            {/* Group management */}
+            <div style={sectionBox}>
+              <div style={{ fontSize: 14, fontWeight: 600, marginBottom: 8 }}>群組管理</div>
+              <div style={{ display: "flex", gap: 6, flexWrap: "wrap", alignItems: "center" }}>
+                <input
+                  style={{ ...inputStyle, width: 140 }}
+                  placeholder="新群組名稱"
+                  value={newGroupName}
+                  onChange={(e) => setNewGroupName(e.target.value)}
+                  onKeyDown={(e) => e.key === "Enter" && handleCreateGroup()}
+                />
+                <button style={miniBtn} onClick={handleCreateGroup}>新增</button>
+
+                <select
+                  style={{ ...selectStyle, minWidth: 140 }}
+                  value={selectedGroupId}
+                  onChange={(e) => {
+                    const id = e.target.value;
+                    setSelectedGroupId(id);
+                    const g = groups.find((x) => x.id === id);
+                    setRenameGroupName(g?.name ?? "");
+                  }}
+                >
+                  <option value="">選擇群組</option>
+                  {groups.map((g) => (
+                    <option key={g.id} value={g.id}>{g.name}</option>
+                  ))}
+                </select>
+
+                <input
+                  style={{ ...inputStyle, width: 140 }}
+                  placeholder="重新命名"
+                  value={renameGroupName}
+                  onChange={(e) => setRenameGroupName(e.target.value)}
+                  onKeyDown={(e) => e.key === "Enter" && handleRenameGroup()}
+                />
+                <button style={miniBtn} onClick={handleRenameGroup} disabled={!selectedGroupId || !renameGroupName.trim()}>重新命名</button>
+                <button style={miniBtn} onClick={handleDeleteGroup} disabled={!selectedGroupId}>刪除</button>
+              </div>
+            </div>
+
+            {/* Tier / Quota management */}
+            <div style={sectionBox}>
+              <div style={{ fontSize: 14, fontWeight: 600, marginBottom: 8 }}>會員類別 / 配額管理</div>
+
+              {/* Current tiers list */}
+              <div style={{ marginBottom: 8, display: "flex", gap: 6, flexWrap: "wrap" }}>
+                {tiers.map((t) => (
+                  <span key={t.id} style={{
+                    display: "inline-block", padding: "3px 8px", fontSize: 11,
+                    background: t.name === "admin" ? "#fdebd0" : "#d5f5e3",
+                    borderRadius: 4, border: "1px solid #ddd",
+                  }}>
+                    <strong>{t.label}</strong> ({t.name}) — {t.quota === -1 ? "無限" : `${t.quota}頁/月`}
+                  </span>
+                ))}
+              </div>
+
+              {/* Create new tier */}
+              <div style={{ display: "flex", gap: 6, flexWrap: "wrap", alignItems: "center", marginBottom: 6 }}>
+                <input style={{ ...inputStyle, width: 100 }} placeholder="名稱 (英文)" value={newTierName} onChange={(e) => setNewTierName(e.target.value)} />
+                <input style={{ ...inputStyle, width: 100 }} placeholder="顯示名稱" value={newTierLabel} onChange={(e) => setNewTierLabel(e.target.value)} />
+                <input style={{ ...inputStyle, width: 80 }} placeholder="配額" value={newTierQuota} onChange={(e) => setNewTierQuota(e.target.value)} type="number" title="-1 = 無限" />
+                <input style={{ ...inputStyle, width: 92 }} placeholder="專案MB" value={newTierProjectSize} onChange={(e) => setNewTierProjectSize(e.target.value)} type="number" title="每專案大小上限，-1 = 無限" />
+                <button style={miniBtn} onClick={handleCreateTier}>新增類別</button>
+              </div>
+
+              {/* Edit existing tier */}
+              <div style={{ display: "flex", gap: 6, flexWrap: "wrap", alignItems: "center" }}>
+                <select
+                  style={{ ...selectStyle, minWidth: 140 }}
+                  value={selectedTierId}
+                  onChange={(e) => {
+                    const id = e.target.value;
+                    setSelectedTierId(id);
+                    const t = tiers.find((x) => x.id === id);
+                    setEditTierLabel(t?.label ?? "");
+                    setEditTierQuota(t?.quota !== undefined ? String(t.quota) : "");
+                    setEditTierProjectSize(t?.project_size_mb !== undefined ? String(t.project_size_mb) : "");
+                  }}
+                >
+                  <option value="">選擇類別</option>
+                  {tiers.map((t) => (
+                    <option key={t.id} value={t.id}>{t.label} ({t.name})</option>
+                  ))}
+                </select>
+                <input style={{ ...inputStyle, width: 100 }} placeholder="顯示名稱" value={editTierLabel} onChange={(e) => setEditTierLabel(e.target.value)} />
+                <input style={{ ...inputStyle, width: 80 }} placeholder="配額" value={editTierQuota} onChange={(e) => setEditTierQuota(e.target.value)} type="number" title="-1 = 無限" />
+                <input style={{ ...inputStyle, width: 92 }} placeholder="專案MB" value={editTierProjectSize} onChange={(e) => setEditTierProjectSize(e.target.value)} type="number" title="每專案大小上限，-1 = 無限" />
+                <button style={miniBtn} onClick={handleUpdateTier} disabled={!selectedTierId}>更新</button>
+                <button style={miniBtn} onClick={handleDeleteTier} disabled={!selectedTierId}>刪除</button>
+              </div>
+
+              {/* Feature matrix */}
+              {tiers.length > 0 && (
+                <div style={{ marginTop: 12 }}>
+                  <div style={{ fontSize: 12, fontWeight: 600, marginBottom: 6 }}>功能矩陣</div>
+                  <div style={{ overflowX: "auto" }}>
+                    <table style={{ borderCollapse: "collapse", fontSize: 12, width: "100%" }}>
+                      <thead>
+                        <tr>
+                          <th style={{ ...thFeature, textAlign: "left" }}>功能</th>
+                          {tiers.map((t) => (
+                            <th key={t.id} style={thFeature}>{t.label}</th>
+                          ))}
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {TIER_FEATURES.map((feat) => (
+                          <tr key={feat.key}>
+                            <td style={tdFeature}>{feat.label}</td>
+                            {tiers.map((t) => {
+                              const enabled = t.features?.[feat.key] ?? false;
+                              return (
+                                <td key={t.id} style={{ ...tdFeature, textAlign: "center" }}>
+                                  <input
+                                    type="checkbox"
+                                    checked={enabled}
+                                    onChange={() => {
+                                      const newFeatures = { ...(t.features || {}), [feat.key]: !enabled };
+                                      onUpdateTier(t.id, { features: newFeatures });
+                                    }}
+                                  />
+                                </td>
+                              );
+                            })}
+                          </tr>
+                        ))}
+                        <tr>
+                          <td style={tdFeature}>雲端儲存 (MB)</td>
+                          {tiers.map((t) => (
+                            <td key={t.id} style={{ ...tdFeature, textAlign: "center" }}>
+                              <input
+                                type="number"
+                                style={{ width: 50, fontSize: 11, border: "1px solid #ccc", borderRadius: 2, textAlign: "center" }}
+                                value={t.storage_quota_mb ?? 0}
+                                onChange={(e) => {
+                                  const val = parseInt(e.target.value, 10);
+                                  if (!isNaN(val)) onUpdateTier(t.id, { storage_quota_mb: val });
+                                }}
+                                title="-1 = 無限, 0 = 無"
+                              />
+                            </td>
+                          ))}
+                        </tr>
+                        <tr>
+                          <td style={tdFeature}>每專案大小 (MB)</td>
+                          {tiers.map((t) => (
+                            <td key={t.id} style={{ ...tdFeature, textAlign: "center" }}>
+                              <input
+                                type="number"
+                                style={{ width: 50, fontSize: 11, border: "1px solid #ccc", borderRadius: 2, textAlign: "center" }}
+                                value={t.project_size_mb ?? 200}
+                                onChange={(e) => {
+                                  const val = parseInt(e.target.value, 10);
+                                  if (!isNaN(val)) onUpdateTier(t.id, { project_size_mb: val });
+                                }}
+                                title="-1 = 無限"
+                              />
+                            </td>
+                          ))}
+                        </tr>
+                      </tbody>
+                    </table>
+                  </div>
+                </div>
+              )}
+            </div>
+          </>
+        )}
+
+        {/* Tab: Users */}
+        {activeTab === "users" && (
+          <>
+            {/* Filter */}
+            <input
+              style={{ ...inputStyle, width: 280, marginBottom: 10 }}
+              placeholder="🔍 搜尋姓名 / 電郵 / WhatsApp"
+              value={filter}
+              onChange={(e) => setFilter(e.target.value)}
+            />
+            <div style={{ fontSize: 12, color: "#888", marginBottom: 10 }}>
+              共 {filtered.length} / {users.length} 位用戶　（點擊表頭排序）
+            </div>
+
+            {/* Table */}
+            <div style={{ overflowX: "auto" }}>
+              <table style={table}>
+                <thead>
+                  <tr>
+                    <th style={th}>#</th>
+                    <th style={{ ...th, cursor: "pointer" }} onClick={() => toggleSort("display_name")}>姓名{sortIcon("display_name")}</th>
+                    <th style={{ ...th, cursor: "pointer" }} onClick={() => toggleSort("email")}>電郵{sortIcon("email")}</th>
+                    <th style={th}>WhatsApp</th>
+                    <th style={{ ...th, cursor: "pointer" }} onClick={() => toggleSort("usage_pages")}>用量{sortIcon("usage_pages")}</th>
+                    <th style={th}>雲端用量</th>
+                    <th style={{ ...th, cursor: "pointer" }} onClick={() => toggleSort("tier")}>類別{sortIcon("tier")}</th>
+                    <th style={th}>群組</th>
+                    <th style={{ ...th, cursor: "pointer" }} onClick={() => toggleSort("created_at")}>加入日期{sortIcon("created_at")}</th>
+                    <th style={{ ...th, cursor: "pointer" }} onClick={() => toggleSort("last_login")}>最後登入{sortIcon("last_login")}</th>
+                    <th style={{ ...th, cursor: "pointer" }} onClick={() => toggleSort("status")}>狀態{sortIcon("status")}</th>
+                    <th style={th}>備註</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {filtered.map((u, i) => {
+                    const isSaving = saving === u.uid;
+                    return (
+                      <tr key={u.uid} style={{ opacity: isSaving ? 0.5 : 1, background: i % 2 === 0 ? "#fafafa" : "#fff" }}>
+                        <td style={td}>{i + 1}</td>
+                        <td style={td}>{u.display_name}</td>
+                        <td style={td}>{u.email}</td>
+                        <td style={td}>{u.whatsapp || "—"}</td>
+                        <td style={{ ...td, textAlign: "center" }}>
+                          <div style={{ display: "flex", alignItems: "center", justifyContent: "center", gap: 6 }}>
+                            <span>{u.usage_pages ?? 0}</span>
+                            <button
+                              style={miniBtn}
+                              onClick={() => handleResetUsage(u.uid)}
+                              disabled={isSaving}
+                              title="重置此用戶的本月用量"
+                            >
+                              重置
+                            </button>
+                          </div>
+                        </td>
+
+                        {/* Cloud storage used */}
+                        <td style={{ ...td, textAlign: "center", fontSize: 11, whiteSpace: "nowrap" }}>
+                          {u.storage_used_bytes
+                            ? u.storage_used_bytes < 1024 * 1024
+                              ? `${(u.storage_used_bytes / 1024).toFixed(1)} KB`
+                              : `${(u.storage_used_bytes / (1024 * 1024)).toFixed(1)} MB`
+                            : "0"}
+                        </td>
+
+                        {/* Tier dropdown */}
+                        <td style={td}>
+                          <select
+                            style={selectStyle}
+                            value={u.tier}
+                            onChange={(e) => handleChange(u.uid, { tier: e.target.value as MemberTier })}
+                          >
+                            {tiers.map((t) => (
+                              <option key={t.id} value={t.name}>{t.label}</option>
+                            ))}
+                          </select>
+                        </td>
+
+                        {/* Group dropdown */}
+                        <td style={td}>
+                          <select
+                            style={selectStyle}
+                            value={u.group || groups[0]?.name || ""}
+                            onChange={(e) => handleChange(u.uid, { group: e.target.value })}
+                          >
+                            {groups.map((g) => (
+                              <option key={g.id} value={g.name}>{g.name}</option>
+                            ))}
+                          </select>
+                        </td>
+
+                        <td style={{ ...td, fontSize: 11, whiteSpace: "nowrap" }}>
+                          {u.created_at ? new Date(u.created_at).toLocaleDateString() : "—"}
+                        </td>
+                        <td style={{ ...td, fontSize: 11, whiteSpace: "nowrap" }}>
+                          {u.last_login ? new Date(u.last_login).toLocaleDateString() : "—"}
+                        </td>
+
+                        {/* Status dropdown */}
+                        <td style={td}>
+                          <select
+                            style={{
+                              ...selectStyle,
+                              color: u.status === "active" ? "#27ae60" : u.status === "pending" ? "#f39c12" : "#c0392b",
+                              fontWeight: 600,
+                            }}
+                            value={u.status}
+                            onChange={(e) => handleChange(u.uid, { status: e.target.value as AccountStatus })}
+                          >
+                            {STATUS_OPTIONS.map((s) => (
+                              <option key={s} value={s}>{STATUS_LABELS[s]}</option>
+                            ))}
+                          </select>
+                        </td>
+
+                        {/* Notes */}
+                        <td style={td}>
+                          {editingNotes?.uid === u.uid ? (
+                            <div style={{ display: "flex", gap: 4 }}>
+                              <textarea
+                                style={{ ...inputStyle, width: 140, height: 40, resize: "vertical" }}
+                                value={editingNotes.value}
+                                onChange={(e) => setEditingNotes({ uid: u.uid, value: e.target.value })}
+                                autoFocus
+                              />
+                              <button style={miniBtn} onClick={saveNotes}>✓</button>
+                              <button style={miniBtn} onClick={() => setEditingNotes(null)}>✕</button>
+                            </div>
+                          ) : (
+                            <span
+                              style={{ cursor: "pointer", color: u.notes ? "#333" : "#bbb", fontSize: 12 }}
+                              title="Click to edit"
+                              onClick={() => setEditingNotes({ uid: u.uid, value: u.notes || "" })}
+                            >
+                              {u.notes || "—"}
+                            </span>
+                          )}
+                        </td>
+                      </tr>
+                    );
+                  })}
+                  {filtered.length === 0 && (
+                    <tr>
+                      <td colSpan={12} style={{ ...td, textAlign: "center", color: "#aaa" }}>
+                        沒有符合條件的用戶
+                      </td>
+                    </tr>
+                  )}
+                </tbody>
+              </table>
+            </div>
+          </>
+        )}
+
+        {/* Tab: Messages */}
+        {activeTab === "messages" && (
           <AdminMessagesPanel
             fetchAllMessages={fetchAllMessages}
             replyToMessage={replyToMessage}
           />
-        ) : (
-          <>
-            {/* existing user management UI continues below */}
-          </>
         )}
-
-        {!showMessages && (
-          <>
-            {/* Filter */}
-            <input
-          style={{ ...inputStyle, width: 280, marginBottom: 14 }}
-          placeholder="🔍 搜尋姓名 / 電郵 / WhatsApp"
-          value={filter}
-          onChange={(e) => setFilter(e.target.value)}
-        />
-        <div style={{ fontSize: 12, color: "#888", marginBottom: 10 }}>
-          共 {filtered.length} / {users.length} 位用戶
-        </div>
-
-        {/* Group management */}
-        <div style={{
-          marginBottom: 14,
-          padding: "10px 12px",
-          border: "1px solid #e6e6e6",
-          borderRadius: 6,
-          background: "#fafafa",
-        }}>
-          <div style={{ fontSize: 13, fontWeight: 600, marginBottom: 8 }}>群組管理</div>
-          <div style={{ display: "flex", gap: 6, flexWrap: "wrap", alignItems: "center" }}>
-            <input
-              style={{ ...inputStyle, width: 140 }}
-              placeholder="新群組名稱"
-              value={newGroupName}
-              onChange={(e) => setNewGroupName(e.target.value)}
-              onKeyDown={(e) => e.key === "Enter" && handleCreateGroup()}
-            />
-            <button style={miniBtn} onClick={handleCreateGroup}>新增</button>
-
-            <select
-              style={{ ...selectStyle, minWidth: 140 }}
-              value={selectedGroupId}
-              onChange={(e) => {
-                const id = e.target.value;
-                setSelectedGroupId(id);
-                const g = groups.find((x) => x.id === id);
-                setRenameGroupName(g?.name ?? "");
-              }}
-            >
-              <option value="">選擇群組</option>
-              {groups.map((g) => (
-                <option key={g.id} value={g.id}>{g.name}</option>
-              ))}
-            </select>
-
-            <input
-              style={{ ...inputStyle, width: 140 }}
-              placeholder="重新命名"
-              value={renameGroupName}
-              onChange={(e) => setRenameGroupName(e.target.value)}
-              onKeyDown={(e) => e.key === "Enter" && handleRenameGroup()}
-            />
-            <button style={miniBtn} onClick={handleRenameGroup} disabled={!selectedGroupId || !renameGroupName.trim()}>重新命名</button>
-            <button style={miniBtn} onClick={handleDeleteGroup} disabled={!selectedGroupId}>刪除</button>
-          </div>
-        </div>
-
-        {/* Tier / Quota management */}
-        <div style={{
-          marginBottom: 14,
-          padding: "10px 12px",
-          border: "1px solid #e6e6e6",
-          borderRadius: 6,
-          background: "#fafafa",
-        }}>
-          <div style={{ fontSize: 13, fontWeight: 600, marginBottom: 8 }}>會員類別 / 配額管理</div>
-
-          {/* Current tiers list */}
-          <div style={{ marginBottom: 8, display: "flex", gap: 6, flexWrap: "wrap" }}>
-            {tiers.map((t) => (
-              <span key={t.id} style={{
-                display: "inline-block", padding: "3px 8px", fontSize: 11,
-                background: t.name === "admin" ? "#fdebd0" : "#d5f5e3",
-                borderRadius: 4, border: "1px solid #ddd",
-              }}>
-                <strong>{t.label}</strong> ({t.name}) — {t.quota === -1 ? "無限" : `${t.quota}頁/月`}
-              </span>
-            ))}
-          </div>
-
-          {/* Create new tier */}
-          <div style={{ display: "flex", gap: 6, flexWrap: "wrap", alignItems: "center", marginBottom: 6 }}>
-            <input
-              style={{ ...inputStyle, width: 100 }}
-              placeholder="名稱 (英文)"
-              value={newTierName}
-              onChange={(e) => setNewTierName(e.target.value)}
-            />
-            <input
-              style={{ ...inputStyle, width: 100 }}
-              placeholder="顯示名稱"
-              value={newTierLabel}
-              onChange={(e) => setNewTierLabel(e.target.value)}
-            />
-            <input
-              style={{ ...inputStyle, width: 80 }}
-              placeholder="配額"
-              value={newTierQuota}
-              onChange={(e) => setNewTierQuota(e.target.value)}
-              type="number"
-              title="-1 = 無限"
-            />
-            <input
-              style={{ ...inputStyle, width: 92 }}
-              placeholder="專案MB"
-              value={newTierProjectSize}
-              onChange={(e) => setNewTierProjectSize(e.target.value)}
-              type="number"
-              title="每專案大小上限，-1 = 無限"
-            />
-            <button style={miniBtn} onClick={handleCreateTier}>新增類別</button>
-          </div>
-
-          {/* Edit existing tier */}
-          <div style={{ display: "flex", gap: 6, flexWrap: "wrap", alignItems: "center" }}>
-            <select
-              style={{ ...selectStyle, minWidth: 140 }}
-              value={selectedTierId}
-              onChange={(e) => {
-                const id = e.target.value;
-                setSelectedTierId(id);
-                const t = tiers.find((x) => x.id === id);
-                setEditTierLabel(t?.label ?? "");
-                setEditTierQuota(t?.quota !== undefined ? String(t.quota) : "");
-                setEditTierProjectSize(t?.project_size_mb !== undefined ? String(t.project_size_mb) : "");
-              }}
-            >
-              <option value="">選擇類別</option>
-              {tiers.map((t) => (
-                <option key={t.id} value={t.id}>{t.label} ({t.name})</option>
-              ))}
-            </select>
-            <input
-              style={{ ...inputStyle, width: 100 }}
-              placeholder="顯示名稱"
-              value={editTierLabel}
-              onChange={(e) => setEditTierLabel(e.target.value)}
-            />
-            <input
-              style={{ ...inputStyle, width: 80 }}
-              placeholder="配額"
-              value={editTierQuota}
-              onChange={(e) => setEditTierQuota(e.target.value)}
-              type="number"
-              title="-1 = 無限"
-            />
-            <input
-              style={{ ...inputStyle, width: 92 }}
-              placeholder="專案MB"
-              value={editTierProjectSize}
-              onChange={(e) => setEditTierProjectSize(e.target.value)}
-              type="number"
-              title="每專案大小上限，-1 = 無限"
-            />
-            <button style={miniBtn} onClick={handleUpdateTier} disabled={!selectedTierId}>更新</button>
-            <button style={miniBtn} onClick={handleDeleteTier} disabled={!selectedTierId}>刪除</button>
-          </div>
-
-          {/* Feature matrix */}
-          {tiers.length > 0 && (
-            <div style={{ marginTop: 12 }}>
-              <div style={{ fontSize: 12, fontWeight: 600, marginBottom: 6 }}>功能矩陣</div>
-              <div style={{ overflowX: "auto" }}>
-                <table style={{ borderCollapse: "collapse", fontSize: 12, width: "100%" }}>
-                  <thead>
-                    <tr>
-                      <th style={{ ...thFeature, textAlign: "left" }}>功能</th>
-                      {tiers.map((t) => (
-                        <th key={t.id} style={thFeature}>{t.label}</th>
-                      ))}
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {TIER_FEATURES.map((feat) => (
-                      <tr key={feat.key}>
-                        <td style={tdFeature}>{feat.label}</td>
-                        {tiers.map((t) => {
-                          const enabled = t.features?.[feat.key] ?? false;
-                          return (
-                            <td key={t.id} style={{ ...tdFeature, textAlign: "center" }}>
-                              <input
-                                type="checkbox"
-                                checked={enabled}
-                                onChange={() => {
-                                  const newFeatures = { ...(t.features || {}), [feat.key]: !enabled };
-                                  onUpdateTier(t.id, { features: newFeatures });
-                                }}
-                              />
-                            </td>
-                          );
-                        })}
-                      </tr>
-                    ))}
-                    <tr>
-                      <td style={tdFeature}>雲端儲存 (MB)</td>
-                      {tiers.map((t) => (
-                        <td key={t.id} style={{ ...tdFeature, textAlign: "center" }}>
-                          <input
-                            type="number"
-                            style={{ width: 50, fontSize: 11, border: "1px solid #ccc", borderRadius: 2, textAlign: "center" }}
-                            value={t.storage_quota_mb ?? 0}
-                            onChange={(e) => {
-                              const val = parseInt(e.target.value, 10);
-                              if (!isNaN(val)) onUpdateTier(t.id, { storage_quota_mb: val });
-                            }}
-                            title="-1 = 無限, 0 = 無"
-                          />
-                        </td>
-                      ))}
-                    </tr>
-                    <tr>
-                      <td style={tdFeature}>每專案大小 (MB)</td>
-                      {tiers.map((t) => (
-                        <td key={t.id} style={{ ...tdFeature, textAlign: "center" }}>
-                          <input
-                            type="number"
-                            style={{ width: 50, fontSize: 11, border: "1px solid #ccc", borderRadius: 2, textAlign: "center" }}
-                            value={t.project_size_mb ?? 200}
-                            onChange={(e) => {
-                              const val = parseInt(e.target.value, 10);
-                              if (!isNaN(val)) onUpdateTier(t.id, { project_size_mb: val });
-                            }}
-                            title="-1 = 無限"
-                          />
-                        </td>
-                      ))}
-                    </tr>
-                  </tbody>
-                </table>
-              </div>
-            </div>
-          )}
-        </div>
-
-        {/* Table */}
-        <div style={{ overflowX: "auto" }}>
-          <table style={table}>
-            <thead>
-              <tr>
-                {["#", "姓名", "電郵", "WhatsApp", "用量", "雲端用量", "類別", "群組", "加入日期", "最後登入", "狀態", "備註"].map((h) => (
-                  <th key={h} style={th}>{h}</th>
-                ))}
-              </tr>
-            </thead>
-            <tbody>
-              {filtered.map((u, i) => {
-                const isSaving = saving === u.uid;
-                return (
-                  <tr key={u.uid} style={{ opacity: isSaving ? 0.5 : 1, background: i % 2 === 0 ? "#fafafa" : "#fff" }}>
-                    <td style={td}>{i + 1}</td>
-                    <td style={td}>{u.display_name}</td>
-                    <td style={td}>{u.email}</td>
-                    <td style={td}>{u.whatsapp || "—"}</td>
-                    <td style={{ ...td, textAlign: "center" }}>
-                      <div style={{ display: "flex", alignItems: "center", justifyContent: "center", gap: 6 }}>
-                        <span>{u.usage_pages ?? 0}</span>
-                        <button
-                          style={miniBtn}
-                          onClick={() => handleResetUsage(u.uid)}
-                          disabled={isSaving}
-                          title="重置此用戶的本月用量"
-                        >
-                          重置
-                        </button>
-                      </div>
-                    </td>
-
-                    {/* Cloud storage used */}
-                    <td style={{ ...td, textAlign: "center", fontSize: 11, whiteSpace: "nowrap" }}>
-                      {u.storage_used_bytes
-                        ? u.storage_used_bytes < 1024 * 1024
-                          ? `${(u.storage_used_bytes / 1024).toFixed(1)} KB`
-                          : `${(u.storage_used_bytes / (1024 * 1024)).toFixed(1)} MB`
-                        : "0"}
-                    </td>
-
-                    {/* Tier dropdown */}
-                    <td style={td}>
-                      <select
-                        style={selectStyle}
-                        value={u.tier}
-                        onChange={(e) => handleChange(u.uid, { tier: e.target.value as MemberTier })}
-                      >
-                        {tiers.map((t) => (
-                          <option key={t.id} value={t.name}>{t.label}</option>
-                        ))}
-                      </select>
-                    </td>
-
-                    {/* Group dropdown */}
-                    <td style={td}>
-                      <select
-                        style={selectStyle}
-                        value={u.group || groups[0]?.name || ""}
-                        onChange={(e) => handleChange(u.uid, { group: e.target.value })}
-                      >
-                        {groups.map((g) => (
-                          <option key={g.id} value={g.name}>{g.name}</option>
-                        ))}
-                      </select>
-                    </td>
-
-                    <td style={{ ...td, fontSize: 11, whiteSpace: "nowrap" }}>
-                      {u.created_at ? new Date(u.created_at).toLocaleDateString() : "—"}
-                    </td>
-                    <td style={{ ...td, fontSize: 11, whiteSpace: "nowrap" }}>
-                      {u.last_login ? new Date(u.last_login).toLocaleDateString() : "—"}
-                    </td>
-
-                    {/* Status dropdown */}
-                    <td style={td}>
-                      <select
-                        style={{
-                          ...selectStyle,
-                          color: u.status === "active" ? "#27ae60" : u.status === "pending" ? "#f39c12" : "#c0392b",
-                          fontWeight: 600,
-                        }}
-                        value={u.status}
-                        onChange={(e) => handleChange(u.uid, { status: e.target.value as AccountStatus })}
-                      >
-                        {STATUS_OPTIONS.map((s) => (
-                          <option key={s} value={s}>{STATUS_LABELS[s]}</option>
-                        ))}
-                      </select>
-                    </td>
-
-                    {/* Notes */}
-                    <td style={td}>
-                      {editingNotes?.uid === u.uid ? (
-                        <div style={{ display: "flex", gap: 4 }}>
-                          <textarea
-                            style={{ ...inputStyle, width: 140, height: 40, resize: "vertical" }}
-                            value={editingNotes.value}
-                            onChange={(e) => setEditingNotes({ uid: u.uid, value: e.target.value })}
-                            autoFocus
-                          />
-                          <button style={miniBtn} onClick={saveNotes}>✓</button>
-                          <button style={miniBtn} onClick={() => setEditingNotes(null)}>✕</button>
-                        </div>
-                      ) : (
-                        <span
-                          style={{ cursor: "pointer", color: u.notes ? "#333" : "#bbb", fontSize: 12 }}
-                          title="Click to edit"
-                          onClick={() => setEditingNotes({ uid: u.uid, value: u.notes || "" })}
-                        >
-                          {u.notes || "—"}
-                        </span>
-                      )}
-                    </td>
-                  </tr>
-                );
-              })}
-              {filtered.length === 0 && (
-                <tr>
-                  <td colSpan={12} style={{ ...td, textAlign: "center", color: "#aaa" }}>
-                    沒有符合條件的用戶
-                  </td>
-                </tr>
-              )}
-            </tbody>
-          </table>
-        </div>
-      </>
-    )}
+      </div>
     </div>
-  </div>
   );
 }
 
@@ -570,12 +584,19 @@ const panel: React.CSSProperties = {
   background: "#fff", borderRadius: 10, padding: "28px 30px",
   boxShadow: "0 4px 20px rgba(0,0,0,0.08)", width: 1100, maxWidth: "98vw",
 };
+const sectionBox: React.CSSProperties = {
+  marginBottom: 14,
+  padding: "10px 12px",
+  border: "1px solid #e6e6e6",
+  borderRadius: 6,
+  background: "#fafafa",
+};
 const table: React.CSSProperties = {
   width: "100%", borderCollapse: "collapse", fontSize: 13,
 };
 const th: React.CSSProperties = {
   borderBottom: "2px solid #ddd", padding: "8px 6px", textAlign: "left",
-  fontSize: 12, color: "#555", whiteSpace: "nowrap",
+  fontSize: 12, color: "#555", whiteSpace: "nowrap", userSelect: "none",
 };
 const td: React.CSSProperties = {
   borderBottom: "1px solid #eee", padding: "7px 6px", verticalAlign: "middle",

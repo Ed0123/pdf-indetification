@@ -36,11 +36,12 @@ const formatQuantity = (value: number | null | undefined): string => {
 };
 
 /** Available BQ row types that a user can pick from. */
-// row types exposed to users; remove carry-forward / collection-total options per new UX
 const ROW_TYPE_OPTIONS: { value: BQItemType; label: string }[] = [
   { value: "item",  label: "Item" },
   { value: "notes", label: "Notes" },
   { value: "collection_entry", label: "Collection Entry" },
+  { value: "collection_cf", label: "Carry/Brought Fwd" },
+  { value: "collection_total", label: "Collection Total" },
 ];
 
 interface BQExportPanelProps {
@@ -103,8 +104,6 @@ export function BQExportPanel({
   const [exportError, setExportError] = useState<string | null>(null);
   const [editingCell, setEditingCell] = useState<{ pageKey: string; rowId: number; field: string; rowToken: string } | null>(null);
   const [editValue, setEditValue] = useState("");
-  const [showHelp, setShowHelp] = useState(false);
-
   // Focused cell (for keyboard nav, highlighted but not editing)
   const [focusedCell, setFocusedCell] = useState<{ rowIdx: number; colIdx: number } | null>(null);
   // Selection range for copy
@@ -125,55 +124,12 @@ export function BQExportPanel({
 
   // Export filter state
   const [exportFilterPage, setExportFilterPage] = useState<string>("all");
-
   const [exportFilterRev, setExportFilterRev] = useState<string>("all");
   const [exportFilterType, setExportFilterType] = useState<string>("all");
   const [sortBy, setSortBy] = useState<{
-    key: "page" | "revision" | "type" | "item_no" | "description" | "quantity" | "unit" | "rate" | "subtotal" | "total";
+    key: "page" | "revision" | "type" | "item_no" | "description" | "quantity" | "unit" | "rate" | "total";
     direction: "asc" | "desc";
   } | null>(null);
-
-  // column visibility/widths for resize & hide
-  const [hiddenCols, setHiddenCols] = useState<Set<string>>(new Set());
-  const [columnWidths, setColumnWidths] = useState<Record<string, number>>({});
-  // toggle whether item header shows ref or just item
-  const [showFullItemRef, setShowFullItemRef] = useState(false);
-
-  const toggleHideCol = useCallback((key: string) => {
-    setHiddenCols(prev => {
-      const next = new Set(prev);
-      if (next.has(key)) next.delete(key);
-      else next.add(key);
-      return next;
-    });
-  }, []);
-
-  const startResize = useCallback((key: string, e: React.MouseEvent) => {
-    e.preventDefault();
-    e.stopPropagation();
-    const startX = e.clientX;
-    const startWidth = columnWidths[key] ?? (e.currentTarget.parentElement ? e.currentTarget.parentElement.offsetWidth : 100);
-    const onMove = (mv: MouseEvent) => {
-      const delta = mv.clientX - startX;
-      setColumnWidths(prev => ({ ...prev, [key]: Math.max(20, startWidth + delta) }));
-    };
-    const onUp = () => {
-      document.removeEventListener("mousemove", onMove);
-      document.removeEventListener("mouseup", onUp);
-    };
-    document.addEventListener("mousemove", onMove);
-    document.addEventListener("mouseup", onUp);
-  }, [columnWidths]);
-
-  const unhideAll = useCallback(() => setHiddenCols(new Set()), []);
-
-  const colStyle = (key: string): React.CSSProperties => {
-    const style: React.CSSProperties = {};
-    if (hiddenCols.has(key)) style.display = "none";
-    if (columnWidths[key] != null) style.width = columnWidths[key];
-    return style;
-  };
-
   const [columnFilters, setColumnFilters] = useState<Record<string, string>>({
     page: "",
     revision: "",
@@ -183,7 +139,6 @@ export function BQExportPanel({
     quantity: "",
     unit: "",
     rate: "",
-    subtotal: "",
     total: "",
   });
 
@@ -193,8 +148,6 @@ export function BQExportPanel({
     for (const pageData of Object.values(bqPageData)) {
       for (let rowIndex = 0; rowIndex < pageData.rows.length; rowIndex++) {
         const row = pageData.rows[rowIndex];
-        // ignore deprecated collection_cf and collection_total rows
-        if (row.type === "collection_cf" || row.type === "collection_total") continue;
         const pageKey = `${pageData.file_id}-${pageData.page_number}`;
         rows.push({ pageKey, row, rowIndex });
       }
@@ -268,36 +221,6 @@ export function BQExportPanel({
     });
     return sorted;
   }, [allRows, filterType, columnFilters, sortBy]);
-
-  // build a version of filteredRows that inserts a page-total synthetic row after each page
-  const rowsWithPageTotals = useMemo(() => {
-    const result: Array<{ pageKey: string; row: any; isPageTotal?: boolean }> = [];
-    let currentPage: string | null = null;
-    let acc = 0;
-    const pushTotal = () => {
-      if (currentPage !== null) {
-        result.push({ pageKey: currentPage, row: { type: "page_total", subtotal: round2(acc) }, isPageTotal: true });
-      }
-    };
-    for (let i = 0; i < filteredRows.length; i++) {
-      const { pageKey, row } = filteredRows[i];
-      if (currentPage === null) {
-        currentPage = pageKey;
-        acc = 0;
-      }
-      if (row.type === "item" && typeof row.total === "number") {
-        acc += row.total;
-      }
-      result.push({ pageKey, row });
-      const next = filteredRows[i + 1];
-      if (!next || next.pageKey !== currentPage) {
-        pushTotal();
-        currentPage = next ? next.pageKey : null;
-        acc = 0;
-      }
-    }
-    return result;
-  }, [filteredRows]);
 
   // Statistics
   const stats = useMemo(() => {
@@ -503,13 +426,6 @@ export function BQExportPanel({
     onRowEdit(pageKey, row.id, "type", newType);
     onRowEdit(pageKey, row.id, "user_edited" as keyof BQRow, { ...(row.user_edited || {}), type: true });
 
-    // when turning into an item or adding a new item default quantity to 1
-    if (newType === "item") {
-      onRowEdit(pageKey, row.id, "quantity", row.quantity ?? 1);
-      onRowEdit(pageKey, row.id, "rate", row.rate ?? null);
-      onRowEdit(pageKey, row.id, "total", row.total ?? null);
-    }
-
     if (newType !== "collection_entry") return;
 
     const pageData = bqPageData[pageKey];
@@ -574,9 +490,7 @@ export function BQExportPanel({
 
   const getCellValue = useCallback((row: BQRow, field: EditCol): string => {
     switch (field) {
-      case "item_no":
-        if (showFullItemRef) return buildRef(row) || "";
-        return row.item_no || "";
+      case "item_no": return row.item_no || "";
       case "description": return row.description || "";
       case "quantity": return row.quantity != null ? String(row.quantity) : "";
       case "unit": return row.unit || "";
@@ -584,7 +498,7 @@ export function BQExportPanel({
       case "total": return row.total != null ? String(row.total) : "";
       default: return "";
     }
-  }, [showFullItemRef, buildRef]);
+  }, []);
 
   // ──────────────────────────────────────────────────────────────────────────
   // Cell editing
@@ -704,22 +618,20 @@ export function BQExportPanel({
   // ──────────────────────────────────────────────────────────────────────────
 
   const focusCell = useCallback((rowIdx: number, colIdx: number, startEdit = false) => {
-    if (rowIdx < 0 || rowIdx >= rowsWithPageTotals.length) return;
+    if (rowIdx < 0 || rowIdx >= filteredRows.length) return;
     if (colIdx < 0 || colIdx >= EDITABLE_COLS.length) return;
     setFocusedCell({ rowIdx, colIdx });
     setSelectionStart({ rowIdx, colIdx });
     setSelectionEnd({ rowIdx, colIdx });
     if (startEdit) {
-      const display = rowsWithPageTotals[rowIdx];
-      if (display?.isPageTotal) return;
-      const { pageKey, row } = display;
+      const { pageKey, row } = filteredRows[rowIdx];
       const field = EDITABLE_COLS[colIdx];
       handleStartEdit(pageKey, row.id, field, getCellValue(row, field), row);
     } else {
       // Ensure table container has keyboard focus so arrow keys work, not the scrollbar
       setTimeout(() => tableRef.current?.focus(), 0);
     }
-  }, [rowsWithPageTotals, handleStartEdit, getCellValue, tableRef]);
+  }, [filteredRows, handleStartEdit, getCellValue, tableRef]);
 
   const saveAndMove = useCallback((dRow: number, dCol: number) => {
     handleSaveEdit();
@@ -760,17 +672,14 @@ export function BQExportPanel({
     e.preventDefault();
     const lines: string[] = [];
     for (let r = selectionRect.minRow; r <= selectionRect.maxRow; r++) {
-      if (r < 0 || r >= rowsWithPageTotals.length) break;
-      const disp = rowsWithPageTotals[r];
-      if (disp.isPageTotal) continue; // do not include synthetic row in copy
       const cells: string[] = [];
       for (let c = selectionRect.minCol; c <= selectionRect.maxCol; c++) {
-        cells.push(getCellValue(disp.row, EDITABLE_COLS[c]));
+        cells.push(getCellValue(filteredRows[r].row, EDITABLE_COLS[c]));
       }
       lines.push(cells.join("\t"));
     }
     e.clipboardData.setData("text/plain", lines.join("\n"));
-  }, [selectionRect, editingCell, rowsWithPageTotals, getCellValue]);
+  }, [selectionRect, editingCell, filteredRows, getCellValue]);
 
   const handlePaste = useCallback((e: React.ClipboardEvent) => {
     if (!focusedCell || editingCell) return;
@@ -779,20 +688,10 @@ export function BQExportPanel({
     if (!clipData) return;
     const lines = clipData.split(/\r?\n/).filter(l => l.length > 0);
     for (let dr = 0; dr < lines.length; dr++) {
-      let rowIdx = focusedCell.rowIdx + dr;
-      if (rowIdx >= rowsWithPageTotals.length) break;
-      // skip over any synthetic page total rows
-      let display = rowsWithPageTotals[rowIdx];
-      if (display.isPageTotal) {
-        // advance until next real row or break
-        while (rowIdx < rowsWithPageTotals.length && rowsWithPageTotals[rowIdx].isPageTotal) {
-          rowIdx++;
-        }
-        if (rowIdx >= rowsWithPageTotals.length) break;
-        display = rowsWithPageTotals[rowIdx];
-      }
+      const rowIdx = focusedCell.rowIdx + dr;
+      if (rowIdx >= filteredRows.length) break;
       const cols = lines[dr].split("\t");
-      const { pageKey, row } = display;
+      const { pageKey, row } = filteredRows[rowIdx];
 
       // Track what values are pasted in this row for auto-total calculation
       let rowPastedRate: number | null | undefined = undefined;
@@ -858,7 +757,7 @@ export function BQExportPanel({
       }
     }
     setSelectionEnd({
-      rowIdx: Math.min(focusedCell.rowIdx + lines.length - 1, rowsWithPageTotals.length - 1),
+      rowIdx: Math.min(focusedCell.rowIdx + lines.length - 1, filteredRows.length - 1),
       colIdx: Math.min(focusedCell.colIdx + (lines[0]?.split("\t").length ?? 1) - 1, EDITABLE_COLS.length - 1),
     });
   }, [focusedCell, editingCell, filteredRows, onRowEdit]);
@@ -866,20 +765,6 @@ export function BQExportPanel({
   // ──────────────────────────────────────────────────────────────────────────
   // Global keyboard handler
   // ──────────────────────────────────────────────────────────────────────────
-
-  // helper for navigation - skip over notes rows and page-total rows
-  const isSkippable = (obj: { row: any; isPageTotal?: boolean }) => {
-    return obj.row.type === "notes" || obj.isPageTotal;
-  };
-
-  const findNextIndex = (start: number, dir: number) => {
-    let idx = start + dir;
-    while (idx >= 0 && idx < rowsWithPageTotals.length) {
-      if (!isSkippable(rowsWithPageTotals[idx])) return idx;
-      idx += dir;
-    }
-    return start;
-  };
 
   const handleTableKeyDown = useCallback((e: React.KeyboardEvent) => {
     if (!focusedCell) return;
@@ -899,19 +784,13 @@ export function BQExportPanel({
         e.preventDefault();
         if (e.shiftKey && selectionStart) {
           setSelectionEnd(prev => ({ rowIdx: Math.max(0, (prev?.rowIdx ?? focusedCell.rowIdx) - 1), colIdx: prev?.colIdx ?? focusedCell.colIdx }));
-        } else {
-          const next = findNextIndex(focusedCell.rowIdx, -1);
-          focusCell(next, focusedCell.colIdx);
-        }
+        } else { focusCell(focusedCell.rowIdx - 1, focusedCell.colIdx); }
         break;
       case "ArrowDown":
         e.preventDefault();
         if (e.shiftKey && selectionStart) {
-          setSelectionEnd(prev => ({ rowIdx: Math.min(rowsWithPageTotals.length - 1, (prev?.rowIdx ?? focusedCell.rowIdx) + 1), colIdx: prev?.colIdx ?? focusedCell.colIdx }));
-        } else {
-          const next = findNextIndex(focusedCell.rowIdx, 1);
-          focusCell(next, focusedCell.colIdx);
-        }
+          setSelectionEnd(prev => ({ rowIdx: Math.min(filteredRows.length - 1, (prev?.rowIdx ?? focusedCell.rowIdx) + 1), colIdx: prev?.colIdx ?? focusedCell.colIdx }));
+        } else { focusCell(focusedCell.rowIdx + 1, focusedCell.colIdx); }
         break;
       case "ArrowLeft":
         e.preventDefault();
@@ -1006,24 +885,13 @@ export function BQExportPanel({
   };
 
   const buildExportData = (pid: string) => {
-    const out: any[] = [];
-    const filtered = getFilteredExportRows();
-    let currentPage: string | null = null;
-    let acc = 0;
-    for (let i = 0; i < filtered.length; i++) {
-      const { row } = filtered[i];
-      if (currentPage === null) {
-        currentPage = row.page_label || "";
-        acc = 0;
-      }
-      if (row.type === "item" && typeof row.total === "number") acc += row.total;
-
+    return getFilteredExportRows().map(({ row }, idx) => {
       const { bill, page } = parseBillPage(row.page_label || "");
       const ref = buildRef(row);
       const hasQty = row.type === "item";
       const typeLabel = row.type === "item" ? "Item" : row.type === "notes" ? "Notes" : row.type;
-      out.push({
-        id: out.length + 1, project_id: pid,
+      return {
+        id: idx + 1, project_id: pid,
         Type: typeLabel,
         bill, page, item: row.item_no, revision: row.revision, ref,
         data_detail: row.description,
@@ -1035,22 +903,8 @@ export function BQExportPanel({
           rate: row.rate?.toString() ?? "",
           total: (row.quantity && row.rate) ? (row.quantity * row.rate).toString() : (row.total?.toString() ?? ""),
         } : {}),
-      });
-      const next = filtered[i + 1];
-      if (!next || next.row.page_label !== currentPage) {
-        // insert page total row
-        out.push({
-          id: out.length + 1, project_id: pid,
-          Type: "page_total",
-          bill, page,
-          data_detail: "Page total",
-          subtotal: acc.toString(),
-        });
-        currentPage = next ? next.row.page_label : null;
-        acc = 0;
-      }
-    }
-    return out;
+      };
+    });
   };
 
   const buildColumnRanges = () => {
@@ -1265,24 +1119,6 @@ export function BQExportPanel({
 
   return (
     <div style={container}>
-      {showHelp && (
-        <div style={{position: "fixed", top:0, left:0, right:0, bottom:0, background: "rgba(0,0,0,0.4)", zIndex: 1000, display:"flex", alignItems:"center", justifyContent:"center"}} onClick={() => setShowHelp(false)}>
-          <div style={{background: "#fff", padding: 20, maxWidth: 600, maxHeight: "80%", overflowY: "auto", borderRadius: 6, position: "relative"}} onClick={(e) => e.stopPropagation()}>
-            <h2>BQ Export 使用說明</h2>
-            <p>此面板允許您查看並編輯從 PDF BQ OCR 提取的數據，並導出為 Excel、PDF 或 JSON 等格式。</p>
-            <ul>
-              <li>使用箭頭鍵在單元格間導航；新增行使用 Insert；</li>
-              <li>將類型設為 “Notes” 時鍵盤導航會跳過這些行；</li>
-              <li>每頁底部會自動顯示頁面小計，匯出時也會包含；</li>
-              <li>您可以隱藏欄位並使用「取消隱藏」按鈕還原；</li>
-              <li>點擊「切換 Item」可在顯示 Item/Ref 標籤切換；</li>
-              <li>在必要時點擊「重新計算」按鈕更新所有總額。</li>
-            </ul>
-            <p>詳細文件請參閱 <code>docs/BQ export 功能介紹.md</code>。</p>
-            <button onClick={() => setShowHelp(false)} style={{position:"absolute", top:10,right:10}}>✖</button>
-          </div>
-        </div>
-      )}
       {/* Header */}
       <div style={headerBar}>
         <span style={{ fontWeight: 700, fontSize: 14 }}>📊 BQ Export</span>
@@ -1338,51 +1174,6 @@ export function BQExportPanel({
         >
           🔄 重新計算
         </button>
-        <button
-          onClick={unhideAll}
-          style={{
-            marginLeft: 8,
-            background: "#e67e22",
-            color: "#fff",
-            border: "none",
-            borderRadius: 4,
-            padding: "3px 10px",
-            cursor: "pointer",
-            fontSize: 11,
-            fontWeight: 600,
-          }}
-          title="Unhide all hidden columns"
-        >👁️‍🗨️ 取消隱藏</button>
-        <button
-          onClick={() => setShowFullItemRef(prev => !prev)}
-          style={{
-            marginLeft: 8,
-            background: "#8e44ad",
-            color: "#fff",
-            border: "none",
-            borderRadius: 4,
-            padding: "3px 10px",
-            cursor: "pointer",
-            fontSize: 11,
-            fontWeight: 600,
-          }}
-          title="Toggle item column label between Item and Ref"
-        >🔁 {showFullItemRef ? "Ref" : "Item"}</button>
-        <button
-          onClick={() => setShowHelp(true)}
-          style={{
-            marginLeft: 8,
-            background: "#34495e",
-            color: "#fff",
-            border: "none",
-            borderRadius: 4,
-            padding: "3px 10px",
-            cursor: "pointer",
-            fontSize: 11,
-            fontWeight: 600,
-          }}
-          title="Show BQ export help"
-        >❓ 說明</button>
       </div>
 
       {/* Keyboard hints */}
@@ -1484,120 +1275,59 @@ export function BQExportPanel({
         <table style={table}>
           <thead>
             <tr style={headerRow}>
-              <th style={{...th, ...colStyle("index"), position: "relative"}}>
-                #
-                <span style={{position: "absolute", top: 2, right: 4, cursor: "pointer", fontSize: 10}} onClick={(e) => {e.stopPropagation(); toggleHideCol("index");}}>×</span>
-                <div style={{position:"absolute", top:0,right:0,width:4,height:"100%",cursor:"col-resize"}} onMouseDown={(e)=>startResize("index",e)}></div>
-              </th>
-              <th style={{...thSortable, ...colStyle("page"), position: "relative"}} onClick={() => handleSortToggle("page")} title="Sort by page">
-                Page {sortBy?.key === "page" ? (sortBy.direction === "asc" ? "▲" : "▼") : "↕"}
-                <span style={{position: "absolute", top: 2, right: 4, cursor: "pointer", fontSize: 10}} onClick={(e) => {e.stopPropagation(); toggleHideCol("page");}}>×</span>
-                <div style={{position:"absolute", top:0,right:0,width:4,height:"100%",cursor:"col-resize"}} onMouseDown={(e)=>startResize("page",e)}></div>
-              </th>
-              <th style={{...thSortable, ...colStyle("revision"), position: "relative"}} onClick={() => handleSortToggle("revision")} title="Sort by revision">
-                Rev {sortBy?.key === "revision" ? (sortBy.direction === "asc" ? "▲" : "▼") : "↕"}
-                <span style={{position: "absolute", top: 2, right: 4, cursor: "pointer", fontSize: 10}} onClick={(e) => {e.stopPropagation(); toggleHideCol("revision");}}>×</span>
-                <div style={{position:"absolute", top:0,right:0,width:4,height:"100%",cursor:"col-resize"}} onMouseDown={(e)=>startResize("revision",e)}></div>
-              </th>
-              <th style={{...thSortable, ...colStyle("type"), position: "relative"}} onClick={() => handleSortToggle("type")} title="Sort by type">
-                Type {sortBy?.key === "type" ? (sortBy.direction === "asc" ? "▲" : "▼") : "↕"}
-                <span style={{position: "absolute", top: 2, right: 4, cursor: "pointer", fontSize: 10}} onClick={(e) => {e.stopPropagation(); toggleHideCol("type");}}>×</span>
-                <div style={{position:"absolute", top:0,right:0,width:4,height:"100%",cursor:"col-resize"}} onMouseDown={(e)=>startResize("type",e)}></div>
-              </th>
-              <th style={{...thEditSortable, ...colStyle("item_no"), position: "relative"}} onClick={() => handleSortToggle("item_no")} title="Sort by item no">
-                {showFullItemRef ? "Ref" : "Item"} {sortBy?.key === "item_no" ? (sortBy.direction === "asc" ? "▲" : "▼") : "↕"}
-                <span style={{position: "absolute", top: 2, right: 4, cursor: "pointer", fontSize: 10}} onClick={(e) => {e.stopPropagation(); toggleHideCol("item_no");}}>×</span>
-                <div style={{position:"absolute", top:0,right:0,width:4,height:"100%",cursor:"col-resize"}} onMouseDown={(e)=>startResize("item_no",e)}></div>
-              </th>
-              <th style={{...thEditWideSortable, ...colStyle("description"), position: "relative"}} onClick={() => handleSortToggle("description")} title="Sort by description">
-                Description {sortBy?.key === "description" ? (sortBy.direction === "asc" ? "▲" : "▼") : "↕"}
-                <span style={{position: "absolute", top: 2, right: 4, cursor: "pointer", fontSize: 10}} onClick={(e) => {e.stopPropagation(); toggleHideCol("description");}}>×</span>
-                <div style={{position:"absolute", top:0,right:0,width:4,height:"100%",cursor:"col-resize"}} onMouseDown={(e)=>startResize("description",e)}></div>
-              </th>
-              <th style={{...thEditSortable, ...colStyle("quantity"), position: "relative"}} onClick={() => handleSortToggle("quantity")} title="Sort by quantity">
-                Qty {sortBy?.key === "quantity" ? (sortBy.direction === "asc" ? "▲" : "▼") : "↕"}
-                <span style={{position: "absolute", top: 2, right: 4, cursor: "pointer", fontSize: 10}} onClick={(e) => {e.stopPropagation(); toggleHideCol("quantity");}}>×</span>
-                <div style={{position:"absolute", top:0,right:0,width:4,height:"100%",cursor:"col-resize"}} onMouseDown={(e)=>startResize("quantity",e)}></div>
-              </th>
-              <th style={{...thEditSortable, ...colStyle("unit"), position: "relative"}} onClick={() => handleSortToggle("unit")} title="Sort by unit">
-                Unit {sortBy?.key === "unit" ? (sortBy.direction === "asc" ? "▲" : "▼") : "↕"}
-                <span style={{position: "absolute", top: 2, right: 4, cursor: "pointer", fontSize: 10}} onClick={(e) => {e.stopPropagation(); toggleHideCol("unit");}}>×</span>
-                <div style={{position:"absolute", top:0,right:0,width:4,height:"100%",cursor:"col-resize"}} onMouseDown={(e)=>startResize("unit",e)}></div>
-              </th>
-              <th style={{...thEditSortable, ...colStyle("rate"), position: "relative"}} onClick={() => handleSortToggle("rate")} title="Sort by rate">
-                Rate {sortBy?.key === "rate" ? (sortBy.direction === "asc" ? "▲" : "▼") : "↕"}
-                <span style={{position: "absolute", top: 2, right: 4, cursor: "pointer", fontSize: 10}} onClick={(e) => {e.stopPropagation(); toggleHideCol("rate");}}>×</span>
-                <div style={{position:"absolute", top:0,right:0,width:4,height:"100%",cursor:"col-resize"}} onMouseDown={(e)=>startResize("rate",e)}></div>
-              </th>
-              <th style={{...thEditSortable, ...colStyle("subtotal"), position: "relative"}} onClick={() => handleSortToggle("subtotal")} title="Sort by page subtotal">
-                Subtotal {sortBy?.key === "subtotal" ? (sortBy.direction === "asc" ? "▲" : "▼") : "↕"}
-                <span style={{position: "absolute", top: 2, right: 4, cursor: "pointer", fontSize: 10}} onClick={(e) => {e.stopPropagation(); toggleHideCol("subtotal");}}>×</span>
-                <div style={{position:"absolute", top:0,right:0,width:4,height:"100%",cursor:"col-resize"}} onMouseDown={(e)=>startResize("subtotal",e)}></div>
-              </th>
-              <th style={{...thEditSortable, ...colStyle("total"), position: "relative"}} onClick={() => handleSortToggle("total")} title="Sort by total">
-                Total {sortBy?.key === "total" ? (sortBy.direction === "asc" ? "▲" : "▼") : "↕"}
-                <span style={{position: "absolute", top: 2, right: 4, cursor: "pointer", fontSize: 10}} onClick={(e) => {e.stopPropagation(); toggleHideCol("total");}}>×</span>
-                <div style={{position:"absolute", top:0,right:0,width:4,height:"100%",cursor:"col-resize"}} onMouseDown={(e)=>startResize("total",e)}></div>
-              </th>
-              <th style={{...th, ...colStyle("action"), position: "relative"}}>
-                Action
-                <div style={{position:"absolute", top:0,right:0,width:4,height:"100%",cursor:"col-resize"}} onMouseDown={(e)=>startResize("action",e)}></div>
-                <span style={{position: "absolute", top: 2, right: 4, cursor: "pointer", fontSize: 10}} onClick={(e) => {e.stopPropagation(); toggleHideCol("action");}}>×</span>
-              </th>
+              <th style={th}>#</th>
+              <th style={thSortable} onClick={() => handleSortToggle("page")} title="Sort by page">Page {sortBy?.key === "page" ? (sortBy.direction === "asc" ? "▲" : "▼") : "↕"}</th>
+              <th style={thSortable} onClick={() => handleSortToggle("revision")} title="Sort by revision">Rev {sortBy?.key === "revision" ? (sortBy.direction === "asc" ? "▲" : "▼") : "↕"}</th>
+              <th style={thSortable} onClick={() => handleSortToggle("type")} title="Sort by type">Type {sortBy?.key === "type" ? (sortBy.direction === "asc" ? "▲" : "▼") : "↕"}</th>
+              <th style={thEditSortable} onClick={() => handleSortToggle("item_no")} title="Sort by item no">Item {sortBy?.key === "item_no" ? (sortBy.direction === "asc" ? "▲" : "▼") : "↕"}</th>
+              <th style={thEditWideSortable} onClick={() => handleSortToggle("description")} title="Sort by description">Description {sortBy?.key === "description" ? (sortBy.direction === "asc" ? "▲" : "▼") : "↕"}</th>
+              <th style={thEditSortable} onClick={() => handleSortToggle("quantity")} title="Sort by quantity">Qty {sortBy?.key === "quantity" ? (sortBy.direction === "asc" ? "▲" : "▼") : "↕"}</th>
+              <th style={thEditSortable} onClick={() => handleSortToggle("unit")} title="Sort by unit">Unit {sortBy?.key === "unit" ? (sortBy.direction === "asc" ? "▲" : "▼") : "↕"}</th>
+              <th style={thEditSortable} onClick={() => handleSortToggle("rate")} title="Sort by rate">Rate {sortBy?.key === "rate" ? (sortBy.direction === "asc" ? "▲" : "▼") : "↕"}</th>
+              <th style={thEditSortable} onClick={() => handleSortToggle("total")} title="Sort by total">Total {sortBy?.key === "total" ? (sortBy.direction === "asc" ? "▲" : "▼") : "↕"}</th>
+              <th style={th}>Action</th>
             </tr>
             <tr style={filterRowStyle}>
-              <th style={{...thFilterCell, ...colStyle("index")}}></th>
-              <th style={{...thFilterCell, ...colStyle("page")}}><input style={headerFilterInput} placeholder="filter" value={columnFilters.page} onChange={(e) => setColumnFilters((p) => ({ ...p, page: e.target.value }))} /></th>
-              <th style={{...thFilterCell, ...colStyle("revision")}}><input style={headerFilterInput} placeholder="filter" value={columnFilters.revision} onChange={(e) => setColumnFilters((p) => ({ ...p, revision: e.target.value }))} /></th>
-              <th style={{...thFilterCell, ...colStyle("type")}}><input style={headerFilterInput} placeholder="filter" value={columnFilters.type} onChange={(e) => setColumnFilters((p) => ({ ...p, type: e.target.value }))} /></th>
-              <th style={{...thFilterCell, ...colStyle("item_no")}}><input style={headerFilterInput} placeholder="filter" value={columnFilters.item_no} onChange={(e) => setColumnFilters((p) => ({ ...p, item_no: e.target.value }))} /></th>
-              <th style={{...thFilterCell, ...colStyle("description")}}><input style={headerFilterInput} placeholder="filter" value={columnFilters.description} onChange={(e) => setColumnFilters((p) => ({ ...p, description: e.target.value }))} /></th>
-              <th style={{...thFilterCell, ...colStyle("quantity")}}><input style={headerFilterInput} placeholder="filter" value={columnFilters.quantity} onChange={(e) => setColumnFilters((p) => ({ ...p, quantity: e.target.value }))} /></th>
-              <th style={{...thFilterCell, ...colStyle("unit")}}><input style={headerFilterInput} placeholder="filter" value={columnFilters.unit} onChange={(e) => setColumnFilters((p) => ({ ...p, unit: e.target.value }))} /></th>
-              <th style={{...thFilterCell, ...colStyle("rate")}}><input style={headerFilterInput} placeholder="filter" value={columnFilters.rate} onChange={(e) => setColumnFilters((p) => ({ ...p, rate: e.target.value }))} /></th>
-              <th style={{...thFilterCell, ...colStyle("subtotal")}}></th> {/* subtotal has no filter */}
-              <th style={{...thFilterCell, ...colStyle("total")}}><input style={headerFilterInput} placeholder="filter" value={columnFilters.total} onChange={(e) => setColumnFilters((p) => ({ ...p, total: e.target.value }))} /></th>
-              <th style={{...thFilterCell, ...colStyle("action")}}></th>
+              <th style={thFilterCell}></th>
+              <th style={thFilterCell}><input style={headerFilterInput} placeholder="filter" value={columnFilters.page} onChange={(e) => setColumnFilters((p) => ({ ...p, page: e.target.value }))} /></th>
+              <th style={thFilterCell}><input style={headerFilterInput} placeholder="filter" value={columnFilters.revision} onChange={(e) => setColumnFilters((p) => ({ ...p, revision: e.target.value }))} /></th>
+              <th style={thFilterCell}><input style={headerFilterInput} placeholder="filter" value={columnFilters.type} onChange={(e) => setColumnFilters((p) => ({ ...p, type: e.target.value }))} /></th>
+              <th style={thFilterCell}><input style={headerFilterInput} placeholder="filter" value={columnFilters.item_no} onChange={(e) => setColumnFilters((p) => ({ ...p, item_no: e.target.value }))} /></th>
+              <th style={thFilterCell}><input style={headerFilterInput} placeholder="filter" value={columnFilters.description} onChange={(e) => setColumnFilters((p) => ({ ...p, description: e.target.value }))} /></th>
+              <th style={thFilterCell}><input style={headerFilterInput} placeholder="filter" value={columnFilters.quantity} onChange={(e) => setColumnFilters((p) => ({ ...p, quantity: e.target.value }))} /></th>
+              <th style={thFilterCell}><input style={headerFilterInput} placeholder="filter" value={columnFilters.unit} onChange={(e) => setColumnFilters((p) => ({ ...p, unit: e.target.value }))} /></th>
+              <th style={thFilterCell}><input style={headerFilterInput} placeholder="filter" value={columnFilters.rate} onChange={(e) => setColumnFilters((p) => ({ ...p, rate: e.target.value }))} /></th>
+              <th style={thFilterCell}><input style={headerFilterInput} placeholder="filter" value={columnFilters.total} onChange={(e) => setColumnFilters((p) => ({ ...p, total: e.target.value }))} /></th>
+              <th style={thFilterCell}></th>
             </tr>
           </thead>
           <tbody>
-            {rowsWithPageTotals.map(({ pageKey, row, isPageTotal }, rowIdx) => {
+            {filteredRows.map(({ pageKey, row }, rowIdx) => {
               const isEditing = editingCell?.pageKey === pageKey && editingCell?.rowId === row.id;
-              const isCollectionRow = row.type === "collection_entry"; // other collection types removed
-              // style page-total differently
-              const rowBg = row.type === "notes" ? "#f5f5f5" : isCollectionRow ? "#f0f5ff" : isPageTotal ? "#eef" : "#fff";
+              const isCollectionRow = row.type === "collection_entry" || row.type === "collection_cf" || row.type === "collection_total";
+              const rowBg = row.type === "notes" ? "#f5f5f5" : isCollectionRow ? "#f0f5ff" : "#fff";
 
               const getTypeColor = () => {
                 switch (row.type) {
                   case "notes": return "#95a5a6";
                   case "collection_entry": return "#3498db";
+                  case "collection_cf": return "#8e44ad";
+                  case "collection_total": return "#2c3e50";
                   default: return "#2ecc71";
                 }
               };
 
               return (
-                <tr key={`${pageKey}-${rowIdx}${row.type === "page_total" ? "-pageTotal" : row.id}`} style={{ background: rowBg, fontStyle: row.type === "notes" ? "italic" : "normal" }}>
-                  <td style={{ ...td, ...colStyle("index"), color: "#aaa", fontSize: 9, textAlign: "center", width: 28 }}>{rowIdx + 1}</td>
-                  {isPageTotal ? (
-                    <>
-                      <td style={{...td, ...colStyle("page")}} colSpan={4}><strong>Page total</strong></td>
-                      <td style={{...td, ...colStyle("quantity")}}></td> {/* qty blank */}
-                      <td style={{...td, ...colStyle("unit")}}></td> {/* unit blank */}
-                      <td style={{...td, ...colStyle("rate")}}></td> {/* rate blank */}
-                      <td style={{...td, ...colStyle("subtotal")}}><strong>{row.subtotal != null ? formatMoney(row.subtotal) : ""}</strong></td>
-                      <td style={{...td, ...colStyle("total")}}></td> {/* total column empty for subtotal row */}
-                      <td style={{...td, ...colStyle("action")}}></td>
-                    </>
-                  ) : (
-                    <>
-                      <td style={{...td, ...colStyle("page")}}>{row.page_label || `P${row.page_number + 1}`}</td>
-                      <td style={{...td, ...colStyle("revision")}} title={row.revision}>{row.revision?.slice(0, 10) || ""}</td>
-                      <td style={{...td, ...colStyle("type")}}>
-                        <select
-                          value={row.type}
-                          onChange={(e) => {
-                                        handleTypeChange(pageKey, row, e.target.value as BQItemType);
-                          }}
+                <tr key={`${pageKey}-${row.id}`} style={{ background: rowBg, fontStyle: row.type === "notes" ? "italic" : "normal" }}>
+                  <td style={{ ...td, color: "#aaa", fontSize: 9, textAlign: "center", width: 28 }}>{rowIdx + 1}</td>
+                  <td style={td}>{row.page_label || `P${row.page_number + 1}`}</td>
+                  <td style={td} title={row.revision}>{row.revision?.slice(0, 10) || ""}</td>
+                  <td style={td}>
+                    <select
+                      value={row.type}
+                      onChange={(e) => {
+                                    handleTypeChange(pageKey, row, e.target.value as BQItemType);
+                      }}
                       style={{
                         ...typeTag,
                         background: getTypeColor(),
@@ -1644,7 +1374,7 @@ export function BQExportPanel({
                     const isCollectionItemField = isCollectionRow && field === "item_no";
 
                     return (
-                      <td key={field} style={{...cellStyle, ...colStyle(field)}} onClick={(e) => handleCellClick(rowIdx, colIdx, e)} onDoubleClick={() => handleCellDoubleClick(rowIdx, colIdx)}>
+                      <td key={field} style={cellStyle} onClick={(e) => handleCellClick(rowIdx, colIdx, e)} onDoubleClick={() => handleCellDoubleClick(rowIdx, colIdx)}>
                         {isCollectionItemField ? (
                           <div style={{ display: "flex", alignItems: "center", gap: 2, padding: "1px 2px" }}>
                             <select
@@ -1713,12 +1443,10 @@ export function BQExportPanel({
                       </td>
                     );
                   })}
-                  <td style={{ ...td, ...colStyle("action"), textAlign: "center" }}>
+                  <td style={{ ...td, textAlign: "center" }}>
                     <button style={addBtn} onClick={() => onInsertRow(pageKey, row.id)} title="Insert a row below">➕</button>
                     <button style={deleteBtn} onClick={() => onDeleteRow(pageKey, row.id)} title="Delete">🗑️</button>
                   </td>
-                  </>
-                )}
                 </tr>
               );
             })}

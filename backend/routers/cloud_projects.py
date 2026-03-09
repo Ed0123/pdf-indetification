@@ -339,6 +339,34 @@ def create_cloud_project(body: CloudProjectCreate, user: dict = Depends(require_
     return doc_data
 
 
+@router.get("/startup")
+def workspace_startup(user: dict = Depends(require_auth)):
+    """Return startup options for Home: current session + recent projects."""
+    uid = user["uid"]
+    current = _find_current_project(uid)
+    recent = [p for p in _list_user_projects(uid) if not p.get("is_current")][:8]
+    return {
+        "current_project": current,
+        "has_current_data": bool(current and current.get("project_json_path")),
+        "recent_projects": recent,
+    }
+
+
+@router.get("/current")
+def ensure_current_project(user: dict = Depends(require_auth)):
+    uid = user["uid"]
+    return _ensure_current_project(uid)
+
+
+@router.get("/current/load-full")
+def load_current_project_full(user: dict = Depends(require_auth)):
+    uid = user["uid"]
+    current = _ensure_current_project(uid)
+    if not current.get("project_json_path"):
+        return {"empty": True}
+    return _load_project_full_data(uid, current["id"])
+
+
 @router.post("/{project_id}/upload-json")
 async def upload_project_json(
     project_id: str,
@@ -718,34 +746,6 @@ def _load_project_full_data(uid: str, project_id: str) -> dict:
         ]
 
     return project_data
-
-
-@router.get("/startup")
-def workspace_startup(user: dict = Depends(require_auth)):
-    """Return startup options for Home: current session + recent projects."""
-    uid = user["uid"]
-    current = _find_current_project(uid)
-    recent = [p for p in _list_user_projects(uid) if not p.get("is_current")][:8]
-    return {
-        "current_project": current,
-        "has_current_data": bool(current and current.get("project_json_path")),
-        "recent_projects": recent,
-    }
-
-
-@router.get("/current")
-def ensure_current_project(user: dict = Depends(require_auth)):
-    uid = user["uid"]
-    return _ensure_current_project(uid)
-
-
-@router.get("/current/load-full")
-def load_current_project_full(user: dict = Depends(require_auth)):
-    uid = user["uid"]
-    current = _ensure_current_project(uid)
-    if not current.get("project_json_path"):
-        return {"empty": True}
-    return _load_project_full_data(uid, current["id"])
 
 
 @router.post("/current/backup")

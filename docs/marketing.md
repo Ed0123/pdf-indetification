@@ -1,5 +1,8 @@
 # 營運與市場概覽
 
+> **Note (2026-03-07):** Content reviewed; documentation reflects only actively supported features. Obsolete or planned items have been removed.
+
+
 ## 產品定位
 
 > 香港地盤項目動輒數百頁圖則與 BOQ；一位中型 QS 估算師每天

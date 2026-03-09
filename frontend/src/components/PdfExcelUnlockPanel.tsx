@@ -6,7 +6,7 @@
  */
 import React, { useState, useRef } from "react";
 import { PDFDocument } from "pdf-lib";
-import * as XLSX from "xlsx";
+import JSZip from "jszip";
 import { ModuleInstructionPanel } from "./ModuleInstructionPanel";
 
 interface PdfExcelUnlockPanelProps {
@@ -56,20 +56,28 @@ export function PdfExcelUnlockPanel({ isAdmin, onBusyChange }: PdfExcelUnlockPan
     setExcelStatus("處理中...");
     try {
       const arrayBuffer = await excelFile.arrayBuffer();
-      const workbook = XLSX.read(arrayBuffer, { type: "array" });
-      // Remove sheet protection from all sheets
-      for (const sheetName of workbook.SheetNames) {
-        const sheet = workbook.Sheets[sheetName];
-        if (sheet) {
-          delete (sheet as any)["!protect"];
+      const zip = await JSZip.loadAsync(arrayBuffer);
+      // Remove sheetProtection from all sheet XMLs
+      const sheetPattern = /^xl\/worksheets\/.*\.xml$/;
+      for (const [path, file] of Object.entries(zip.files)) {
+        if (sheetPattern.test(path) && !file.dir) {
+          let xml = await file.async("string");
+          xml = xml.replace(/<sheetProtection[^/>]*\/>/g, "");
+          xml = xml.replace(/<sheetProtection[^>]*>.*?<\/sheetProtection>/gs, "");
+          zip.file(path, xml);
         }
       }
-      const output = XLSX.write(workbook, { bookType: "xlsx", type: "array" });
-      downloadBlob(
-        new Blob([output], { type: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" }),
-        `unlocked-${excelFile.name}`
-      );
-      setExcelStatus("✅ 解鎖完成，已下載");
+      // Also remove workbookProtection from workbook.xml
+      const wbFile = zip.file("xl/workbook.xml");
+      if (wbFile) {
+        let wbXml = await wbFile.async("string");
+        wbXml = wbXml.replace(/<workbookProtection[^/>]*\/>/g, "");
+        wbXml = wbXml.replace(/<workbookProtection[^>]*>.*?<\/workbookProtection>/gs, "");
+        zip.file("xl/workbook.xml", wbXml);
+      }
+      const output = await zip.generateAsync({ type: "blob" });
+      downloadBlob(output, `unlocked-${excelFile.name}`);
+      setExcelStatus("✅ 解鎖完成，已下載（圖片、公式等完整保留）");
     } catch (err: any) {
       setExcelStatus(`❌ 解鎖失敗：${err.message || err}`);
     } finally {

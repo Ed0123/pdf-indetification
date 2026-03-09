@@ -147,7 +147,7 @@ export default function App() {
   const [contentWidth, setContentWidth] = useState(48); // percentage
 
   // Activity bar module selection
-  const [activeModule, setActiveModuleRaw] = useState<ModuleId>("singlepage");
+  const [activeModule, setActiveModuleRaw] = useState<ModuleId>("home");
   // Reset drawing state when switching modules
   const setActiveModule = useCallback((m: ModuleId) => {
     setActiveModuleRaw(m);
@@ -1874,7 +1874,8 @@ export default function App() {
           userFeatures={profile?.tier_features}
         />
 
-        {/* Column 1: PDF Tree (collapsible) */}
+        {/* Column 1: PDF Tree (collapsible) — hidden for standalone modules */}
+        {!["home", "pdf_excel_unlock", "pdf_search"].includes(activeModule) && (
         <div style={{
           width: treeCollapsed ? 28 : 220,
           minWidth: treeCollapsed ? 28 : 160,
@@ -1905,10 +1906,11 @@ export default function App() {
             />
           )}
         </div>
+        )}
 
         {/* Column 2: Module Content (switches based on activeModule) - resizable */}
         <div style={{
-          flex: `0 0 ${contentWidth}%`,
+          flex: ["home", "pdf_excel_unlock", "pdf_search"].includes(activeModule) ? 1 : `0 0 ${contentWidth}%`,
           display: "flex",
           flexDirection: "column",
           overflow: "hidden",
@@ -2140,7 +2142,9 @@ export default function App() {
           )}
         </div>
 
-        {/* Horizontal resize handle between content and PDF viewer */}
+        {/* Horizontal resize handle between content and PDF viewer — hidden for standalone modules */}
+        {!["home", "pdf_excel_unlock", "pdf_search"].includes(activeModule) && (
+        <>
         <div
           style={{
             width: 6, cursor: "col-resize", background: "#e0e0e0",
@@ -2184,6 +2188,8 @@ export default function App() {
             onAnnotationMove={handleAnnotationMove}
           />
         </div>
+        </>
+        )}
       </div>
 
       {/* Status bar */}

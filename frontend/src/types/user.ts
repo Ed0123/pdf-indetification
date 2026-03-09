@@ -50,20 +50,21 @@ export interface UserProfile {
   project_size_mb?: number;
 }
 
-/** Feature flags that can be toggled per tier */
+/** Feature flags that can be toggled per tier.
+ *  category: "toggle" = simple on/off, "quota" = has usage limits */
 export const TIER_FEATURES = [
-  { key: "ocr", label: "OCR 文字辨識" },
-  { key: "cloud_save", label: "雲端儲存專案" },
-  { key: "export_excel", label: "匯出 Excel" },
-  { key: "export_pdf", label: "匯出 PDF 頁面" },
-  { key: "templates", label: "範本管理" },
-  { key: "bq_ocr", label: "BQ OCR 提取" },
-  { key: "bq_export_page", label: "BQ 匯出頁面（瀏覽）" },
-  { key: "bq_export", label: "BQ 數據匯出（下載）" },
-  { key: "auto_backup", label: "自動備份工作階段" },
-  { key: "pdf_unlock", label: "PDF 解鎖" },
-  { key: "excel_unlock", label: "Excel 解鎖" },
-  { key: "pdf_search", label: "PDF 搜尋/擷取" },
+  { key: "ocr", label: "OCR 文字辨識", category: "quota" as const },
+  { key: "cloud_save", label: "雲端儲存專案", category: "quota" as const },
+  { key: "export_excel", label: "匯出 Excel", category: "toggle" as const },
+  { key: "export_pdf", label: "匯出 PDF 頁面", category: "toggle" as const },
+  { key: "templates", label: "範本管理", category: "toggle" as const },
+  { key: "bq_ocr", label: "BQ OCR 提取", category: "toggle" as const },
+  { key: "bq_export_page", label: "BQ 匯出頁面（瀏覽）", category: "toggle" as const },
+  { key: "bq_export", label: "BQ 數據匯出（下載）", category: "toggle" as const },
+  { key: "auto_backup", label: "自動備份工作階段", category: "quota" as const },
+  { key: "pdf_unlock", label: "PDF 解鎖", category: "toggle" as const },
+  { key: "excel_unlock", label: "Excel 解鎖", category: "toggle" as const },
+  { key: "pdf_search", label: "PDF 搜尋/擷取", category: "toggle" as const },
 ] as const;
 
 export type TierFeatureKey = typeof TIER_FEATURES[number]["key"];
