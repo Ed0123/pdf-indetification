@@ -81,14 +81,53 @@ TIERS_COLLECTION = "tiers"
 DEFAULT_GROUPS = ["General"]
 DEFAULT_TIERS = [
     {"name": "basic", "label": "基本", "quota": 100, "storage_quota_mb": 0, "project_size_mb": 200,
-     "features": {"ocr": True, "export_excel": True, "export_pdf": True, "templates": True, "cloud_save": False, "bq_ocr": False, "bq_export_page": False, "bq_export": False, "auto_backup": False}},
+     "features": {"ocr": True, "export_excel": True, "export_pdf": True, "templates": True, "cloud_save": False, "bq_ocr": False, "bq_export_page": False, "bq_export": False, "auto_backup": False, "pdf_unlock": True, "excel_unlock": True, "pdf_search": True}},
     {"name": "sponsor", "label": "贊助", "quota": 300, "storage_quota_mb": 100, "project_size_mb": 500,
-     "features": {"ocr": True, "export_excel": True, "export_pdf": True, "templates": True, "cloud_save": True, "bq_ocr": True, "bq_export_page": True, "bq_export": True, "auto_backup": True}},
+     "features": {"ocr": True, "export_excel": True, "export_pdf": True, "templates": True, "cloud_save": True, "bq_ocr": True, "bq_export_page": True, "bq_export": True, "auto_backup": True, "pdf_unlock": True, "excel_unlock": True, "pdf_search": True}},
     {"name": "premium", "label": "特許", "quota": 500, "storage_quota_mb": 300, "project_size_mb": 1024,
-     "features": {"ocr": True, "export_excel": True, "export_pdf": True, "templates": True, "cloud_save": True, "bq_ocr": True, "bq_export_page": True, "bq_export": True, "auto_backup": True}},
+     "features": {"ocr": True, "export_excel": True, "export_pdf": True, "templates": True, "cloud_save": True, "bq_ocr": True, "bq_export_page": True, "bq_export": True, "auto_backup": True, "pdf_unlock": True, "excel_unlock": True, "pdf_search": True}},
     {"name": "admin", "label": "管理員", "quota": -1, "storage_quota_mb": -1, "project_size_mb": -1,
-     "features": {"ocr": True, "export_excel": True, "export_pdf": True, "templates": True, "cloud_save": True, "bq_ocr": True, "bq_export_page": True, "bq_export": True, "auto_backup": True}},
+     "features": {"ocr": True, "export_excel": True, "export_pdf": True, "templates": True, "cloud_save": True, "bq_ocr": True, "bq_export_page": True, "bq_export": True, "auto_backup": True, "pdf_unlock": True, "excel_unlock": True, "pdf_search": True}},
 ]
+
+
+def _default_tier_template(tier_name: str) -> dict:
+    """Return built-in default tier by name (fallback to basic)."""
+    for item in DEFAULT_TIERS:
+        if item.get("name") == tier_name:
+            return item
+    return DEFAULT_TIERS[0]
+
+
+def _normalize_tier_doc(data: dict) -> tuple[dict, dict]:
+    """Normalize one tier document and return (normalized, changed_fields)."""
+    raw = dict(data or {})
+    name = str(raw.get("name") or "").strip().lower() or "basic"
+    template = _default_tier_template(name)
+
+    normalized = {
+        "name": name,
+        "label": str(raw.get("label") or template.get("label") or name),
+        "quota": int(raw.get("quota", template.get("quota", 100))),
+        "storage_quota_mb": int(raw.get("storage_quota_mb", template.get("storage_quota_mb", 0))),
+        "project_size_mb": int(raw.get("project_size_mb", template.get("project_size_mb", 200))),
+    }
+
+    known_feature_keys = sorted({
+        k for t in DEFAULT_TIERS for k in (t.get("features", {}) or {}).keys()
+    })
+    template_features = dict(template.get("features", {}) or {})
+    raw_features = raw.get("features") if isinstance(raw.get("features"), dict) else {}
+    features = {key: bool(template_features.get(key, False)) for key in known_feature_keys}
+    for key, value in raw_features.items():
+        features[key] = bool(value)
+    normalized["features"] = features
+
+    changes: dict = {}
+    for key, value in normalized.items():
+        if raw.get(key) != value:
+            changes[key] = value
+    return normalized, changes
 
 def _user_ref(uid: str):
     return get_db().collection(USERS_COLLECTION).document(uid)
@@ -116,7 +155,13 @@ def _ensure_default_tiers(force_refresh: bool = False) -> list[dict]:
 
     docs = list(_tiers_collection().stream())
     if docs:
-        result = [{"id": d.id, **d.to_dict()} for d in docs]
+        result = []
+        for d in docs:
+            data = d.to_dict() or {}
+            normalized, changes = _normalize_tier_doc(data)
+            if changes:
+                _tiers_collection().document(d.id).update(changes)
+            result.append({"id": d.id, **normalized})
     else:
         result = []
         for tier in DEFAULT_TIERS:

@@ -18,7 +18,9 @@ export type ModuleId =
   | "bq_export"
   | "templates"
   | "exportexcel"
-  | "exportpdf";
+  | "exportpdf"
+  | "pdf_excel_unlock"
+  | "pdf_search";
 
 /**
  * Modules are grouped into logical clusters; separators shown between groups.
@@ -50,6 +52,10 @@ const MODULES: ModuleConfig[] = [
   // BQ tools are a sponsor‑tier group (3)
   { id: "bq_ocr", icon: "📋", label: "BQ OCR", shortLabel: "BQ", description: "Extract Bill of Quantities data", tier: "sponsor", feature: "bq_ocr", group: 3 },
   { id: "bq_export", icon: "📊", label: "BQ Export", shortLabel: "BQ Ex", description: "Review and export BQ data", tier: "sponsor", feature: "bq_export_page", group: 3 },
+
+  // Local tools group (4) — 100% client-side
+  { id: "pdf_excel_unlock", icon: "🔓", label: "Unlock", shortLabel: "Unlock", description: "PDF & Excel 解鎖", feature: "pdf_unlock", group: 4 },
+  { id: "pdf_search", icon: "🔍", label: "PDF Search", shortLabel: "Search", description: "PDF 搜尋 & 擷取", feature: "pdf_search", group: 4 },
 ];
 
 interface ActivityBarProps {

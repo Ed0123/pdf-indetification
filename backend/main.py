@@ -29,6 +29,7 @@ from backend.routers import bq as bq_router
 from backend.routers import bq_templates as bq_templates_router
 from backend.routers import messages as messages_router
 from backend.routers import system_updates as system_updates_router
+from backend.routers import module_instructions as module_instructions_router
 from backend.firebase_setup import init_firebase
 
 app = FastAPI(
@@ -58,6 +59,7 @@ app.include_router(messages_router.router, prefix="/api", tags=["Messages"])
 app.include_router(system_updates_router.router, prefix="/api/system-updates", tags=["System Updates"])
 app.include_router(bq_router.router)  # BQ router has its own prefix
 app.include_router(bq_templates_router.router, prefix="/api/bq/templates", tags=["BQ Templates"])
+app.include_router(module_instructions_router.router, prefix="/api/module-instructions", tags=["Module Instructions"])
 
 
 @app.on_event("startup")

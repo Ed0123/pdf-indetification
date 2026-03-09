@@ -11,7 +11,7 @@ interface HomePanelProps {
   startupCurrent: CloudProjectItem | null;
   hasCurrentData: boolean;
   backupEnabled: boolean;
-  backupMode: "manual" | "smart" | "aggressive";
+  backupMode: "manual" | "smart";
   backupStatus: "idle" | "running" | "ok" | "error";
   backupAt: string | null;
   backupWrites: number;
@@ -19,7 +19,7 @@ interface HomePanelProps {
   localSnapshotAt: string | null;
   localSnapshotSizeBytes: number;
   onSetBackupEnabled: (enabled: boolean) => void;
-  onSetBackupMode: (mode: "manual" | "smart" | "aggressive") => void;
+  onSetBackupMode: (mode: "manual" | "smart") => void;
   onManualBackup: () => Promise<void>;
   onSaveLocalSnapshot: () => void;
   onRestoreLocalSnapshot: () => void;
@@ -27,6 +27,7 @@ interface HomePanelProps {
   onStartNewSession: () => void;
   onOpenCloudProjects: () => void;
   onCreateUpdate: (heading: string, content: string) => Promise<void>;
+  onEditUpdate: (id: string, data: { heading?: string; content?: string }) => Promise<void>;
   onDeleteUpdate: (id: string) => Promise<void>;
 }
 
@@ -67,12 +68,15 @@ export function HomePanel({
   onStartNewSession,
   onOpenCloudProjects,
   onCreateUpdate,
+  onEditUpdate,
   onDeleteUpdate,
 }: HomePanelProps) {
   const [newHeading, setNewHeading] = useState("系統更新");
   const [newContent, setNewContent] = useState("");
   const [savingUpdate, setSavingUpdate] = useState(false);
   const [manualBackupBusy, setManualBackupBusy] = useState(false);
+  const [editingUpdate, setEditingUpdate] = useState<{ id: string; heading: string; content: string } | null>(null);
+  const [savingEdit, setSavingEdit] = useState(false);
 
   const isAdmin = profile?.tier === "admin";
   const entries = Object.entries(profile?.tier_features ?? {});
@@ -114,10 +118,21 @@ export function HomePanel({
     }
   };
 
+  const handleSaveEdit = async () => {
+    if (!editingUpdate) return;
+    setSavingEdit(true);
+    try {
+      await onEditUpdate(editingUpdate.id, { heading: editingUpdate.heading, content: editingUpdate.content });
+      setEditingUpdate(null);
+    } finally {
+      setSavingEdit(false);
+    }
+  };
+
   return (
     <div style={container}>
-      <h2 style={{ margin: 0, fontSize: 20 }}>主頁</h2>
-      <p style={{ margin: "6px 0 0", color: "#4d5b70", fontSize: 13 }}>
+      <h2 style={{ margin: 0, fontSize: 28, fontWeight: 700 }}>主頁</h2>
+      <p style={{ margin: "8px 0 24px", color: "#4d5b70", fontSize: 15, lineHeight: 1.5 }}>
         歡迎回來，{profile?.salutation || profile?.display_name || "使用者"}。
       </p>
 
@@ -145,7 +160,7 @@ export function HomePanel({
           <div style={kvRow}><span style={k}>本月 OCR 用量</span><span>{usagePages} / {usageLimit === -1 ? "∞" : usageLimit}</span></div>
           <div style={kvRow}><span style={k}>每專案大小上限</span><span>{profile?.project_size_mb === -1 ? "∞" : `${profile?.project_size_mb ?? 200} MB`}</span></div>
           <div style={kvRow}><span style={k}>備份狀態</span><span>{backupText}</span></div>
-          <div style={kvRow}><span style={k}>備份模式</span><span>{backupMode === "manual" ? "手動" : backupMode === "smart" ? "智慧省成本" : "即時保險"}</span></div>
+          <div style={kvRow}><span style={k}>備份模式</span><span>{backupMode === "manual" ? "手動" : "智慧"}</span></div>
           <div style={kvRow}><span style={k}>雲端寫入次數</span><span>{backupWrites}</span></div>
           <div style={kvRow}><span style={k}>已省下寫入</span><span>{backupSkips}</span></div>
           <div style={kvRow}><span style={k}>本機快照大小</span><span>{localSizeText}</span></div>
@@ -164,13 +179,12 @@ export function HomePanel({
           <div style={{ display: "flex", gap: 8, marginTop: 10, flexWrap: "wrap" }}>
             <select
               value={backupMode}
-              onChange={(e) => onSetBackupMode(e.target.value as "manual" | "smart" | "aggressive")}
+              onChange={(e) => onSetBackupMode(e.target.value as "manual" | "smart")}
               style={{ ...input, maxWidth: 180, padding: "6px 8px" }}
               disabled={!backupSupported}
             >
-              <option value="manual">手動（最省雲端）</option>
+              <option value="manual">手動</option>
               <option value="smart">智慧（建議）</option>
-              <option value="aggressive">即時（高保護）</option>
             </select>
             <button style={btn} onClick={onSaveLocalSnapshot}>儲存本機快照</button>
             <button style={btn} onClick={onRestoreLocalSnapshot}>恢復本機快照</button>
@@ -179,7 +193,8 @@ export function HomePanel({
             </button>
           </div>
           <p style={{ margin: "8px 0 0", fontSize: 12, color: "#6c7788" }}>
-            建議用「智慧」模式：先寫本機快照，只在定時或內容變更時寫雲端，可顯著降低後端與 Storage 成本。
+            「手動」模式：完全由用戶觸發備份，不會自動備份。<br />
+            「智慧」模式（建議）：先寫本機快照，只在定時或內容變更時寫雲端，每15分鐘自動備份，可顯著降低後端與 Storage 成本。
           </p>
         </section>
 
@@ -243,13 +258,40 @@ export function HomePanel({
             <div key={item.id} style={timelineItem}>
               <div style={timelineDate}>{new Date(item.created_at).toLocaleDateString()}</div>
               <div>
-                <div style={{ display: "flex", justifyContent: "space-between", gap: 8 }}>
-                  <div style={{ fontWeight: 700, marginBottom: 2 }}>{item.heading}</div>
-                  {isAdmin && (
-                    <button style={btnDelete} onClick={() => onDeleteUpdate(item.id)}>刪除</button>
-                  )}
-                </div>
-                <div style={{ color: "#4e5a6b", fontSize: 13, whiteSpace: "pre-wrap" }}>{item.content}</div>
+                {editingUpdate?.id === item.id ? (
+                  <div style={{ display: "grid", gap: 6 }}>
+                    <input
+                      style={input}
+                      value={editingUpdate.heading}
+                      onChange={(e) => setEditingUpdate({ ...editingUpdate, heading: e.target.value })}
+                      placeholder="標題"
+                    />
+                    <textarea
+                      style={{ ...input, minHeight: 60, resize: "vertical" }}
+                      value={editingUpdate.content}
+                      onChange={(e) => setEditingUpdate({ ...editingUpdate, content: e.target.value })}
+                    />
+                    <div style={{ display: "flex", gap: 6 }}>
+                      <button style={btnPrimary} onClick={handleSaveEdit} disabled={savingEdit}>
+                        {savingEdit ? "儲存中..." : "儲存"}
+                      </button>
+                      <button style={btn} onClick={() => setEditingUpdate(null)}>取消</button>
+                    </div>
+                  </div>
+                ) : (
+                  <>
+                    <div style={{ display: "flex", justifyContent: "space-between", gap: 8 }}>
+                      <div style={{ fontWeight: 700, marginBottom: 2 }}>{item.heading}</div>
+                      {isAdmin && (
+                        <div style={{ display: "flex", gap: 4 }}>
+                          <button style={btn} onClick={() => setEditingUpdate({ id: item.id, heading: item.heading, content: item.content })}>編輯</button>
+                          <button style={btnDelete} onClick={() => onDeleteUpdate(item.id)}>刪除</button>
+                        </div>
+                      )}
+                    </div>
+                    <div style={{ color: "#4e5a6b", fontSize: 13, whiteSpace: "pre-wrap" }}>{item.content}</div>
+                  </>
+                )}
               </div>
             </div>
           ))}
@@ -265,11 +307,12 @@ export function HomePanel({
 const container: React.CSSProperties = {
   display: "flex",
   flexDirection: "column",
-  gap: 12,
-  padding: 14,
+  gap: 20,
+  padding: 24,
   height: "100%",
   overflow: "auto",
-  background: "linear-gradient(180deg, #f8fbff 0%, #f3f8f4 100%)",
+  background: "linear-gradient(135deg, #f2f2f5 0%, #ffffff 100%)",
+  fontFamily: "-apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, Cantarell, 'Open Sans', 'Helvetica Neue', sans-serif",
 };
 
 const grid: React.CSSProperties = {
@@ -281,21 +324,24 @@ const grid: React.CSSProperties = {
 const card: React.CSSProperties = {
   background: "#ffffff",
   border: "1px solid #dbe5f0",
-  borderRadius: 10,
-  padding: 12,
+  borderRadius: 16,
+  padding: 20,
+  boxShadow: "0 4px 20px rgba(0,0,0,0.05)",
 };
 
 const title: React.CSSProperties = {
-  margin: "0 0 10px",
-  fontSize: 15,
+  margin: "0 0 12px",
+  fontSize: 17,
+  fontWeight: 600,
+  color: "#223648",
 };
 
 const kvRow: React.CSSProperties = {
   display: "flex",
   justifyContent: "space-between",
   gap: 8,
-  fontSize: 13,
-  padding: "5px 0",
+  fontSize: 14,
+  padding: "6px 0",
   borderBottom: "1px dashed #e6edf7",
 };
 

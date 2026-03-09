@@ -9,7 +9,7 @@ interface StatusBarProps {
   usageLimit?: number; // -1 = unlimited
   backupEnabled?: boolean;
   backupSupported?: boolean;
-  backupMode?: "manual" | "smart" | "aggressive";
+  backupMode?: "manual" | "smart";
   backupStatus?: "idle" | "running" | "ok" | "error";
   backupAt?: string | null;
   backupWrites?: number;
@@ -97,7 +97,7 @@ export function StatusBar({
 
       {backupMode && (
         <span style={{ whiteSpace: "nowrap", color: "#666" }}>
-          模式: <strong>{backupMode === "manual" ? "手動" : backupMode === "smart" ? "智慧" : "即時"}</strong>
+          模式: <strong>{backupMode === "manual" ? "手動" : "智慧"}</strong>
         </span>
       )}
 

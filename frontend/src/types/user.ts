@@ -61,6 +61,9 @@ export const TIER_FEATURES = [
   { key: "bq_export_page", label: "BQ 匯出頁面（瀏覽）" },
   { key: "bq_export", label: "BQ 數據匯出（下載）" },
   { key: "auto_backup", label: "自動備份工作階段" },
+  { key: "pdf_unlock", label: "PDF 解鎖" },
+  { key: "excel_unlock", label: "Excel 解鎖" },
+  { key: "pdf_search", label: "PDF 搜尋/擷取" },
 ] as const;
 
 export type TierFeatureKey = typeof TIER_FEATURES[number]["key"];

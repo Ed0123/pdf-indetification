@@ -82,18 +82,6 @@ def create_update(body: UpdateCreate, user: dict = Depends(require_auth)):
     return {"id": ref.id, **doc}
 
 
-@router.delete("/{update_id}")
-def delete_update(update_id: str, user: dict = Depends(require_auth)):
-    if not _is_admin(user["uid"]):
-        raise HTTPException(403, "Admin access required")
-
-    ref = get_db().collection(COLLECTION).document(update_id)
-    if not ref.get().exists:
-        raise HTTPException(404, "Update not found")
-    ref.delete()
-    return {"deleted": update_id}
-
-
 @router.post("/deploy-push")
 def deploy_push(
     body: DeployPush,
@@ -128,3 +116,50 @@ def deploy_push(
         get_db().collection(COLLECTION).document(old["id"]).delete()
 
     return {"id": ref.id, **doc}
+
+
+class UpdateEdit(BaseModel):
+    heading: str | None = None
+    content: str | None = None
+
+
+@router.put("/{update_id}")
+def edit_update(update_id: str, body: UpdateEdit, user: dict = Depends(require_auth)):
+    if not _is_admin(user["uid"]):
+        raise HTTPException(403, "Admin access required")
+
+    ref = get_db().collection(COLLECTION).document(update_id)
+    snap = ref.get()
+    if not snap.exists:
+        raise HTTPException(404, "Update not found")
+
+    changes: dict = {}
+    if body.heading is not None:
+        h = body.heading.strip()
+        if h:
+            changes["heading"] = h
+    if body.content is not None:
+        c = body.content.strip()
+        if c:
+            changes["content"] = c
+
+    if not changes:
+        raise HTTPException(400, "No valid fields to update")
+
+    ref.update(changes)
+    updated = snap.to_dict()
+    updated.update(changes)
+    updated["id"] = update_id
+    return updated
+
+
+@router.delete("/{update_id}")
+def delete_update(update_id: str, user: dict = Depends(require_auth)):
+    if not _is_admin(user["uid"]):
+        raise HTTPException(403, "Admin access required")
+
+    ref = get_db().collection(COLLECTION).document(update_id)
+    if not ref.get().exists:
+        raise HTTPException(404, "Update not found")
+    ref.delete()
+    return {"deleted": update_id}

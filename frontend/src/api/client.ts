@@ -221,6 +221,39 @@ export async function deleteSystemUpdate(id: string): Promise<{ deleted: string 
   return request<{ deleted: string }>(`/api/system-updates/${id}`, { method: "DELETE" });
 }
 
+export async function updateSystemUpdate(id: string, data: { heading?: string; content?: string }): Promise<SystemUpdateItem> {
+  return request<SystemUpdateItem>(`/api/system-updates/${id}`, {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(data),
+  });
+}
+
+// --------------------------------------------------------------------------
+// Module Instructions
+// --------------------------------------------------------------------------
+
+export interface ModuleInstruction {
+  module_id: string;
+  content_html: string;
+}
+
+export async function listModuleInstructions(): Promise<ModuleInstruction[]> {
+  return request<ModuleInstruction[]>("/api/module-instructions/");
+}
+
+export async function getModuleInstruction(moduleId: string): Promise<ModuleInstruction> {
+  return request<ModuleInstruction>(`/api/module-instructions/${moduleId}`);
+}
+
+export async function updateModuleInstruction(moduleId: string, contentHtml: string): Promise<ModuleInstruction> {
+  return request<ModuleInstruction>(`/api/module-instructions/${moduleId}`, {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ content_html: contentHtml }),
+  });
+}
+
 // --------------------------------------------------------------------------
 // PDF
 // --------------------------------------------------------------------------

@@ -72,10 +72,10 @@ export function Toolbar({
       }}
     >
       <div style={{ display: "flex", alignItems: "center", gap: 10, minWidth: 240 }}>
-        <div style={{ fontSize: 18 }}>📄</div>
+        <div style={{ fontSize: 18 }}>�</div>
         <div>
-          <div style={{ fontSize: 14, fontWeight: 700, color: "#243447" }}>PDF 工作台</div>
-          <div style={{ fontSize: 11, color: "#607388" }}>Local-first: 先本機快照，再智慧同步雲端</div>
+          <div style={{ fontSize: 14, fontWeight: 700, color: "#243447" }}>QS 小工具</div>
+          <div style={{ fontSize: 11, color: "#607388" }}>為QS同行而設的小工具</div>
         </div>
       </div>
 
