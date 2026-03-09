@@ -82,6 +82,26 @@ function parseList(s: string): string[] {
   return s.split(",").map(k => k.trim()).filter(Boolean);
 }
 
+/**
+ * Convert a wildcard pattern (with `*` and `?`) into a RegExp.
+ *  - `*` matches zero or more characters
+ *  - `?` matches exactly one character
+ * All other regex-special chars are escaped.
+ */
+function wildcardToRegex(pattern: string): RegExp {
+  const escaped = pattern.replace(/[.+^${}()|[\]\\]/g, "\\$&");
+  const re = escaped.replace(/\*/g, ".*").replace(/\?/g, ".");
+  return new RegExp(re, "i");
+}
+
+/** Test if `text` matches keyword `kw`. Supports `*` and `?` wildcards. */
+function matchKeyword(text: string, kw: string): boolean {
+  if (kw.includes("*") || kw.includes("?")) {
+    return wildcardToRegex(kw).test(text);
+  }
+  return text.toLowerCase().includes(kw.toLowerCase());
+}
+
 function hexToRgb(hex: string): { r: number; g: number; b: number } {
   const h = hex.replace("#", "");
   return {
@@ -157,7 +177,7 @@ export function PdfSearchExtractPanel({ isAdmin, onBusyChange }: PdfSearchExtrac
       const activeRules = rules.filter(r => r.selected && r.keywords.trim());
 
       const pageResults: PageResult[] = pages.map(p => {
-        const textLower = p.text.toLowerCase();
+        const pageText = p.text;
         let included = true;
         const matchedKeywords: string[] = [];
         const excludedBy: string[] = [];
@@ -165,7 +185,7 @@ export function PdfSearchExtractPanel({ isAdmin, onBusyChange }: PdfSearchExtrac
         // Step 1: Global whitelist — page must contain ALL global whitelist keywords
         if (gwl.length > 0) {
           for (const kw of gwl) {
-            if (textLower.includes(kw.toLowerCase())) {
+            if (matchKeyword(pageText, kw)) {
               matchedKeywords.push(kw);
             } else {
               included = false;
@@ -176,7 +196,7 @@ export function PdfSearchExtractPanel({ isAdmin, onBusyChange }: PdfSearchExtrac
         // Step 2: Global blacklist — if page has ANY blacklist keyword, skip it
         if (included && gbl.length > 0) {
           for (const bl of gbl) {
-            if (textLower.includes(bl.toLowerCase())) {
+            if (matchKeyword(pageText, bl)) {
               included = false;
               excludedBy.push(`全域黑名單: ${bl}`);
             }
@@ -191,7 +211,7 @@ export function PdfSearchExtractPanel({ isAdmin, onBusyChange }: PdfSearchExtrac
             const excl = parseList(rule.exclude);
             let ruleMatched = false;
             for (const kw of kws) {
-              if (textLower.includes(kw.toLowerCase())) {
+              if (matchKeyword(pageText, kw)) {
                 ruleMatched = true;
                 matchedKeywords.push(kw);
               }
@@ -199,7 +219,7 @@ export function PdfSearchExtractPanel({ isAdmin, onBusyChange }: PdfSearchExtrac
             // Check exclude for this rule
             if (ruleMatched) {
               for (const ex of excl) {
-                if (textLower.includes(ex.toLowerCase())) {
+                if (matchKeyword(pageText, ex)) {
                   ruleMatched = false;
                   excludedBy.push(`規則排除: ${ex}`);
                 }
@@ -283,7 +303,7 @@ export function PdfSearchExtractPanel({ isAdmin, onBusyChange }: PdfSearchExtrac
           const excl = parseList(rule.exclude);
           for (const kw of kws) {
             // Skip excluded ones
-            const isExcluded = excl.some(ex => kw.toLowerCase().includes(ex.toLowerCase()));
+            const isExcluded = excl.some(ex => matchKeyword(kw, ex));
             if (!isExcluded && rule.color) {
               highlights.push({ keyword: kw, color: rule.color, opacity: rule.opacity });
             }
@@ -292,9 +312,8 @@ export function PdfSearchExtractPanel({ isAdmin, onBusyChange }: PdfSearchExtrac
 
         // Draw rectangle highlights on matching text items
         for (const item of tp.items) {
-          const textLower = item.str.toLowerCase();
           for (const hl of highlights) {
-            if (textLower.includes(hl.keyword.toLowerCase()) && hl.color) {
+            if (matchKeyword(item.str, hl.keyword) && hl.color) {
               const { r, g, b } = hexToRgb(hl.color);
               const x = item.transform[4];
               const y = item.transform[5];
@@ -329,7 +348,7 @@ export function PdfSearchExtractPanel({ isAdmin, onBusyChange }: PdfSearchExtrac
       <ModuleInstructionPanel moduleId="pdf_search" isAdmin={isAdmin} />
 
       <p style={subtitleStyle}>
-        100% 本機處理。搜尋關鍵字、標記顏色、匯出符合條件的頁面。
+        100% 本機處理。搜尋關鍵字、標記顏色、匯出符合條件的頁面。支援萬用字元 <code>*</code>（任意字元）和 <code>?</code>（單一字元）。
       </p>
 
       {/* Top action row */}
@@ -364,7 +383,7 @@ export function PdfSearchExtractPanel({ isAdmin, onBusyChange }: PdfSearchExtrac
             style={inputStyle}
             value={globalWhitelist}
             onChange={(e) => setGlobalWhitelist(e.target.value)}
-            placeholder="頁面必須包含的關鍵字（逗號分隔）"
+            placeholder="頁面必須包含的關鍵字（逗號分隔，支援 * ?）"
           />
           <label style={{ ...labelStyle, marginLeft: 8 }}>顏色：</label>
           <input
@@ -380,7 +399,7 @@ export function PdfSearchExtractPanel({ isAdmin, onBusyChange }: PdfSearchExtrac
             style={inputStyle}
             value={globalBlacklist}
             onChange={(e) => setGlobalBlacklist(e.target.value)}
-            placeholder="頁面不可包含的關鍵字（逗號分隔）"
+            placeholder="頁面不可包含的關鍵字（逗號分隔，支援 * ?）"
           />
         </div>
       </div>
@@ -401,7 +420,7 @@ export function PdfSearchExtractPanel({ isAdmin, onBusyChange }: PdfSearchExtrac
                 style={ruleInput}
                 value={rule.keywords}
                 onChange={(e) => updateRule(rule.id, "keywords", e.target.value)}
-                placeholder="關鍵字（逗號分隔）"
+                placeholder="關鍵字（逗號分隔，支援 * ? 萬用字元）"
               />
             </div>
             <div style={fieldGroup}>

@@ -2,41 +2,44 @@
 
 ## 概述
 
-「PDF & Excel 解鎖」模組允許使用者在瀏覽器中直接移除 PDF 和 Excel（xlsx）檔案的唯讀保護或加密限制，無需安裝任何軟體，也不需要將檔案上傳至後端伺服器。所有處理皆在瀏覽器本機完成，確保檔案隱私。
+「PDF & Excel 解鎖」模組讓使用者直接在瀏覽器中移除 PDF 和 Excel（xlsx）檔案的唯讀保護或加密限制。所有處理皆在瀏覽器本機完成，檔案不會上傳至伺服器，確保檔案隱私。
 
 ## 功能
 
 ### PDF 解鎖
-- 移除 PDF 的文件限制（列印、複製、編輯等限制）
-- 使用 **pdf-lib** 函式庫，以 `ignoreEncryption: true` 重新載入並儲存 PDF
-- 支援拖拽或點選上傳 PDF 檔案
-- 解鎖後自動下載結果檔案
+- 移除 PDF 的文件限制（列印禁止、複製禁止、編輯禁止等 Owner Password 限制）
+- 解鎖後的 PDF 保留所有原始內容，但移除了權限保護
+- 解鎖後自動下載至本機
 
 ### Excel 解鎖
-- 移除 xlsx 工作表保護（sheet protection）
-- 使用 **SheetJS (xlsx)** 函式庫，移除每個工作表的 `sheetProtection` 屬性
-- 支援拖拽或點選上傳 xlsx 檔案
+- 移除 xlsx 工作表保護（Sheet Protection）
+- 所有工作表的保護一次性全部移除
 - 解鎖後自動下載不含保護的 Excel 檔案
-
-## 技術細節
-
-| 項目 | 說明 |
-|------|------|
-| 處理位置 | 純前端（瀏覽器端） |
-| PDF 函式庫 | pdf-lib |
-| Excel 函式庫 | SheetJS (xlsx) |
-| 檔案大小限制 | 受限於瀏覽器記憶體 |
-| 權限控制 | 透過 `pdf_unlock` / `excel_unlock` feature flag 控制 |
 
 ## 使用流程
 
-1. 從左側 Activity Bar 選擇「🔓 PDF/Excel 解鎖」模組
-2. 選擇 PDF 或 Excel 區塊
-3. 上傳需要解鎖的檔案
-4. 系統自動處理並下載解鎖後的檔案
+### PDF 解鎖
+
+1. **切換模組**：從左側 Activity Bar 點擊「🔓 PDF/Excel 解鎖」
+2. **選擇 PDF 檔案**：點擊「📂 選擇 PDF 檔案」按鈕，從電腦中選取需要解鎖的 PDF
+3. **確認檔案**：畫面顯示檔名和檔案大小
+4. **執行解鎖**：點擊「🔓 解鎖 PDF」按鈕
+5. **下載**：系統自動處理並下載解鎖後的檔案（檔名為 `unlocked-原始檔名.pdf`）
+
+### Excel 解鎖
+
+1. **選擇 Excel 檔案**：點擊「📂 選擇 Excel 檔案」按鈕，選取 .xlsx 檔案
+2. **確認檔案**：畫面顯示檔名和檔案大小
+3. **執行解鎖**：點擊「🔓 解鎖 Excel」按鈕
+4. **下載**：系統自動處理並下載解鎖後的檔案（檔名為 `unlocked-原始檔名.xlsx`）
+
+### 狀態顯示
+- 處理中：顯示「處理中...」
+- 成功：✅ 解鎖完成，已下載
+- 失敗：❌ 解鎖失敗：{錯誤訊息}
 
 ## 限制
 
-- 無法破解需要密碼才能開啟的 PDF（user password encryption）
-- 僅移除限制型加密（owner password / permissions）
-- Excel 僅支援 xlsx 格式，不支援 xls（舊版格式）
+- **PDF**：無法破解需要密碼才能開啟的 PDF（User Password Encryption），僅能移除限制型保護（Owner Password / Permissions）
+- **Excel**：僅支援 .xlsx 格式，不支援舊版 .xls 格式
+- 檔案大小受瀏覽器記憶體限制，建議單檔不超過 100 MB
