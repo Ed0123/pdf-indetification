@@ -14,6 +14,7 @@
 import React, { useState, useMemo, useCallback, useRef, useEffect } from "react";
 import type { BQRow, BQPageData, BQItemType } from "../types";
 import { exportAnnotatedPdf, type TextAnnotation } from "../api/client";
+import * as XLSX from "xlsx";
 
 const round2 = (value: number): number => Math.round((value + Number.EPSILON) * 100) / 100;
 
@@ -112,6 +113,11 @@ export function BQExportPanel({
   const tableRef = useRef<HTMLDivElement>(null);
   const [showExportModal, setShowExportModal] = useState(false);
   const [projectId, setProjectId] = useState("");
+  // Hidden columns — trade & group hidden by default
+  const [hiddenColumns, setHiddenColumns] = useState<Set<string>>(new Set(["trade", "group"]));
+  // Resizable column widths
+  const [columnWidths, setColumnWidths] = useState<Record<string, number>>({});
+  const resizingCol = useRef<{ col: string; startX: number; startW: number } | null>(null);
 
   useEffect(() => {
     if (!onBusyChange) return;
@@ -127,7 +133,7 @@ export function BQExportPanel({
   const [exportFilterRev, setExportFilterRev] = useState<string>("all");
   const [exportFilterType, setExportFilterType] = useState<string>("all");
   const [sortBy, setSortBy] = useState<{
-    key: "page" | "revision" | "type" | "item_no" | "description" | "quantity" | "unit" | "rate" | "total";
+    key: "page" | "revision" | "type" | "item_no" | "description" | "quantity" | "unit" | "rate" | "total" | "trade" | "group" | "remark";
     direction: "asc" | "desc";
   } | null>(null);
   const [columnFilters, setColumnFilters] = useState<Record<string, string>>({
@@ -140,6 +146,9 @@ export function BQExportPanel({
     unit: "",
     rate: "",
     total: "",
+    trade: "",
+    group: "",
+    remark: "",
   });
 
   // Flatten all rows from all pages, always kept in page order
@@ -184,6 +193,9 @@ export function BQExportPanel({
       if (columnFilters.quantity && !formatQuantity(row.quantity).includes(columnFilters.quantity)) return false;
       if (columnFilters.rate && !formatMoney(row.rate).includes(columnFilters.rate)) return false;
       if (columnFilters.total && !formatMoney(row.total).includes(columnFilters.total)) return false;
+      if (columnFilters.trade && !hasText(row.trade, columnFilters.trade)) return false;
+      if (columnFilters.group && !hasText(row.group, columnFilters.group)) return false;
+      if (columnFilters.remark && !hasText(row.remark, columnFilters.remark)) return false;
       return true;
     });
 
@@ -200,6 +212,9 @@ export function BQExportPanel({
         case "unit": return row.unit || "";
         case "rate": return row.rate ?? Number.NEGATIVE_INFINITY;
         case "total": return row.total ?? Number.NEGATIVE_INFINITY;
+        case "trade": return row.trade || "";
+        case "group": return row.group || "";
+        case "remark": return row.remark || "";
         default: return "";
       }
     };
@@ -485,8 +500,11 @@ export function BQExportPanel({
   // ──────────────────────────────────────────────────────────────────────────
   // Editable columns definition (order = arrow-key nav order)
   // ──────────────────────────────────────────────────────────────────────────
-  const EDITABLE_COLS = ["item_no", "description", "quantity", "unit", "rate", "total"] as const;
+  const EDITABLE_COLS = ["item_no", "description", "quantity", "unit", "rate", "total", "trade", "group", "remark"] as const;
   type EditCol = typeof EDITABLE_COLS[number];
+
+  // Visible editable columns (respects hidden columns)
+  const visibleEditCols = useMemo(() => EDITABLE_COLS.filter(c => !hiddenColumns.has(c)), [hiddenColumns]);
 
   const getCellValue = useCallback((row: BQRow, field: EditCol): string => {
     switch (field) {
@@ -496,6 +514,9 @@ export function BQExportPanel({
       case "unit": return row.unit || "";
       case "rate": return row.rate != null ? String(row.rate) : "";
       case "total": return row.total != null ? String(row.total) : "";
+      case "trade": return row.trade || "";
+      case "group": return row.group || "";
+      case "remark": return row.remark || "";
       default: return "";
     }
   }, []);
@@ -619,27 +640,27 @@ export function BQExportPanel({
 
   const focusCell = useCallback((rowIdx: number, colIdx: number, startEdit = false) => {
     if (rowIdx < 0 || rowIdx >= filteredRows.length) return;
-    if (colIdx < 0 || colIdx >= EDITABLE_COLS.length) return;
+    if (colIdx < 0 || colIdx >= visibleEditCols.length) return;
     setFocusedCell({ rowIdx, colIdx });
     setSelectionStart({ rowIdx, colIdx });
     setSelectionEnd({ rowIdx, colIdx });
     if (startEdit) {
       const { pageKey, row } = filteredRows[rowIdx];
-      const field = EDITABLE_COLS[colIdx];
+      const field = visibleEditCols[colIdx];
       handleStartEdit(pageKey, row.id, field, getCellValue(row, field), row);
     } else {
       // Ensure table container has keyboard focus so arrow keys work, not the scrollbar
       setTimeout(() => tableRef.current?.focus(), 0);
     }
-  }, [filteredRows, handleStartEdit, getCellValue, tableRef]);
+  }, [filteredRows, handleStartEdit, getCellValue, tableRef, visibleEditCols]);
 
   const saveAndMove = useCallback((dRow: number, dCol: number) => {
     handleSaveEdit();
     if (!focusedCell) return;
     let newRow = focusedCell.rowIdx + dRow;
     let newCol = focusedCell.colIdx + dCol;
-    if (newCol >= EDITABLE_COLS.length) { newRow++; newCol = 0; }
-    if (newCol < 0) { newRow--; newCol = EDITABLE_COLS.length - 1; }
+    if (newCol >= visibleEditCols.length) { newRow++; newCol = 0; }
+    if (newCol < 0) { newRow--; newCol = visibleEditCols.length - 1; }
     setTimeout(() => focusCell(newRow, newCol), 0);
   }, [focusedCell, handleSaveEdit, focusCell]);
 
@@ -674,7 +695,7 @@ export function BQExportPanel({
     for (let r = selectionRect.minRow; r <= selectionRect.maxRow; r++) {
       const cells: string[] = [];
       for (let c = selectionRect.minCol; c <= selectionRect.maxCol; c++) {
-        cells.push(getCellValue(filteredRows[r].row, EDITABLE_COLS[c]));
+        cells.push(getCellValue(filteredRows[r].row, visibleEditCols[c]));
       }
       lines.push(cells.join("\t"));
     }
@@ -700,8 +721,8 @@ export function BQExportPanel({
 
       for (let dc = 0; dc < cols.length; dc++) {
         const colIdx = focusedCell.colIdx + dc;
-        if (colIdx >= EDITABLE_COLS.length) break;
-        const field = EDITABLE_COLS[colIdx];
+        if (colIdx >= visibleEditCols.length) break;
+        const field = visibleEditCols[colIdx];
         let value: any = cols[dc];
         if (["quantity", "rate", "total"].includes(field)) {
           const num = parseNumericInput(value);
@@ -758,9 +779,9 @@ export function BQExportPanel({
     }
     setSelectionEnd({
       rowIdx: Math.min(focusedCell.rowIdx + lines.length - 1, filteredRows.length - 1),
-      colIdx: Math.min(focusedCell.colIdx + (lines[0]?.split("\t").length ?? 1) - 1, EDITABLE_COLS.length - 1),
+      colIdx: Math.min(focusedCell.colIdx + (lines[0]?.split("\t").length ?? 1) - 1, visibleEditCols.length - 1),
     });
-  }, [focusedCell, editingCell, filteredRows, onRowEdit]);
+  }, [focusedCell, editingCell, filteredRows, onRowEdit, visibleEditCols]);
 
   // ──────────────────────────────────────────────────────────────────────────
   // Global keyboard handler
@@ -801,7 +822,7 @@ export function BQExportPanel({
       case "ArrowRight":
         e.preventDefault();
         if (e.shiftKey && selectionStart) {
-          setSelectionEnd(prev => ({ rowIdx: prev?.rowIdx ?? focusedCell.rowIdx, colIdx: Math.min(EDITABLE_COLS.length - 1, (prev?.colIdx ?? focusedCell.colIdx) + 1) }));
+          setSelectionEnd(prev => ({ rowIdx: prev?.rowIdx ?? focusedCell.rowIdx, colIdx: Math.min(visibleEditCols.length - 1, (prev?.colIdx ?? focusedCell.colIdx) + 1) }));
         } else { focusCell(focusedCell.rowIdx, focusedCell.colIdx + 1); }
         break;
       case "Enter":
@@ -820,7 +841,7 @@ export function BQExportPanel({
           for (let r = selectionRect.minRow; r <= selectionRect.maxRow; r++) {
             const { pageKey: pk, row: rw } = filteredRows[r];
             for (let c = selectionRect.minCol; c <= selectionRect.maxCol; c++) {
-              const fld = EDITABLE_COLS[c];
+              const fld = visibleEditCols[c];
               onRowEdit(pk, rw.id, fld as keyof BQRow, ["quantity", "rate", "total"].includes(fld) ? null : "");
             }
           }
@@ -840,13 +861,13 @@ export function BQExportPanel({
         if (e.key.length === 1 && !e.ctrlKey && !e.metaKey && !e.altKey) {
           e.preventDefault();
           const { pageKey: pk, row: rw } = filteredRows[focusedCell.rowIdx];
-          const fld = EDITABLE_COLS[focusedCell.colIdx];
+          const fld = visibleEditCols[focusedCell.colIdx];
           handleStartEdit(pk, rw.id, fld, "", rw);
           setEditValue(e.key);
         }
         break;
     }
-  }, [focusedCell, editingCell, filteredRows, selectionStart, selectionRect,
+  }, [focusedCell, editingCell, filteredRows, selectionStart, selectionRect, visibleEditCols,
       handleCancelEdit, saveAndMove, focusCell, handleStartEdit, onRowEdit, onInsertRow]);
 
   const handleCellClick = useCallback((rowIdx: number, colIdx: number, e: React.MouseEvent) => {
@@ -860,6 +881,80 @@ export function BQExportPanel({
   const handleCellDoubleClick = useCallback((rowIdx: number, colIdx: number) => {
     focusCell(rowIdx, colIdx, true);
   }, [focusCell]);
+
+  // ──────────────────────────────────────────────────────────────────────────
+  // Column hide/unhide
+  // ──────────────────────────────────────────────────────────────────────────
+  const toggleHideColumn = useCallback((col: string) => {
+    setHiddenColumns(prev => {
+      const next = new Set(prev);
+      if (next.has(col)) next.delete(col); else next.add(col);
+      return next;
+    });
+  }, []);
+
+  const unhideAllColumns = useCallback(() => setHiddenColumns(new Set()), []);
+
+  // ──────────────────────────────────────────────────────────────────────────
+  // Column label map
+  // ──────────────────────────────────────────────────────────────────────────
+  const COL_LABELS: Record<string, string> = useMemo(() => ({
+    page: "Page", revision: "Rev", type: "Type",
+    item_no: "Item", description: "Description", quantity: "Qty", unit: "Unit",
+    rate: "Rate", total: "Total", trade: "Trade", group: "Group", remark: "Remark",
+  }), []);
+
+  // ──────────────────────────────────────────────────────────────────────────
+  // Resizable columns
+  // ──────────────────────────────────────────────────────────────────────────
+  const handleResizeStart = useCallback((e: React.MouseEvent, col: string) => {
+    e.preventDefault();
+    e.stopPropagation();
+    const startX = e.clientX;
+    const th = (e.target as HTMLElement).parentElement;
+    const startW = th?.offsetWidth ?? 80;
+    const onMove = (ev: MouseEvent) => {
+      const w = Math.max(30, startW + ev.clientX - startX);
+      setColumnWidths(prev => ({ ...prev, [col]: w }));
+    };
+    const onUp = () => { document.removeEventListener("mousemove", onMove); document.removeEventListener("mouseup", onUp); };
+    document.addEventListener("mousemove", onMove);
+    document.addEventListener("mouseup", onUp);
+  }, []);
+
+  // ──────────────────────────────────────────────────────────────────────────
+  // Page total rows — computed after filteredRows by page group
+  // ──────────────────────────────────────────────────────────────────────────
+  type DisplayRow = { kind: "data"; rowIdx: number; pageKey: string; row: BQRow } | { kind: "page_total"; pageKey: string; pageLabel: string; total: number; isCollection: boolean };
+  const displayRows = useMemo<DisplayRow[]>(() => {
+    const result: DisplayRow[] = [];
+    let lastPageKey = "";
+    let pageTotalAccum = 0;
+    let pageLabel = "";
+    let pageIsCollection = false;
+    for (let i = 0; i < filteredRows.length; i++) {
+      const { pageKey, row } = filteredRows[i];
+      if (pageKey !== lastPageKey && lastPageKey !== "") {
+        // Insert page total row for the previous page
+        result.push({ kind: "page_total", pageKey: lastPageKey, pageLabel: pageLabel, total: pageTotalAccum, isCollection: pageIsCollection });
+        pageTotalAccum = 0;
+      }
+      lastPageKey = pageKey;
+      pageLabel = row.page_label || `P${row.page_number + 1}`;
+      pageIsCollection = !!(row.page_is_collection);
+      result.push({ kind: "data", rowIdx: i, pageKey, row });
+      // Accumulate totals
+      if (pageIsCollection) {
+        if ((row.type === "collection_entry" || row.type === "item") && row.total != null) pageTotalAccum += row.total;
+      } else {
+        if (row.type === "item" && row.total != null) pageTotalAccum += row.total;
+      }
+    }
+    if (lastPageKey) {
+      result.push({ kind: "page_total", pageKey: lastPageKey, pageLabel, total: pageTotalAccum, isCollection: pageIsCollection });
+    }
+    return result;
+  }, [filteredRows]);
 
   // ──────────────────────────────────────────────────────────────────────────
   // Export helpers (same logic as before, abbreviated for space)
@@ -1037,6 +1132,53 @@ export function BQExportPanel({
     } catch (err: any) { setExportError(err.message || "Export failed"); }
   };
 
+  // ──────────────────────────────────────────────────────────────────────────
+  // XLSX export helpers
+  // ──────────────────────────────────────────────────────────────────────────
+  const handleExportXLSX = async (mode: "data" | "summary") => {
+    setExporting(true); setExportError(null);
+    try {
+      const pid = projectId.trim() || `BQ_${new Date().toISOString().slice(0, 10)}`;
+      const wb = XLSX.utils.book_new();
+      if (mode === "data") {
+        const exportRows = getFilteredExportRows();
+        if (exportRows.length === 0) { setExportError("No data to export"); setExporting(false); return; }
+        const headers = ["ID", "Project", "Type", "Bill", "Page", "Item", "Revision", "Ref", "Description", "Qty", "Unit", "Rate", "Total", "Trade", "Group", "Remark"];
+        const data = exportRows.map(({ row }, idx) => {
+          const { bill, page } = parseBillPage(row.page_label || "");
+          const ref = buildRef(row);
+          const hasQty = row.type === "item";
+          const typeLabel = row.type === "item" ? "Item" : row.type === "notes" ? "Notes" : row.type;
+          return [
+            idx + 1, pid, typeLabel, bill, page, row.item_no, row.revision, ref, row.description,
+            hasQty ? (row.quantity ?? "") : "", hasQty ? (row.unit ?? "") : "",
+            hasQty ? (row.rate ?? "") : "",
+            hasQty ? ((row.quantity && row.rate) ? (row.quantity * row.rate) : (row.total ?? "")) : "",
+            row.trade || "", row.group || "", row.remark || "",
+          ];
+        });
+        const ws = XLSX.utils.aoa_to_sheet([headers, ...data]);
+        XLSX.utils.book_append_sheet(wb, ws, "Data");
+      } else {
+        // Summary (page totals)
+        const sorted = Object.values(pageTotals).sort((a, b) => a.fileId !== b.fileId ? a.fileId.localeCompare(b.fileId) : a.pageNumber - b.pageNumber);
+        const headers = ["Project", "Bill", "Page", "Page_Label", "Item_Count", "Page_Total"];
+        const data: any[][] = sorted.map(pt => [pid, pt.fileId, pt.pageNumber, pt.pageLabel, pt.itemCount, pt.total]);
+        data.push([pid, "TOTAL", "", "", data.reduce((s, r) => s + Number(r[4]), 0), grandTotal]);
+        const ws = XLSX.utils.aoa_to_sheet([headers, ...data]);
+        XLSX.utils.book_append_sheet(wb, ws, "Summary");
+      }
+      const xlsxData = XLSX.write(wb, { bookType: "xlsx", type: "array" });
+      const blob = new Blob([xlsxData], { type: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" });
+      const url = URL.createObjectURL(blob);
+      const suffix = mode === "data" ? "" : "_summary";
+      const a = document.createElement("a"); a.href = url; a.download = `${pid}${suffix}.xlsx`;
+      document.body.appendChild(a); a.click(); document.body.removeChild(a); URL.revokeObjectURL(url);
+      setShowExportModal(false);
+    } catch (err: any) { setExportError(err.message || "XLSX export failed"); }
+    finally { setExporting(false); }
+  };
+
   const handleExportPDF = async (includeAnnotations: boolean) => {
     const filteredForExport = getFilteredExportRows();
     if (filteredForExport.length === 0) { setExportError("No data to export"); return; }
@@ -1174,6 +1316,24 @@ export function BQExportPanel({
         >
           🔄 重新計算
         </button>
+        {hiddenColumns.size > 0 && (
+          <button
+            onClick={unhideAllColumns}
+            style={{
+              background: "#e67e22",
+              color: "#fff",
+              border: "none",
+              borderRadius: 4,
+              padding: "3px 10px",
+              cursor: "pointer",
+              fontSize: 11,
+              fontWeight: 600,
+            }}
+            title="Show all hidden columns"
+          >
+            👁 顯示隱藏欄 ({hiddenColumns.size})
+          </button>
+        )}
       </div>
 
       {/* Keyboard hints */}
@@ -1254,6 +1414,22 @@ export function BQExportPanel({
               >
                 {exporting ? "⏳..." : "📝 PDF (含用戶輸入)"}
               </button>
+              <button
+                style={{ ...modalBtn, background: "#1abc9c" }}
+                onClick={() => handleExportXLSX("data")}
+                disabled={exporting || limitedExport}
+                title={limitedExport ? "只有 JSON 可用；升級以解鎖其他格式" : "Export all data rows as .xlsx"}
+              >
+                {exporting ? "⏳..." : "📊 XLSX (Data)"}
+              </button>
+              <button
+                style={{ ...modalBtn, background: "#2980b9" }}
+                onClick={() => handleExportXLSX("summary")}
+                disabled={exporting || limitedExport}
+                title={limitedExport ? "只有 JSON 可用；升級以解鎖其他格式" : "Export page totals summary as .xlsx"}
+              >
+                {exporting ? "⏳..." : "📋 XLSX (Summary)"}
+              </button>
             </div>
           </div>
         </div>
@@ -1274,35 +1450,62 @@ export function BQExportPanel({
       >
         <table style={table}>
           <thead>
+            {/* ── Header row ── */}
             <tr style={headerRow}>
               <th style={th}>#</th>
-              <th style={thSortable} onClick={() => handleSortToggle("page")} title="Sort by page">Page {sortBy?.key === "page" ? (sortBy.direction === "asc" ? "▲" : "▼") : "↕"}</th>
-              <th style={thSortable} onClick={() => handleSortToggle("revision")} title="Sort by revision">Rev {sortBy?.key === "revision" ? (sortBy.direction === "asc" ? "▲" : "▼") : "↕"}</th>
-              <th style={thSortable} onClick={() => handleSortToggle("type")} title="Sort by type">Type {sortBy?.key === "type" ? (sortBy.direction === "asc" ? "▲" : "▼") : "↕"}</th>
-              <th style={thEditSortable} onClick={() => handleSortToggle("item_no")} title="Sort by item no">Item {sortBy?.key === "item_no" ? (sortBy.direction === "asc" ? "▲" : "▼") : "↕"}</th>
-              <th style={thEditWideSortable} onClick={() => handleSortToggle("description")} title="Sort by description">Description {sortBy?.key === "description" ? (sortBy.direction === "asc" ? "▲" : "▼") : "↕"}</th>
-              <th style={thEditSortable} onClick={() => handleSortToggle("quantity")} title="Sort by quantity">Qty {sortBy?.key === "quantity" ? (sortBy.direction === "asc" ? "▲" : "▼") : "↕"}</th>
-              <th style={thEditSortable} onClick={() => handleSortToggle("unit")} title="Sort by unit">Unit {sortBy?.key === "unit" ? (sortBy.direction === "asc" ? "▲" : "▼") : "↕"}</th>
-              <th style={thEditSortable} onClick={() => handleSortToggle("rate")} title="Sort by rate">Rate {sortBy?.key === "rate" ? (sortBy.direction === "asc" ? "▲" : "▼") : "↕"}</th>
-              <th style={thEditSortable} onClick={() => handleSortToggle("total")} title="Sort by total">Total {sortBy?.key === "total" ? (sortBy.direction === "asc" ? "▲" : "▼") : "↕"}</th>
+              {(["page", "revision", "type"] as const).map(col => !hiddenColumns.has(col) && (
+                <th key={col} style={{ ...thSortable, position: "relative", width: columnWidths[col] || undefined }} onClick={() => handleSortToggle(col)} title={`Sort by ${col}`}>
+                  {COL_LABELS[col]} {sortBy?.key === col ? (sortBy.direction === "asc" ? "▲" : "▼") : "↕"}
+                  <span onClick={(e) => { e.stopPropagation(); toggleHideColumn(col); }} style={hideColBtn} title={`Hide ${COL_LABELS[col]}`}>✕</span>
+                  <div onMouseDown={(e) => handleResizeStart(e, col)} style={resizeHandle} />
+                </th>
+              ))}
+              {visibleEditCols.map(col => {
+                const isEditable = true;
+                const isWide = col === "description";
+                const baseStyle = isWide ? thEditWideSortable : thEditSortable;
+                return (
+                  <th key={col} style={{ ...baseStyle, position: "relative", width: columnWidths[col] || undefined }} onClick={() => handleSortToggle(col)} title={`Sort by ${col}`}>
+                    {COL_LABELS[col]} {sortBy?.key === col ? (sortBy.direction === "asc" ? "▲" : "▼") : "↕"}
+                    <span onClick={(e) => { e.stopPropagation(); toggleHideColumn(col); }} style={hideColBtn} title={`Hide ${COL_LABELS[col]}`}>✕</span>
+                    <div onMouseDown={(e) => handleResizeStart(e, col)} style={resizeHandle} />
+                  </th>
+                );
+              })}
               <th style={th}>Action</th>
             </tr>
+            {/* ── Filter row ── */}
             <tr style={filterRowStyle}>
               <th style={thFilterCell}></th>
-              <th style={thFilterCell}><input style={headerFilterInput} placeholder="filter" value={columnFilters.page} onChange={(e) => setColumnFilters((p) => ({ ...p, page: e.target.value }))} /></th>
-              <th style={thFilterCell}><input style={headerFilterInput} placeholder="filter" value={columnFilters.revision} onChange={(e) => setColumnFilters((p) => ({ ...p, revision: e.target.value }))} /></th>
-              <th style={thFilterCell}><input style={headerFilterInput} placeholder="filter" value={columnFilters.type} onChange={(e) => setColumnFilters((p) => ({ ...p, type: e.target.value }))} /></th>
-              <th style={thFilterCell}><input style={headerFilterInput} placeholder="filter" value={columnFilters.item_no} onChange={(e) => setColumnFilters((p) => ({ ...p, item_no: e.target.value }))} /></th>
-              <th style={thFilterCell}><input style={headerFilterInput} placeholder="filter" value={columnFilters.description} onChange={(e) => setColumnFilters((p) => ({ ...p, description: e.target.value }))} /></th>
-              <th style={thFilterCell}><input style={headerFilterInput} placeholder="filter" value={columnFilters.quantity} onChange={(e) => setColumnFilters((p) => ({ ...p, quantity: e.target.value }))} /></th>
-              <th style={thFilterCell}><input style={headerFilterInput} placeholder="filter" value={columnFilters.unit} onChange={(e) => setColumnFilters((p) => ({ ...p, unit: e.target.value }))} /></th>
-              <th style={thFilterCell}><input style={headerFilterInput} placeholder="filter" value={columnFilters.rate} onChange={(e) => setColumnFilters((p) => ({ ...p, rate: e.target.value }))} /></th>
-              <th style={thFilterCell}><input style={headerFilterInput} placeholder="filter" value={columnFilters.total} onChange={(e) => setColumnFilters((p) => ({ ...p, total: e.target.value }))} /></th>
+              {(["page", "revision", "type"] as const).map(col => !hiddenColumns.has(col) && (
+                <th key={col} style={thFilterCell}>
+                  <input style={headerFilterInput} placeholder="filter" value={columnFilters[col]} onChange={(e) => setColumnFilters((p) => ({ ...p, [col]: e.target.value }))} onKeyDown={(e) => e.stopPropagation()} onFocus={() => { setEditingCell(null); setFocusedCell(null); }} />
+                </th>
+              ))}
+              {visibleEditCols.map(col => (
+                <th key={col} style={thFilterCell}>
+                  <input style={headerFilterInput} placeholder="filter" value={columnFilters[col]} onChange={(e) => setColumnFilters((p) => ({ ...p, [col]: e.target.value }))} onKeyDown={(e) => e.stopPropagation()} onFocus={() => { setEditingCell(null); setFocusedCell(null); }} />
+                </th>
+              ))}
               <th style={thFilterCell}></th>
             </tr>
           </thead>
           <tbody>
-            {filteredRows.map(({ pageKey, row }, rowIdx) => {
+            {displayRows.map((dRow, dispIdx) => {
+              if (dRow.kind === "page_total") {
+                const visFixedCount = (["page", "revision", "type"] as const).filter(c => !hiddenColumns.has(c)).length;
+                const totalColSpan = 1 + visFixedCount + visibleEditCols.length + 1;
+                return (
+                  <tr key={`pt-${dRow.pageKey}`} style={{ background: dRow.isCollection ? "#e3f2fd" : "#e8f5e9" }}>
+                    <td colSpan={totalColSpan} style={{ padding: "4px 10px", borderBottom: "2px solid " + (dRow.isCollection ? "#42a5f5" : "#4caf50"), fontSize: 11, fontWeight: 700 }}>
+                      📄 {dRow.pageLabel} — Page Total: ${formatMoney(dRow.total)}
+                      {dRow.isCollection && <span style={{ color: "#1565c0", marginLeft: 8, fontWeight: 400 }}>(Collection)</span>}
+                    </td>
+                  </tr>
+                );
+              }
+
+              const { rowIdx, pageKey, row } = dRow;
               const isEditing = editingCell?.pageKey === pageKey && editingCell?.rowId === row.id;
               const isCollectionRow = row.type === "collection_entry" || row.type === "collection_cf" || row.type === "collection_total";
               const rowBg = row.type === "notes" ? "#f5f5f5" : isCollectionRow ? "#f0f5ff" : "#fff";
@@ -1320,31 +1523,23 @@ export function BQExportPanel({
               return (
                 <tr key={`${pageKey}-${row.id}`} style={{ background: rowBg, fontStyle: row.type === "notes" ? "italic" : "normal" }}>
                   <td style={{ ...td, color: "#aaa", fontSize: 9, textAlign: "center", width: 28 }}>{rowIdx + 1}</td>
-                  <td style={td}>{row.page_label || `P${row.page_number + 1}`}</td>
-                  <td style={td} title={row.revision}>{row.revision?.slice(0, 10) || ""}</td>
-                  <td style={td}>
-                    <select
-                      value={row.type}
-                      onChange={(e) => {
-                                    handleTypeChange(pageKey, row, e.target.value as BQItemType);
-                      }}
-                      style={{
-                        ...typeTag,
-                        background: getTypeColor(),
-                        border: "none",
-                        cursor: "pointer",
-                        appearance: "none",
-                        WebkitAppearance: "none",
-                        paddingRight: 12,
-                      }}
-                      title="點擊更改類型"
-                    >
-                      {ROW_TYPE_OPTIONS.map((opt) => (
-                        <option key={opt.value} value={opt.value}>{opt.label}</option>
-                      ))}
-                    </select>
-                  </td>
-                  {EDITABLE_COLS.map((field, colIdx) => {
+                  {!hiddenColumns.has("page") && <td style={{ ...td, width: columnWidths["page"] || undefined }}>{row.page_label || `P${row.page_number + 1}`}</td>}
+                  {!hiddenColumns.has("revision") && <td style={{ ...td, width: columnWidths["revision"] || undefined }} title={row.revision}>{row.revision?.slice(0, 10) || ""}</td>}
+                  {!hiddenColumns.has("type") && (
+                    <td style={{ ...td, width: columnWidths["type"] || undefined }}>
+                      <select
+                        value={row.type}
+                        onChange={(e) => handleTypeChange(pageKey, row, e.target.value as BQItemType)}
+                        style={{ ...typeTag, background: getTypeColor(), border: "none", cursor: "pointer", appearance: "none", WebkitAppearance: "none", paddingRight: 12 }}
+                        title="點擊更改類型"
+                      >
+                        {ROW_TYPE_OPTIONS.map((opt) => (
+                          <option key={opt.value} value={opt.value}>{opt.label}</option>
+                        ))}
+                      </select>
+                    </td>
+                  )}
+                  {visibleEditCols.map((field, colIdx) => {
                     const focused = isCellFocused(rowIdx, colIdx);
                     const selected = isCellSelected(rowIdx, colIdx);
                     const editing = isEditing && editingCell!.field === field;
@@ -1358,6 +1553,7 @@ export function BQExportPanel({
                       borderBottom: "1px solid #e0e0e0",
                       borderRight: "1px solid #eee",
                       whiteSpace: isWide ? "normal" : "nowrap",
+                      width: columnWidths[field] || undefined,
                       minWidth: isWide ? 180 : isNum ? 65 : 50,
                       maxWidth: isWide ? 320 : undefined,
                       position: "relative",
@@ -1370,7 +1566,6 @@ export function BQExportPanel({
                       fontWeight: isUserEdited ? 600 : "inherit",
                     };
 
-                    // Special rendering for collection_entry item_no: dropdown with page refs
                     const isCollectionItemField = isCollectionRow && field === "item_no";
 
                     return (
@@ -1382,23 +1577,13 @@ export function BQExportPanel({
                               onChange={(e) => handleCollectionRefChange(pageKey, row.id, e.target.value)}
                               onClick={(e) => e.stopPropagation()}
                               onMouseDown={(e) => e.stopPropagation()}
-                              style={{
-                                flex: 1,
-                                padding: "2px 4px",
-                                fontSize: 11,
-                                border: "1px solid #a8c7fa",
-                                borderRadius: 3,
-                                background: "#f0f5ff",
-                                cursor: "pointer",
-                                minWidth: 80,
-                              }}
+                              style={{ flex: 1, padding: "2px 4px", fontSize: 11, border: "1px solid #a8c7fa", borderRadius: 3, background: "#f0f5ff", cursor: "pointer", minWidth: 80 }}
                               title="Select referenced page"
                             >
                               <option value="">-- 選擇頁面 --</option>
                               {availablePageOptions.map((opt) => (
                                 <option key={opt.value} value={opt.value}>{opt.label}</option>
                               ))}
-                              {/* If current value not in list, still show it */}
                               {row.item_no && !availablePageOptions.some((o) => o.value === row.item_no) && (
                                 <option value={row.item_no}>{row.item_no} (unmatched)</option>
                               )}
@@ -1550,4 +1735,14 @@ const modalBox: React.CSSProperties = {
 
 const modalBtn: React.CSSProperties = {
   padding: "8px 16px", border: "none", borderRadius: 4, color: "#fff", cursor: "pointer", fontSize: 13, fontWeight: 500,
+};
+
+const hideColBtn: React.CSSProperties = {
+  position: "absolute", top: 1, right: 8, cursor: "pointer", fontSize: 8, color: "#999",
+  opacity: 0.5, lineHeight: 1, padding: "1px 2px", borderRadius: 2,
+};
+
+const resizeHandle: React.CSSProperties = {
+  position: "absolute", right: 0, top: 0, bottom: 0, width: 4,
+  cursor: "col-resize", background: "transparent",
 };

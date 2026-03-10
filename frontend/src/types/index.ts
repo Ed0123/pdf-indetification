@@ -108,6 +108,10 @@ export interface BQRow {
   unit: string;                 // Unit (e.g. "Set", "Nr", etc.)
   rate: number | null;          // Unit rate
   total: number | null;         // Total amount
+  trade: string;                // Trade category (user-defined)
+  group: string;                // Group label (user-defined)
+  remark: string;               // User remark text
+  hidden_in_pdf?: boolean;      // Hide this item from PDF output (still in data)
   parent_id?: number | null;     // Parent row ID for sub-items
   // Bounding box for UI highlighting (absolute PDF coordinates)
   bbox_x0?: number;
@@ -126,6 +130,9 @@ export interface BQRow {
     description?: boolean;
     item_no?: boolean;
     unit?: boolean;
+    trade?: boolean;
+    group?: boolean;
+    remark?: boolean;
   };
 }
 

@@ -1,5 +1,7 @@
 # Specification – Web-Based PDF Extraction System
 
+> **Note (2026-03-10):** BQ Export panel enhanced — hide/unhide/resize columns, page total rows, trade/group/remark fields, XLSX export, OCR quota tracking, project-load state cleanup.
+>
 > **Note (2026-03-07):** Documentation reviewed and streamlined. Outdated authentication options (email/password) removed and audit log feature references deleted – these are not implemented.
 
 

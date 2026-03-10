@@ -53,6 +53,7 @@ interface BQOCRPanelProps {
   // optional OCR quota info (from parent App)
   usagePages?: number;
   usageLimit?: number; // -1 = unlimited
+  onRecordUsage?: (pages: number) => Promise<void>; // record OCR usage after extraction
   onBusyChange?: (busy: boolean, message?: string) => void;
 }
 
@@ -75,6 +76,7 @@ export function BQOCRPanel({
   onUpdateBQTemplate,
   usagePages,
   usageLimit,
+  onRecordUsage,
   onBusyChange,
 }: BQOCRPanelProps) {
   // Engine list
@@ -319,6 +321,9 @@ export function BQOCRPanel({
         unit: r.unit,
         rate: r.rate,
         total: r.total,
+        trade: "",
+        group: "",
+        remark: "",
         parent_id: r.parent_id,
         // Bbox for UI highlighting
         bbox_x0: r.bbox_x0,
@@ -360,12 +365,17 @@ export function BQOCRPanel({
       if ((result as any).debug_info) {
         console.log("BQ Extract debug info:", (result as any).debug_info);
       }
+
+      // Record OCR usage for quota tracking
+      if (onRecordUsage) {
+        try { await onRecordUsage(1); } catch (_) { /* ignore */ }
+      }
     } catch (err: any) {
       setError(err.message || "Extraction failed");
     } finally {
       setExtracting(false);
     }
-  }, [selectedFileId, selectedPage, currentBoxes, selectedEngine, hasDataRange, hasColumnBoxes, pageKey, selectedTemplateId, onBQDataChange]);
+  }, [selectedFileId, selectedPage, currentBoxes, selectedEngine, hasDataRange, hasColumnBoxes, pageKey, selectedTemplateId, onBQDataChange, onRecordUsage]);
 
   // Show batch page selector
   const handleShowBatchSelector = useCallback(() => {
@@ -443,6 +453,9 @@ export function BQOCRPanel({
           unit: r.unit,
           rate: r.rate,
           total: r.total,
+          trade: "",
+          group: "",
+          remark: "",
           parent_id: r.parent_id,
           // Bbox for UI highlighting
           bbox_x0: r.bbox_x0,
@@ -487,9 +500,15 @@ export function BQOCRPanel({
       setError(`Processed ${selectedPages.length - failures} of ${selectedPages.length} pages${suffix}`);
     }
 
+    // Record OCR usage for quota tracking
+    const pagesProcessed = selectedPages.length - failures;
+    if (onRecordUsage && pagesProcessed > 0) {
+      try { await onRecordUsage(pagesProcessed); } catch (_) { /* ignore */ }
+    }
+
     setExtracting(false);
     setBatchProgress(null);
-  }, [currentBoxes, selectedEngine, onBQDataChange]);
+  }, [currentBoxes, selectedEngine, onBQDataChange, onRecordUsage]);
 
 
   // Handle template save

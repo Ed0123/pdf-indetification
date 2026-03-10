@@ -1579,6 +1579,9 @@ export default function App() {
         unit: "",
         rate: null,
         total: null,
+        trade: "",
+        group: "",
+        remark: "",
         parent_id: null,
         bbox_x0: refRow.bbox_x0,
         bbox_y0: refRow.bbox_y0,
@@ -2038,6 +2041,15 @@ export default function App() {
               onUpdateBQTemplate={handleUpdateBQTemplate}
               usagePages={usagePages}
               usageLimit={usageLimit}
+              onRecordUsage={async (pages: number) => {
+                try {
+                  const result = await recordUsage(pages);
+                  setUsagePages(result.usage_pages);
+                  setUsageLimit(result.limit);
+                } catch (err) {
+                  console.warn("Usage recording failed:", err);
+                }
+              }}
               onBusyChange={handleChildBusyChange}
             />
           )}
@@ -2119,6 +2131,10 @@ export default function App() {
               onResumeLastSession={handleRestoreLocalSnapshot}
               onStartNewSession={() => {
                 project.loadProject({ pdf_files: [], columns: [], templates: [], selected_file_id: null, selected_page: 1 });
+                setBqPageData({});
+                setBqTemplates([]);
+                setHighlightBox(null);
+                setPdfPageSize(null);
               }}
               onOpenCloudProjects={() => setShowCloudProjects(true)}
               onCreateUpdate={handleCreateSystemUpdate}
