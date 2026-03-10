@@ -54,9 +54,10 @@ interface PageResult {
 
 /** One row per keyword match — for the new results table. */
 interface MatchRow {
+  uid: number;            // unique id for deletion
   pageNum: number;
   keyword: string;
-  contextSnippet: string; // 2 lines before/after with keyword bolded (HTML)
+  contextSnippet: string; // HTML with highlighted keyword
 }
 
 interface TextItem {
@@ -76,6 +77,7 @@ interface PdfSearchExtractPanelProps {
 }
 
 let nextId = 1;
+let nextMatchUid = 1;
 
 function downloadBlob(blob: Blob, filename: string) {
   const url = URL.createObjectURL(blob);
@@ -258,38 +260,39 @@ export function PdfSearchExtractPanel({ isAdmin, onBusyChange }: PdfSearchExtrac
       });
 
       setResults(pageResults);
-      // Build per-keyword-match rows with context snippet
+      // Build per-keyword-match rows — one row per OCCURRENCE (not just per keyword)
       const rows: MatchRow[] = [];
-      const allKws: string[] = [];
-      for (const kw of gwl) allKws.push(kw);
-      for (const rule of activeRules) {
-        for (const kw of parseList(rule.keywords)) allKws.push(kw);
-      }
       for (const pr of pageResults) {
         if (!pr.included) continue;
         const pageText = pages.find(pp => pp.pageNum === pr.pageNum)?.text ?? "";
-        // Split into pseudo-lines (~80 chars each, or by sentence boundaries)
-        const lines = pageText.match(/.{1,80}(?:\s|$)/g) ?? [pageText];
         for (const kw of pr.matchedKeywords) {
-          // Find the first line that contains the keyword
-          let contextHtml = "";
-          const idx = lines.findIndex(l => matchKeyword(l, kw));
-          if (idx >= 0) {
-            const start = Math.max(0, idx - 1);
-            const end = Math.min(lines.length - 1, idx + 1);
-            const snippet = lines.slice(start, end + 1).join("");
-            // Bold the keyword in the snippet
-            if (kw.includes("*") || kw.includes("?")) {
-              const re = wildcardToRegex(kw);
-              contextHtml = snippet.replace(re, (m) => `<b>${m}</b>`);
-            } else {
-              const escaped = kw.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-              contextHtml = snippet.replace(new RegExp(escaped, "gi"), (m) => `<b>${m}</b>`);
-            }
-          } else {
-            contextHtml = pageText.substring(0, 120);
+          // Find ALL occurrences of the keyword in the page text
+          const kwLower = kw.toLowerCase();
+          const isWildcard = kw.includes("*") || kw.includes("?");
+          const re = isWildcard
+            ? new RegExp(wildcardToRegex(kw).source, "gi")
+            : new RegExp(kw.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"), "gi");
+          let match: RegExpExecArray | null;
+          while ((match = re.exec(pageText)) !== null) {
+            // Build context: ~80 chars before and after the match
+            const mStart = match.index;
+            const mEnd = mStart + match[0].length;
+            const ctxStart = Math.max(0, mStart - 80);
+            const ctxEnd = Math.min(pageText.length, mEnd + 80);
+            const before = (ctxStart > 0 ? "..." : "") + pageText.substring(ctxStart, mStart);
+            const matched = pageText.substring(mStart, mEnd);
+            const after = pageText.substring(mEnd, ctxEnd) + (ctxEnd < pageText.length ? "..." : "");
+            // Escape HTML in surrounding text, highlight match
+            const esc = (s: string) => s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+            const contextHtml = `${esc(before)}<mark style="background:#ffe066;color:#c0392b;text-decoration:underline;font-weight:700;padding:0 2px">${esc(matched)}</mark>${esc(after)}`;
+            rows.push({ uid: nextMatchUid++, pageNum: pr.pageNum, keyword: kw, contextSnippet: contextHtml });
+            // Prevent infinite loop on zero-length matches
+            if (match[0].length === 0) re.lastIndex++;
           }
-          rows.push({ pageNum: pr.pageNum, keyword: kw, contextSnippet: contextHtml });
+          // If regex found nothing (shouldn't happen), add a fallback row
+          if (!rows.some(r => r.pageNum === pr.pageNum && r.keyword === kw)) {
+            rows.push({ uid: nextMatchUid++, pageNum: pr.pageNum, keyword: kw, contextSnippet: pageText.substring(0, 120) });
+          }
         }
       }
       setMatchRows(rows);
@@ -305,11 +308,14 @@ export function PdfSearchExtractPanel({ isAdmin, onBusyChange }: PdfSearchExtrac
   }, [file, rules, globalWhitelist, globalBlacklist, extractAllText, onBusyChange]);
 
   // --------------------------------------------------------------------------
-  // Download — extract matching pages with highlights
+  // Download — extract matching pages with highlights (preserving original streams)
   // --------------------------------------------------------------------------
   const handleDownload = useCallback(async () => {
     if (!file || results.length === 0) return;
-    const includedPages = results.filter(r => r.included);
+    // Determine which pages still have active match rows (not deleted by user)
+    const activePageNums = new Set(matchRows.map(r => r.pageNum));
+    // Also include pages from results that are marked included AND still have matches
+    const includedPages = results.filter(r => r.included && activePageNums.has(r.pageNum));
     if (includedPages.length === 0) {
       setStatusMsg("沒有符合條件的頁面可匯出");
       return;
@@ -320,28 +326,34 @@ export function PdfSearchExtractPanel({ isAdmin, onBusyChange }: PdfSearchExtrac
 
     try {
       const data = await file.arrayBuffer();
-      const sourcePdf = await PDFDocument.load(data, { ignoreEncryption: true });
-      const outputPdf = await PDFDocument.create();
+      // Load the source and remove unwanted pages (preserves original streams/fonts/images)
+      const outputPdf = await PDFDocument.load(data, { ignoreEncryption: true });
+      const includedSet = new Set(includedPages.map(p => p.pageNum));
+      // Remove pages in reverse order to keep indices stable
+      const totalPages = outputPdf.getPageCount();
+      for (let i = totalPages - 1; i >= 0; i--) {
+        if (!includedSet.has(i + 1)) {
+          outputPdf.removePage(i);
+        }
+      }
 
-      // Also extract text items for highlighting
+      // Add highlight overlays on remaining pages
       const { pages: textPages } = await extractAllText(data);
-
-      // Build sets of keywords and their colors for highlighting
       const gwl = parseList(globalWhitelist);
       const activeRules = rules.filter(r => r.selected && r.keywords.trim());
 
-      for (const pr of includedPages) {
-        const [copiedPage] = await outputPdf.copyPages(sourcePdf, [pr.pageNum - 1]);
-        outputPdf.addPage(copiedPage);
+      // Map output page index → original page number
+      const outputPages = outputPdf.getPages();
+      const sortedIncluded = [...includedSet].sort((a, b) => a - b);
 
-        // Draw highlights
-        const tp = textPages.find(p => p.pageNum === pr.pageNum);
+      for (let oi = 0; oi < outputPages.length; oi++) {
+        const origPageNum = sortedIncluded[oi];
+        const tp = textPages.find(p => p.pageNum === origPageNum);
         if (!tp) continue;
 
-        const pageObj = outputPdf.getPages()[outputPdf.getPageCount() - 1];
-        const { height: pageHeight } = pageObj.getSize();
+        const pageObj = outputPages[oi];
 
-        // Collect all keyword→color mappings
+        // Collect keyword→color mappings
         const highlights: { keyword: string; color: string; opacity: number }[] = [];
         for (const kw of gwl) {
           highlights.push({ keyword: kw, color: globalWhiteColor, opacity: 0.4 });
@@ -350,7 +362,6 @@ export function PdfSearchExtractPanel({ isAdmin, onBusyChange }: PdfSearchExtrac
           const kws = parseList(rule.keywords);
           const excl = parseList(rule.exclude);
           for (const kw of kws) {
-            // Skip excluded ones
             const isExcluded = excl.some(ex => matchKeyword(kw, ex));
             if (!isExcluded && rule.color) {
               highlights.push({ keyword: kw, color: rule.color, opacity: rule.opacity });
@@ -388,7 +399,7 @@ export function PdfSearchExtractPanel({ isAdmin, onBusyChange }: PdfSearchExtrac
     } finally {
       onBusyChange?.(false);
     }
-  }, [file, results, rules, globalWhitelist, globalWhiteColor, extractAllText, onBusyChange]);
+  }, [file, results, matchRows, rules, globalWhitelist, globalWhiteColor, extractAllText, onBusyChange]);
 
   return (
     <div style={container}>
@@ -513,7 +524,7 @@ export function PdfSearchExtractPanel({ isAdmin, onBusyChange }: PdfSearchExtrac
         <div style={resultsSection}>
           <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 8 }}>
             <h4 style={{ margin: 0, fontSize: 14, fontWeight: 600 }}>
-              結果：{results.filter(r => r.included).length} / {results.length} 頁符合
+              結果：{new Set(matchRows.map(r => r.pageNum)).size} / {results.length} 頁符合（{matchRows.length} 處命中）
             </h4>
             <button
               style={{ ...btnStyle, fontSize: 11, padding: "3px 8px" }}
@@ -532,17 +543,25 @@ export function PdfSearchExtractPanel({ isAdmin, onBusyChange }: PdfSearchExtrac
                     <th style={{ ...th, width: 50 }}>頁碼</th>
                     <th style={{ ...th, width: 100 }}>命中關鍵字</th>
                     <th style={th}>文字上下文</th>
+                    <th style={{ ...th, width: 36 }}></th>
                   </tr>
                 </thead>
                 <tbody>
-                  {matchRows.map((mr, i) => (
-                    <tr key={i} style={{ background: "#eaffea" }}>
+                  {matchRows.map((mr) => (
+                    <tr key={mr.uid} style={{ background: "#eaffea" }}>
                       <td style={{ ...td, textAlign: "center" }}>{mr.pageNum}</td>
                       <td style={{ ...td, fontWeight: 600, color: "#2563eb" }}>{mr.keyword}</td>
                       <td
                         style={{ ...td, lineHeight: 1.5, maxWidth: 0 }}
                         dangerouslySetInnerHTML={{ __html: mr.contextSnippet }}
                       />
+                      <td style={{ ...td, textAlign: "center", padding: 0 }}>
+                        <button
+                          onClick={() => setMatchRows(prev => prev.filter(r => r.uid !== mr.uid))}
+                          title="刪除此結果"
+                          style={{ background: "none", border: "none", color: "#e74c3c", cursor: "pointer", fontSize: 14, padding: "2px 6px" }}
+                        >🗑</button>
+                      </td>
                     </tr>
                   ))}
                 </tbody>
